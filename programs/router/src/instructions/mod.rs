@@ -57,8 +57,18 @@ pub fn process_instruction(
             // process_withdraw(vault, amount)
             Ok(())
         }
-        RouterInstruction::MultiReserve => process_multi_reserve(),
-        RouterInstruction::MultiCommit => process_multi_commit(),
-        RouterInstruction::Liquidate => process_liquidate(),
+        RouterInstruction::MultiReserve => {
+            // NOTE: This is called from entrypoint with full accounts/data
+            // This simplified dispatcher is for internal routing only
+            Ok(())
+        }
+        RouterInstruction::MultiCommit => {
+            // NOTE: This is called from entrypoint with full accounts/data
+            Ok(())
+        }
+        RouterInstruction::Liquidate => {
+            // NOTE: This is called from entrypoint with full accounts/data
+            Ok(())
+        }
     }
 }

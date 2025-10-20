@@ -1,6 +1,6 @@
 //! Multi-reserve instruction - coordinate reserves across multiple slabs
 
-use crate::state::{Escrow, Cap, UserPortfolio};
+use crate::state::{Escrow, Cap, Portfolio};
 use percolator_common::*;
 
 /// Reserve result from a single slab
@@ -37,13 +37,13 @@ pub struct SlabReserveResult {
 /// * `Ok(selected_count)` - Number of slabs selected for execution
 /// * `Err(...)` - If no viable execution path exists
 pub fn process_multi_reserve(
-    portfolio: &mut UserPortfolio,
+    portfolio: &mut Portfolio,
     user_pubkey: &pinocchio::pubkey::Pubkey,
     slab_requests: &[SlabReserveRequest],
     target_qty: u64,
     limit_px: u64,
-    route_id: u64,
-) -> Result<u8, PercolatorError> {
+    _route_id: u64,
+) -> Result<(), PercolatorError> {
     // Validate inputs
     if slab_requests.is_empty() {
         return Err(PercolatorError::InvalidInstruction);
@@ -96,7 +96,9 @@ pub fn process_multi_reserve(
     // Step 5: Cancel non-selected reserves
     // In real implementation, this would be CPI calls to slab.cancel()
     
-    Ok(selected_count)
+    let _ = (portfolio, user_pubkey, selected_count);
+    
+    Ok(())
 }
 
 /// Request for reserving liquidity on a single slab
@@ -196,7 +198,8 @@ pub fn credit_escrow_for_slab(
     escrow: &mut Escrow,
     amount: u128,
 ) -> Result<(), PercolatorError> {
-    escrow.credit(amount)
+    escrow.credit(amount);
+    Ok(())
 }
 
 /// Mint capability token for a selected slab
@@ -218,14 +221,18 @@ pub fn mint_cap_for_selected_slab(
     let expiry_ts = current_ts.saturating_add(capped_ttl);
 
     *cap = Cap {
+        router_id: pinocchio::pubkey::Pubkey::default(),
+        route_id,
         scope_user: user,
         scope_slab: slab,
-        mint,
+        scope_mint: mint,
         amount_max,
         remaining: amount_max,
         expiry_ts,
-        nonce: route_id, // Use route_id as nonce for uniqueness
+        nonce: route_id,
         burned: false,
+        bump: 0,
+        _padding: [0; 6],
     };
 
     Ok(())
@@ -397,9 +404,15 @@ mod tests {
     #[test]
     fn test_credit_escrow_for_slab() {
         let mut escrow = Escrow {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            slab_id: pinocchio::pubkey::Pubkey::default(),
+            user: pinocchio::pubkey::Pubkey::default(),
+            mint: pinocchio::pubkey::Pubkey::default(),
             balance: 1000,
             nonce: 0,
             frozen: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         credit_escrow_for_slab(&mut escrow, 500).unwrap();
@@ -408,7 +421,21 @@ mod tests {
 
     #[test]
     fn test_mint_cap_for_selected_slab() {
-        let mut cap = Cap::default();
+        let mut cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 0,
+            scope_user: pinocchio::pubkey::Pubkey::default(),
+            scope_slab: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
+            amount_max: 0,
+            remaining: 0,
+            expiry_ts: 0,
+            nonce: 0,
+            burned: false,
+            bump: 0,
+            _padding: [0; 6],
+        };
+        
         let user = pinocchio::pubkey::Pubkey::default();
         let slab = pinocchio::pubkey::Pubkey::default();
         let mint = pinocchio::pubkey::Pubkey::default();
@@ -433,7 +460,21 @@ mod tests {
 
     #[test]
     fn test_mint_cap_ttl_capped() {
-        let mut cap = Cap::default();
+        let mut cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 0,
+            scope_user: pinocchio::pubkey::Pubkey::default(),
+            scope_slab: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
+            amount_max: 0,
+            remaining: 0,
+            expiry_ts: 0,
+            nonce: 0,
+            burned: false,
+            bump: 0,
+            _padding: [0; 6],
+        };
+        
         let user = pinocchio::pubkey::Pubkey::default();
         let slab = pinocchio::pubkey::Pubkey::default();
         let mint = pinocchio::pubkey::Pubkey::default();

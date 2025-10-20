@@ -1,6 +1,6 @@
 //! Multi-commit instruction - coordinate commits across multiple slabs
 
-use crate::state::{Cap, UserPortfolio, Escrow};
+use crate::state::{Cap, Portfolio, Escrow};
 use percolator_common::*;
 
 /// Commit result from a single slab
@@ -46,18 +46,18 @@ impl Default for SlabCommitResult {
 /// * `Ok(total_fills)` - Total number of trades executed across all slabs
 /// * `Err(...)` - If commits fail and rollback is triggered
 pub fn process_multi_commit(
-    portfolio: &mut UserPortfolio,
+    portfolio: &mut Portfolio,
     caps: &mut [Cap],
-    escrows: &mut [Escrow],
-    commit_requests: &[SlabCommitRequest],
+    _escrows: &mut [Escrow],
+    _commit_requests: &[SlabCommitRequest],
     current_ts: u64,
-) -> Result<u32, PercolatorError> {
+) -> Result<(), PercolatorError> {
     // Validate inputs
-    if commit_requests.is_empty() {
+    if _commit_requests.is_empty() {
         return Err(PercolatorError::InvalidInstruction);
     }
 
-    let slab_count = core::cmp::min(commit_requests.len(), 8); // Max 8 slabs
+    let slab_count = core::cmp::min(_commit_requests.len(), 8); // Max 8 slabs
 
     // Step 1: Validate all capabilities before starting any commits
     for i in 0..slab_count {
@@ -74,7 +74,7 @@ pub fn process_multi_commit(
         // For now, document the logic
         results[i] = SlabCommitResult {
             slab_index: i as u8,
-            hold_id: commit_requests[i].hold_id,
+            hold_id: _commit_requests[i].hold_id,
             success: true, // Would come from CPI
             fills_count: 0, // Would come from CPI
             total_notional: 0, // Would come from CPI
@@ -96,8 +96,8 @@ pub fn process_multi_commit(
             // Update portfolio exposures
             update_portfolio_exposure(
                 portfolio,
-                commit_requests[i].slab_pubkey,
-                commit_requests[i].instrument_idx,
+                _commit_requests[i].slab_pubkey,
+                _commit_requests[i].instrument_idx,
                 results[i].position_qty,
             )?;
 
@@ -105,13 +105,13 @@ pub fn process_multi_commit(
             caps[i].burned = true;
         }
 
-        Ok(total_fills)
+        Ok(())
     } else {
         // Failure path: rollback everything
         rollback_commits(
             caps,
-            escrows,
-            commit_requests,
+            _escrows,
+            _commit_requests,
             &results,
             slab_count,
         )?;
@@ -150,9 +150,9 @@ fn validate_cap(cap: &Cap, current_ts: u64) -> Result<(), PercolatorError> {
 
 /// Update portfolio with new position exposure
 fn update_portfolio_exposure(
-    portfolio: &mut UserPortfolio,
-    slab_pubkey: [u8; 32],
-    instrument_idx: u16,
+    portfolio: &mut Portfolio,
+    _slab_pubkey: [u8; 32],
+    _instrument_idx: u16,
     position_delta: i64,
 ) -> Result<(), PercolatorError> {
     // In real implementation, this would update portfolio.exposures
@@ -172,7 +172,7 @@ fn update_portfolio_exposure(
 }
 
 /// Recalculate portfolio initial and maintenance margin
-fn recalculate_portfolio_margin(portfolio: &mut UserPortfolio) -> Result<(), PercolatorError> {
+fn recalculate_portfolio_margin(portfolio: &mut Portfolio) -> Result<(), PercolatorError> {
     // In real implementation, this would:
     // 1. Iterate through all exposures
     // 2. Calculate IM/MM for each position
@@ -181,7 +181,7 @@ fn recalculate_portfolio_margin(portfolio: &mut UserPortfolio) -> Result<(), Per
 
     // For now, just ensure non-negative
     if portfolio.im > i128::MAX as u128 {
-        return Err(PercolatorError::InvalidMargin);
+        return Err(PercolatorError::InvalidRiskParams);
     }
 
     Ok(())
@@ -195,8 +195,8 @@ fn recalculate_portfolio_margin(portfolio: &mut UserPortfolio) -> Result<(), Per
 /// 3. Burn capabilities
 fn rollback_commits(
     caps: &mut [Cap],
-    escrows: &mut [Escrow],
-    requests: &[SlabCommitRequest],
+    _escrows: &mut [Escrow],
+    _requests: &[SlabCommitRequest],
     results: &[SlabCommitResult],
     count: usize,
 ) -> Result<(), PercolatorError> {
@@ -236,7 +236,7 @@ pub fn burn_cap_and_refund(
 
     // Refund any remaining amount
     if cap.remaining > 0 {
-        escrow.credit(cap.remaining)?;
+        escrow.credit(cap.remaining);
     }
 
     // Mark as burned
@@ -252,14 +252,18 @@ mod tests {
     #[test]
     fn test_validate_cap_success() {
         let cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 10_000,
             expiry_ts: 2_000_000,
             nonce: 1,
             burned: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         assert!(validate_cap(&cap, 1_000_000).is_ok());
@@ -268,14 +272,18 @@ mod tests {
     #[test]
     fn test_validate_cap_expired() {
         let cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 10_000,
             expiry_ts: 1_000_000,
             nonce: 1,
             burned: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         assert!(validate_cap(&cap, 2_000_000).is_err());
@@ -284,14 +292,18 @@ mod tests {
     #[test]
     fn test_validate_cap_burned() {
         let cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 10_000,
             expiry_ts: 2_000_000,
             nonce: 1,
             burned: true,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         assert!(validate_cap(&cap, 1_000_000).is_err());
@@ -300,14 +312,18 @@ mod tests {
     #[test]
     fn test_validate_cap_no_remaining() {
         let cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 0,
             expiry_ts: 2_000_000,
             nonce: 1,
             burned: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         assert!(validate_cap(&cap, 1_000_000).is_err());
@@ -316,20 +332,30 @@ mod tests {
     #[test]
     fn test_burn_cap_and_refund() {
         let mut cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 3_000,
             expiry_ts: 2_000_000,
             nonce: 1,
             burned: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         let mut escrow = Escrow {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            slab_id: pinocchio::pubkey::Pubkey::default(),
+            user: pinocchio::pubkey::Pubkey::default(),
+            mint: pinocchio::pubkey::Pubkey::default(),
             balance: 5_000,
             nonce: 0,
             frozen: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         burn_cap_and_refund(&mut cap, &mut escrow).unwrap();
@@ -341,20 +367,30 @@ mod tests {
     #[test]
     fn test_burn_cap_and_refund_idempotent() {
         let mut cap = Cap {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            route_id: 1,
             scope_user: pinocchio::pubkey::Pubkey::default(),
             scope_slab: pinocchio::pubkey::Pubkey::default(),
-            mint: pinocchio::pubkey::Pubkey::default(),
+            scope_mint: pinocchio::pubkey::Pubkey::default(),
             amount_max: 10_000,
             remaining: 3_000,
             expiry_ts: 2_000_000,
             nonce: 1,
             burned: true, // Already burned
+            bump: 0,
+            _padding: [0; 6],
         };
 
         let mut escrow = Escrow {
+            router_id: pinocchio::pubkey::Pubkey::default(),
+            slab_id: pinocchio::pubkey::Pubkey::default(),
+            user: pinocchio::pubkey::Pubkey::default(),
+            mint: pinocchio::pubkey::Pubkey::default(),
             balance: 5_000,
             nonce: 0,
             frozen: false,
+            bump: 0,
+            _padding: [0; 6],
         };
 
         // Should succeed but not change anything
@@ -366,14 +402,15 @@ mod tests {
 
     #[test]
     fn test_update_portfolio_exposure_zero_delta() {
-        let mut portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 100_000,
-            im: 10_000,
-            mm: 5_000,
-            free_collateral: 90_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 100_000;
+        portfolio.im = 10_000;
+        portfolio.mm = 5_000;
+        portfolio.free_collateral = 90_000;
 
         let result = update_portfolio_exposure(
             &mut portfolio,
@@ -387,14 +424,15 @@ mod tests {
 
     #[test]
     fn test_recalculate_portfolio_margin() {
-        let mut portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 100_000,
-            im: 10_000,
-            mm: 5_000,
-            free_collateral: 90_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 100_000;
+        portfolio.im = 10_000;
+        portfolio.mm = 5_000;
+        portfolio.free_collateral = 90_000;
 
         let result = recalculate_portfolio_margin(&mut portfolio);
         assert!(result.is_ok());

@@ -1,6 +1,6 @@
 //! Liquidate instruction - coordinate liquidation across slabs
 
-use crate::state::UserPortfolio;
+use crate::state::Portfolio;
 use percolator_common::*;
 
 /// Liquidation result from a single slab
@@ -44,11 +44,11 @@ impl Default for SlabLiquidationResult {
 /// * `Err(NotLiquidatable)` - If account is not underwater
 /// * `Err(...)` - Other errors
 pub fn process_liquidate(
-    liquidatee_portfolio: &mut UserPortfolio,
-    liquidator_portfolio: &mut UserPortfolio,
+    liquidatee_portfolio: &mut Portfolio,
+    liquidator_portfolio: &mut Portfolio,
     max_debt: u128,
     liquidation_fee_bps: u16,
-) -> Result<u128, PercolatorError> {
+) -> Result<(), PercolatorError> {
     // Step 1: Verify account is liquidatable
     if !is_liquidatable(liquidatee_portfolio) {
         return Err(PercolatorError::NotLiquidatable);
@@ -97,20 +97,22 @@ pub fn process_liquidate(
     // Step 7: Update portfolio margin requirements
     recalculate_margin(liquidatee_portfolio)?;
 
-    Ok(total_closed)
+    let _ = total_closed;
+    
+    Ok(())
 }
 
 /// Check if account is eligible for liquidation
 ///
 /// Account is liquidatable if: equity < maintenance margin
-fn is_liquidatable(portfolio: &UserPortfolio) -> bool {
+fn is_liquidatable(portfolio: &Portfolio) -> bool {
     portfolio.equity < portfolio.mm as i128
 }
 
 /// Calculate deficit that needs to be covered
 ///
 /// Deficit = maintenance_margin - equity
-fn calculate_deficit(portfolio: &UserPortfolio) -> u128 {
+fn calculate_deficit(portfolio: &Portfolio) -> u128 {
     if portfolio.equity >= portfolio.mm as i128 {
         return 0;
     }
@@ -129,12 +131,12 @@ fn calculate_deficit(portfolio: &UserPortfolio) -> u128 {
 ///
 /// This calls each slab to close positions until deficit is covered
 fn execute_forced_liquidation(
-    portfolio: &mut UserPortfolio,
+    _portfolio: &mut Portfolio,
     results: &mut [SlabLiquidationResult],
     slab_count: usize,
     target_deficit: u128,
 ) -> Result<u128, PercolatorError> {
-    let mut covered_so_far = 0u128;
+    let covered_so_far = 0u128;
 
     for i in 0..slab_count {
         if covered_so_far >= target_deficit {
@@ -169,7 +171,7 @@ fn calculate_liquidation_reward(
 }
 
 /// Recalculate margin requirements after liquidation
-fn recalculate_margin(portfolio: &mut UserPortfolio) -> Result<(), PercolatorError> {
+fn recalculate_margin(portfolio: &mut Portfolio) -> Result<(), PercolatorError> {
     // In real implementation, this would:
     // 1. Iterate through remaining exposures
     // 2. Calculate new IM/MM based on reduced positions
@@ -177,7 +179,7 @@ fn recalculate_margin(portfolio: &mut UserPortfolio) -> Result<(), PercolatorErr
     
     // For now, ensure non-negative
     if portfolio.im > i128::MAX as u128 {
-        return Err(PercolatorError::InvalidMargin);
+        return Err(PercolatorError::InvalidRiskParams);
     }
 
     // Calculate free collateral
@@ -193,7 +195,7 @@ fn recalculate_margin(portfolio: &mut UserPortfolio) -> Result<(), PercolatorErr
 ///
 /// Returns: (offset_achieved, remaining_deficit)
 pub fn attempt_cross_slab_offset(
-    portfolio: &UserPortfolio,
+    portfolio: &Portfolio,
     deficit: u128,
     grace_window_ms: u64,
     current_ts: u64,
@@ -221,56 +223,60 @@ mod tests {
 
     #[test]
     fn test_is_liquidatable_underwater() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 8_000,  // Below MM
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: -2_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 8_000;  // Below MM
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = -2_000;
 
         assert!(is_liquidatable(&portfolio));
     }
 
     #[test]
     fn test_is_liquidatable_healthy() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 12_000,  // Above MM
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: 2_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 12_000;  // Above MM
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = 2_000;
 
         assert!(!is_liquidatable(&portfolio));
     }
 
     #[test]
     fn test_calculate_deficit() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 8_000,  // MM is 10_000, deficit = 2_000
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: -2_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 8_000;  // MM is 10_000, deficit = 2_000
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = -2_000;
 
         assert_eq!(calculate_deficit(&portfolio), 2_000);
     }
 
     #[test]
     fn test_calculate_deficit_healthy() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 12_000,
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: 2_000,
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 12_000;
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = 2_000;
 
         assert_eq!(calculate_deficit(&portfolio), 0);
     }
@@ -290,23 +296,25 @@ mod tests {
 
     #[test]
     fn test_process_liquidate_not_liquidatable() {
-        let mut liquidatee = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 12_000,  // Healthy
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: 2_000,
-            last_mark_ts: 0,
-        };
+        let mut liquidatee = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        liquidatee.equity = 12_000;  // Healthy
+        liquidatee.im = 15_000;
+        liquidatee.mm = 10_000;
+        liquidatee.free_collateral = 2_000;
 
-        let mut liquidator = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 50_000,
-            im: 0,
-            mm: 0,
-            free_collateral: 50_000,
-            last_mark_ts: 0,
-        };
+        let mut liquidator = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        liquidator.equity = 50_000;
+        liquidator.im = 0;
+        liquidator.mm = 0;
+        liquidator.free_collateral = 50_000;
 
         let result = process_liquidate(
             &mut liquidatee,
@@ -320,14 +328,16 @@ mod tests {
 
     #[test]
     fn test_attempt_cross_slab_offset_grace_window_active() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 8_000,
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: -2_000,
-            last_mark_ts: 1_000_000,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 8_000;
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = -2_000;
+        portfolio.last_mark_ts = 1_000_000;
 
         let result = attempt_cross_slab_offset(
             &portfolio,
@@ -344,14 +354,16 @@ mod tests {
 
     #[test]
     fn test_attempt_cross_slab_offset_grace_window_expired() {
-        let portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 8_000,
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: -2_000,
-            last_mark_ts: 1_000_000,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 8_000;
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = -2_000;
+        portfolio.last_mark_ts = 1_000_000;
 
         let result = attempt_cross_slab_offset(
             &portfolio,
@@ -368,14 +380,15 @@ mod tests {
 
     #[test]
     fn test_recalculate_margin() {
-        let mut portfolio = UserPortfolio {
-            user: pinocchio::pubkey::Pubkey::default(),
-            equity: 12_000,
-            im: 15_000,
-            mm: 10_000,
-            free_collateral: 0, // Will be recalculated
-            last_mark_ts: 0,
-        };
+        let mut portfolio = Portfolio::new(
+            pinocchio::pubkey::Pubkey::default(),
+            pinocchio::pubkey::Pubkey::default(),
+            0,
+        );
+        portfolio.equity = 12_000;
+        portfolio.im = 15_000;
+        portfolio.mm = 10_000;
+        portfolio.free_collateral = 0; // Will be recalculated
 
         recalculate_margin(&mut portfolio).unwrap();
         
