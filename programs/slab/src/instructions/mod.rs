@@ -2,11 +2,13 @@ pub mod reserve;
 pub mod commit;
 pub mod cancel;
 pub mod batch_open;
+pub mod update_funding;
 
 pub use reserve::*;
 pub use commit::*;
 pub use cancel::*;
 pub use batch_open::*;
+pub use update_funding::*;
 
 /// Instruction discriminator
 #[repr(u8)]
@@ -24,4 +26,6 @@ pub enum SlabInstruction {
     Initialize = 4,
     /// Add instrument
     AddInstrument = 5,
+    /// Update funding rate
+    UpdateFunding = 6,
 }
