@@ -11,6 +11,9 @@ const poppins = Poppins({
 export const metadata: Metadata = {
   title: "PERC-o-DEX",
   description: "Decentralized Perpetual Exchange on Solana",
+  icons: {
+    icon: '/favicon.ico',
+  },
 };
 
 export default function RootLayout({
