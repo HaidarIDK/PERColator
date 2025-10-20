@@ -178,7 +178,7 @@ class PercolatorAPIClient {
   // ==========================================
 
   connectWebSocket(
-    onMessage: (data: any) => void,
+    onMessage: (data: unknown) => void,
     onError?: (error: Event) => void
   ): () => void {
     try {

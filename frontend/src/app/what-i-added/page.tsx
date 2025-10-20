@@ -177,7 +177,7 @@ export default function WhatIAddedPage() {
               icon={<Shield className="w-8 h-8" />}
               title="6. Complete Liquidation Engine"
               status="NEW"
-              description="An automatic safety system that closes out losing trades before they can cause bigger problems - like a circuit breaker that protects the whole exchange from someone's bad bet."
+              description="An automatic safety system that closes out losing trades before they can cause bigger problems - like a circuit breaker that protects the whole exchange from someone&apos;s bad bet."
               features={[
                 "Detects underwater accounts automatically",
                 "Closes positions via market orders",
