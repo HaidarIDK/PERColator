@@ -1,0 +1,39 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.exp
+*.lib
+
+# Solana
+test-ledger/
+.anchor/
+
