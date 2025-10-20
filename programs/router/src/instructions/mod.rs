@@ -3,6 +3,7 @@
 pub mod deposit;
 pub mod withdraw;
 pub mod initialize;
+pub mod cap_ops;
 pub mod multi_reserve;
 pub mod multi_commit;
 pub mod liquidate;
@@ -10,6 +11,7 @@ pub mod liquidate;
 pub use deposit::*;
 pub use withdraw::*;
 pub use initialize::*;
+pub use cap_ops::*;
 pub use multi_reserve::*;
 pub use multi_commit::*;
 pub use liquidate::*;

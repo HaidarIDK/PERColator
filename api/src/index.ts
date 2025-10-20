@@ -1,0 +1,67 @@
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import { marketDataRouter } from './routes/marketData';
+import { tradingRouter } from './routes/trading';
+import { userRouter } from './routes/user';
+import { healthRouter } from './routes/health';
+import { initializeSolana } from './services/solana';
+import { startWebSocketServer } from './services/websocket';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Request logging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// Routes
+app.use('/api/health', healthRouter);
+app.use('/api/market', marketDataRouter);
+app.use('/api/trade', tradingRouter);
+app.use('/api/user', userRouter);
+
+// Error handling
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Error:', err);
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal server error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
+});
+
+// Start server
+async function start() {
+  try {
+    // Initialize Solana connection
+    await initializeSolana();
+    console.log('✅ Solana connection initialized');
+
+    // Start HTTP server
+    const server = app.listen(PORT, HOST as any, () => {
+      console.log(`🚀 Percolator API server running on http://${HOST}:${PORT}`);
+      console.log(`📊 Network: ${process.env.SOLANA_NETWORK}`);
+      console.log(`🔗 RPC: ${process.env.SOLANA_RPC_URL}`);
+    });
+
+    // Start WebSocket server
+    startWebSocketServer(server);
+    console.log('🔌 WebSocket server started');
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+start();
+
