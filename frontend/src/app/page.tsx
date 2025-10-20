@@ -4,12 +4,24 @@ import { Particles } from "@/components/ui/particles"
 import { AuroraText } from "@/components/ui/aurora-text"
 import { motion } from "motion/react"
 import { ShimmerButton } from "@/components/ui/shimmer-button"
-import { AnimatedBeam } from "@/components/ui/animated-beam"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { FloatingNavbar } from "@/components/ui/floating-navbar"
 import { cn } from "@/lib/utils"
-import { useRef } from "react"
-import { Router, Wallet, User, Shield, Clock, Zap, Lock, TrendingUp, Layers, Database, Settings } from "lucide-react"
+import { 
+  Router, 
+  Wallet, 
+  User, 
+  Shield, 
+  Clock, 
+  Zap, 
+  Lock, 
+  TrendingUp, 
+  Layers, 
+  Database, 
+  Settings,
+  Code2,
+  Package,
+  Terminal
+} from "lucide-react"
 
 const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description: string }> = ({
   icon,
@@ -49,13 +61,6 @@ const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description:
 );
 
 export default function Home() {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const routerRef = useRef<HTMLDivElement>(null)
-  const vaultRef = useRef<HTMLDivElement>(null)
-  const portfolioRef = useRef<HTMLDivElement>(null)
-  const escrowRef = useRef<HTMLDivElement>(null)
-  const capRef = useRef<HTMLDivElement>(null)
-
   return (
     <div className="relative min-h-screen bg-black overflow-hidden"> 
       <Particles
@@ -143,25 +148,40 @@ export default function Home() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
             <FeatureCard
-              icon={<Zap className="w-7 h-7" />}
-              title="Lightning Fast"
-              description="Ultra-low latency trading with sub-second execution times powered by our optimized memory architecture."
+              icon={<Database className="w-8 h-8" />}
+              title="Unified Memory Architecture"
+              description="Single 10MB account per market containing order book, positions, reservations, and free lists in one cohesive structure."
             />
             <FeatureCard
-              icon={<Lock className="w-7 h-7" />}
-              title="Secure Escrow"
-              description="Advanced escrow system ensures your assets are protected with time-limited access controls and scope restrictions."
+              icon={<Zap className="w-8 h-8" />}
+              title="Ultra-Low Latency"
+              description="Sub-second execution times with O(1) operations and optimized memory pools for maximum trading performance."
             />
             <FeatureCard
-              icon={<TrendingUp className="w-7 h-7" />}
-              title="Cross-Margin"
-              description="Efficient capital utilization with unified margin management across all positions and trading pairs."
+              icon={<Shield className="w-8 h-8" />}
+              title="Advanced Security"
+              description="Capability-based access control with time-limited tokens and anti-replay protection for secure operations."
+            />
+            <FeatureCard
+              icon={<TrendingUp className="w-8 h-8" />}
+              title="Cross-Margin Trading"
+              description="Portfolio-level risk management with cross-slab margin calculations and unified collateral system."
+            />
+            <FeatureCard
+              icon={<Lock className="w-8 h-8" />}
+              title="Anti-Toxicity Mechanisms"
+              description="Kill Band, JIT Penalty, and ARG systems protect against toxic order flow and ensure fair trading."
+            />
+            <FeatureCard
+              icon={<Layers className="w-8 h-8" />}
+              title="Modular Design"
+              description="Router and Slab programs work together seamlessly with clear separation of concerns and responsibilities."
             />
           </div>
         </motion.div>
       </section>
 
-      {/* Data Flow Visualization */}
+      {/* Technical Architecture */}
       <section id="architecture" className="relative z-10 py-32 px-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -169,169 +189,180 @@ export default function Home() {
           transition={{ duration: 0.8, delay: 2.0 }}
           className="max-w-7xl mx-auto"
         >
-          <h2 className="text-5xl md:text-6xl font-bold text-center mb-8">
+          <h2 className="text-5xl md:text-6xl font-bold text-center mb-24">
             <AuroraText
               speed={0.8}
               colors={["#B8B8FF", "#B8B8FF", "#B8B8FF", "#B8B8FF"]}
               className="bg-gradient-to-r from-orange-400 via-yellow-400 to-orange-500 bg-clip-text text-transparent"
             >
-              Data Flow Architecture
+              Technical Architecture
             </AuroraText>
           </h2>
-          
-          <p className="text-lg md:text-xl text-gray-400 text-center mb-16 max-w-3xl mx-auto leading-relaxed">
-            Our unified memory architecture enables seamless data flow between core components, 
-            ensuring efficient cross-margin trading with maximum security and minimal latency.
-          </p>
 
-          <div className="relative w-full max-w-4xl mx-auto flex justify-center items-center">
-            {/* Decorative corner elements */}
-            <div className="absolute -top-2 -left-2 w-4 h-4 border-t-2 border-l-2 border-[#B8B8FF] opacity-60"></div>
-            <div className="absolute -top-2 -right-2 w-4 h-4 border-t-2 border-r-2 border-[#B8B8FF] opacity-60"></div>
-            <div className="absolute -bottom-2 -left-2 w-4 h-4 border-b-2 border-l-2 border-[#B8B8FF] opacity-60"></div>
-            <div className="absolute -bottom-2 -right-2 w-4 h-4 border-b-2 border-r-2 border-[#B8B8FF] opacity-60"></div>
-            
-            {/* Main container */}
-            <div 
-              ref={containerRef}
-              className="relative w-full h-[700px] bg-black/3 border border-[#181825] rounded-2xl overflow-hidden"
-            >
-              <div className="absolute inset-0 bg-gradient-radial from-white/5 via-transparent to-transparent opacity-30"></div>
-              
-              {/* Decorative dots */}
-              
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  ref={routerRef}
-                  className="absolute top-12 left-1/2 transform -translate-x-1/2 bg-[#B8B8FF]/0 backdrop-blur-md text-white rounded-full font-semibold shadow-[0_0_10px_rgba(184,184,255,0.5)] border border-[#B8B8FF]/30 w-20 h-20 flex items-center justify-center z-20 cursor-pointer hover:scale-110 hover:bg-[#B8B8FF]/0 hover:shadow-[0_0_15px_rgba(184,184,255,0.8)] transition-all duration-300"
-                >
-                  <Router className="w-8 h-8" />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
+            {/* Architecture Diagram */}
+            <div className="relative">
+              <div className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-8">
+                <h3 className="text-2xl font-bold text-[#B8B8FF] mb-6 text-center">Solana Program Architecture</h3>
+                
+                {/* Router Program */}
+                <div className="mb-8">
+                  <div className="bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 rounded-xl p-4 mb-4">
+                    <h4 className="text-lg font-bold text-white mb-2">Router Program</h4>
+                    <code className="text-xs text-gray-400">RoutR1VdCpHqj89WEMJhb6TkGT9cPfr1rVjhM3e2YQr</code>
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Vault - Collateral custody per asset</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Escrow - Per-user pledges with anti-replay</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Cap - Time-limited debit tokens (2min TTL)</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Portfolio - Cross-margin tracking</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <div className="p-3">
-                  <h4 className="font-bold text-white mb-2">Router (Custody)</h4>
-                  <p className="text-sm text-gray-300">Central hub managing all data flow and transaction routing across the system</p>
-                </div>
-              </TooltipContent>
-            </Tooltip>
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  ref={vaultRef}
-                  className="absolute top-48 left-20 bg-[#B8B8FF]/0 backdrop-blur-md text-white rounded-full font-semibold shadow-[0_0_10px_rgba(184,184,255,0.5)] border border-[#B8B8FF]/30 w-20 h-20 flex items-center justify-center z-20 cursor-pointer hover:scale-110 hover:bg-[#B8B8FF]/0 hover:shadow-[0_0_15px_rgba(184,184,255,0.8)] transition-all duration-300"
-                >
-                  <Wallet className="w-8 h-8" />
+                {/* Connection Arrow */}
+                <div className="flex justify-center mb-6">
+                  <div className="w-8 h-8 border-2 border-[#B8B8FF] rounded-full flex items-center justify-center">
+                    <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                  </div>
                 </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <div className="p-3">
-                  <h4 className="font-bold text-white mb-2">Vault[USDC]</h4>
-                  <p className="text-sm text-gray-300">Secure storage vault for USDC tokens with multi-signature protection</p>
-                </div>
-              </TooltipContent>
-            </Tooltip>
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  ref={portfolioRef}
-                  className="absolute top-48 right-20 bg-[#B8B8FF]/0 backdrop-blur-md text-white rounded-full font-semibold shadow-[0_0_10px_rgba(184,184,255,0.5)] border border-[#B8B8FF]/30 w-20 h-20 flex items-center justify-center z-20 cursor-pointer hover:scale-110 hover:bg-[#B8B8FF]/0 hover:shadow-[0_0_15px_rgba(184,184,255,0.8)] transition-all duration-300"
-                >
-                  <User className="w-8 h-8" />
+                {/* Slab Program */}
+                <div className="mb-8">
+                  <div className="bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 rounded-xl p-4">
+                    <h4 className="text-lg font-bold text-white mb-2">Slab Program</h4>
+                    <code className="text-xs text-gray-400">SLabZ6PsDLh2X6HzEoqxFDMqCVcJXDKCNEYuPzUvGPk</code>
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>SlabState - 10MB account with 5 memory pools</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Order Book - Price-time priority matching</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Risk Engine - IM/MM calculations</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 bg-[#B8B8FF] rounded-full"></div>
+                        <span>Anti-Toxicity - Kill Band, JIT Penalty, ARG</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <div className="p-3">
-                  <h4 className="font-bold text-white mb-2">Portfolio[User]</h4>
-                  <p className="text-sm text-gray-300">Cross-margin portfolio management system tracking user positions and balances</p>
-                </div>
-              </TooltipContent>
-            </Tooltip>
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  ref={escrowRef}
-                  className="absolute bottom-48 left-32 bg-[#B8B8FF]/0 backdrop-blur-md text-white rounded-full font-semibold shadow-[0_0_10px_rgba(184,184,255,0.5)] border border-[#B8B8FF]/30 w-20 h-20 flex items-center justify-center z-20 cursor-pointer hover:scale-110 hover:bg-[#B8B8FF]/0 hover:shadow-[0_0_15px_rgba(184,184,255,0.8)] transition-all duration-300"
-                >
-                  <Shield className="w-8 h-8" />
+                {/* Memory Layout */}
+                <div className="bg-gradient-to-r from-[#B8B8FF]/5 to-[#B8B8FF]/10 border border-[#B8B8FF]/20 rounded-xl p-4">
+                  <h4 className="text-lg font-bold text-white mb-3">Memory Layout (10MB)</h4>
+                  <div className="grid grid-cols-5 gap-2">
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-xs text-gray-400">Header</div>
+                      <div className="text-xs text-white">64KB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-xs text-gray-400">Orders</div>
+                      <div className="text-xs text-white">2MB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-xs text-gray-400">Reservations</div>
+                      <div className="text-xs text-white">2MB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-xs text-gray-400">Positions</div>
+                      <div className="text-xs text-white">2MB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-xs text-gray-400">Free Lists</div>
+                      <div className="text-xs text-white">2MB</div>
+                    </div>
+                  </div>
                 </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <div className="p-3">
-                  <h4 className="font-bold text-white mb-2">Escrow(User, Slab, Asset)</h4>
-                  <p className="text-sm text-gray-300">Secure escrow system for user assets with restricted access controls</p>
-                </div>
-              </TooltipContent>
-            </Tooltip>
+              </div>
+            </div>
 
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  ref={capRef}
-                  className="absolute bottom-48 right-32 bg-[#B8B8FF]/0 backdrop-blur-md text-white rounded-full font-semibold shadow-[0_0_10px_rgba(184,184,255,0.5)] border border-[#B8B8FF]/30 w-20 h-20 flex items-center justify-center z-20 cursor-pointer hover:scale-110 hover:bg-[#B8B8FF]/0 hover:shadow-[0_0_15px_rgba(184,184,255,0.8)] transition-all duration-300"
-                >
-                  <Clock className="w-8 h-8" />
+            {/* Architecture Details */}
+            <div className="space-y-8">
+              <div>
+                <h3 className="text-3xl font-bold text-white mb-6">Key Design Principles</h3>
+                <div className="space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-6 h-6 rounded-full bg-[#B8B8FF]/20 flex items-center justify-center flex-shrink-0 mt-1">
+                      <Shield className="w-3 h-3 text-[#B8B8FF]" />
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-white mb-1">Safety First</h4>
+                      <p className="text-gray-400">Slabs cannot access Router vaults directly. All debits require unexpired, correctly scoped Caps.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-start gap-3">
+                    <div className="w-6 h-6 rounded-full bg-[#B8B8FF]/20 flex items-center justify-center flex-shrink-0 mt-1">
+                      <Zap className="w-3 h-3 text-[#B8B8FF]" />
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-white mb-1">Ultra-Fast Matching</h4>
+                      <p className="text-gray-400">Price-time priority strictly maintained. O(1) freelist operations for maximum performance.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-start gap-3">
+                    <div className="w-6 h-6 rounded-full bg-[#B8B8FF]/20 flex items-center justify-center flex-shrink-0 mt-1">
+                      <Database className="w-3 h-3 text-[#B8B8FF]" />
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-white mb-1">Memory Efficiency</h4>
+                      <p className="text-gray-400">Single 10MB account per market. No cross-contamination between users or slabs.</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-start gap-3">
+                    <div className="w-6 h-6 rounded-full bg-[#B8B8FF]/20 flex items-center justify-center flex-shrink-0 mt-1">
+                      <Settings className="w-3 h-3 text-[#B8B8FF]" />
+                    </div>
+                    <div>
+                      <h4 className="text-lg font-semibold text-white mb-1">Anti-Toxicity</h4>
+                      <p className="text-gray-400">Kill Band, JIT Penalty, and ARG mechanisms protect against toxic order flow.</p>
+                    </div>
+                  </div>
                 </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <div className="p-3">
-                  <h4 className="font-bold text-white mb-2">Cap(Scope, Amount, Expiry)</h4>
-                  <p className="text-sm text-gray-300">Time-limited debit tokens with scope and amount restrictions for secure operations</p>
-                </div>
-              </TooltipContent>
-            </Tooltip>
+              </div>
 
-            {/* Animated Beams */}
-            <AnimatedBeam
-              containerRef={containerRef}
-              fromRef={routerRef}
-              toRef={vaultRef}
-              curvature={80}
-              duration={4}
-              delay={0}
-              gradientStartColor="#B8B8FF"
-              gradientStopColor="#B8B8FF"
-              pathWidth={3}
-            />
-            <AnimatedBeam
-              containerRef={containerRef}
-              fromRef={routerRef}
-              toRef={portfolioRef}
-              curvature={80}
-              duration={4}
-              delay={0.8}
-              gradientStartColor="#B8B8FF"
-              gradientStopColor="#B8B8FF"
-              pathWidth={3}
-            />
-            <AnimatedBeam
-              containerRef={containerRef}
-              fromRef={routerRef}
-              toRef={escrowRef}
-              curvature={-80}
-              duration={4}
-              delay={1.6}
-              gradientStartColor="#B8B8FF"
-              gradientStopColor="#B8B8FF"
-              pathWidth={3}
-            />
-            <AnimatedBeam
-              containerRef={containerRef}
-              fromRef={routerRef}
-              toRef={capRef}
-              curvature={-80}
-              duration={4}
-              delay={2.4}
-              gradientStartColor="#B8B8FF"
-              gradientStopColor="#B8B8FF"
-              pathWidth={3}
-            />
+              <div className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-xl p-6">
+                <h4 className="text-xl font-bold text-[#B8B8FF] mb-4">Technology Stack</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-white">Pinocchio</div>
+                    <div className="text-sm text-gray-400">Zero-dependency Solana SDK</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-white">Rust</div>
+                    <div className="text-sm text-gray-400">no_std, zero allocations</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-white">Surfpool</div>
+                    <div className="text-sm text-gray-400">Local test validator</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-white">140+ Tests</div>
+                    <div className="text-sm text-gray-400">Comprehensive coverage</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
         </motion.div>
       </section>
 
@@ -342,7 +373,7 @@ export default function Home() {
           animate={{ opacity: 1 }}
           transition={{ duration: 0.8, delay: 2.8 }}
         >
-          © 2024 Percolator AI. Powered by solana.
+          © 2024 PERColator. Powered by Solana.
         </motion.p>
       </footer>
     </div>
