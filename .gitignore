@@ -24,6 +24,10 @@ yarn-error.log*
 .env
 .env.local
 
+# Internal notes (not for GitHub)
+INFO.md
+NOTES.md
+
 # Build artifacts
 *.so
 *.dylib
