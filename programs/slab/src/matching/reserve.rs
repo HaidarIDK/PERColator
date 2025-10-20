@@ -36,13 +36,13 @@ pub fn reserve(
     };
 
     // ANTI-TOXICITY #4: Freeze Window Enforcement
-    // During freeze window, only DLP accounts can take contra liquidity
-    // This prevents JIT liquidity from sniping during batch execution
+    // During freeze window with freeze_levels=0, block all non-DLP reserves completely
+    // Otherwise, Top-K freeze logic in walk_and_reserve handles granular level blocking
     let current_ts = slab.header.current_ts;
-    if current_ts < freeze_until_ms {
-        // Freeze is active - check if account is DLP
+    let freeze_levels = slab.header.freeze_levels;
+    if current_ts < freeze_until_ms && freeze_levels == 0 {
+        // Full freeze is active (no levels accessible) - only DLP can reserve
         if !slab.is_dlp(account_idx) {
-            // Non-DLP accounts cannot reserve during freeze window
             return Err(PercolatorError::OrderFrozen);
         }
     }
@@ -188,10 +188,13 @@ fn walk_and_reserve(
             continue;
         }
 
-        // Check price limit
+        // Check price limit (from taker's perspective)
+        // side here is the MAKER side (contra to taker)
+        // If walking sell orders (maker=Sell), taker is buying: accept if order_price <= limit
+        // If walking buy orders (maker=Buy), taker is selling: accept if order_price >= limit
         let crosses = match side {
-            Side::Buy => order_price <= limit_px,
-            Side::Sell => order_price >= limit_px,
+            Side::Sell => order_price <= limit_px, // Taker buying from sellers
+            Side::Buy => order_price >= limit_px,  // Taker selling to buyers
         };
 
         if !crosses {
@@ -370,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn test_freeze_window_rejects_non_dlp() {
+    fn test_full_freeze_rejects_non_dlp() {
         let mut slab = create_test_slab();
         
         // Create a non-DLP account
@@ -379,9 +382,10 @@ mod tests {
         slab.accounts[account_idx as usize].index = account_idx;
         slab.accounts[account_idx as usize].cash = 1_000_000_000;
         
-        // Set freeze window active
+        // Set freeze window active with freeze_levels=0 (full freeze)
         slab.header.current_ts = 1000;
-        slab.instruments[0].freeze_until_ms = 1100; // Frozen until 1100ms
+        slab.header.freeze_levels = 0; // Full freeze
+        slab.instruments[0].freeze_until_ms = 1100;
         slab.instruments[0].batch_open_ms = 1000;
         
         // Add a maker order
@@ -391,7 +395,7 @@ mod tests {
         
         create_and_insert_order(&mut slab, maker_idx, 0, Side::Sell, 50_000_000, 10, 1000).unwrap();
         
-        // Try to reserve as non-DLP during freeze - should fail
+        // Try to reserve as non-DLP during full freeze - should fail
         let result = reserve(
             &mut slab,
             account_idx,
@@ -405,6 +409,51 @@ mod tests {
         );
         
         assert!(matches!(result, Err(PercolatorError::OrderFrozen)));
+    }
+
+    #[test]
+    fn test_freeze_window_with_levels_allows_non_dlp_beyond_frozen() {
+        let mut slab = create_test_slab();
+        
+        // Create a non-DLP account
+        let account_idx = 0u32;
+        slab.accounts[account_idx as usize].active = true;
+        slab.accounts[account_idx as usize].index = account_idx;
+        slab.accounts[account_idx as usize].cash = 1_000_000_000;
+        
+        // Set freeze window active with freeze_levels > 0 (partial freeze)
+        slab.header.current_ts = 1000;
+        slab.header.freeze_levels = 1; // Only freeze top 1 level
+        slab.instruments[0].freeze_until_ms = 1100; // Frozen until 1100ms
+        slab.instruments[0].batch_open_ms = 1000;
+        
+        // Add a maker order
+        let maker_idx = 1u32;
+        slab.accounts[maker_idx as usize].active = true;
+        slab.accounts[maker_idx as usize].index = maker_idx;
+        
+        // Add orders at 2 price levels
+        create_and_insert_order(&mut slab, maker_idx, 0, Side::Sell, 50_000_000, 10, 1000).unwrap(); // Level 1 (frozen)
+        create_and_insert_order(&mut slab, maker_idx, 0, Side::Sell, 50_100_000, 10, 1000).unwrap(); // Level 2 (not frozen)
+        
+        // Try to reserve as non-DLP during freeze - should succeed from level 2
+        let result = reserve(
+            &mut slab,
+            account_idx,
+            0,
+            Side::Buy,
+            5,
+            50_500_000,
+            10_000,
+            [0u8; 32],
+            12345,
+        );
+        
+        assert!(result.is_ok());
+        let reserve_result = result.unwrap();
+        // Should have filled from level 2 (50.1), skipping frozen level 1
+        assert_eq!(reserve_result.worst_px, 50_100_000);
+        assert_eq!(reserve_result.filled_qty, 5);
     }
 
     #[test]
