@@ -114,6 +114,17 @@ pub fn calculate_mm(qty: i64, contract_size: u64, mark_price: u64, mmr_bps: u64)
     (notional_value * (mmr_bps as u128)) / 10_000
 }
 
+/// Calculate trading fee: notional * fee_bps / 10000
+#[inline]
+pub fn calculate_fee(notional: u128, fee_bps: i64) -> u128 {
+    if fee_bps >= 0 {
+        (notional * (fee_bps as u128)) / 10_000
+    } else {
+        // Negative fee (rebate) handled by caller
+        (notional * ((-fee_bps) as u128)) / 10_000
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

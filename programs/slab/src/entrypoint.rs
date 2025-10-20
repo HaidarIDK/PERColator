@@ -41,6 +41,7 @@ pub fn process_instruction(
         4 => SlabInstruction::Initialize,
         5 => SlabInstruction::AddInstrument,
         6 => SlabInstruction::UpdateFunding,
+        7 => SlabInstruction::Liquidate,
         _ => {
             msg!("Error: Unknown instruction discriminator: {}", discriminator);
             return Err(PercolatorError::InvalidInstruction.into());
@@ -76,6 +77,10 @@ pub fn process_instruction(
         SlabInstruction::UpdateFunding => {
             msg!("Instruction: UpdateFunding");
             handle_update_funding(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::Liquidate => {
+            msg!("Instruction: Liquidate");
+            handle_liquidate(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -468,6 +473,56 @@ fn handle_update_funding(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
         update_funding(slab, instrument_idx, current_ts)?;
         msg!("Updated funding for instrument {} at ts={}", instrument_idx, current_ts);
     }
+
+    Ok(())
+}
+
+/// Handle Liquidate instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Slab state account
+/// 1. `[]` Router program (for validation)
+///
+/// Instruction data:
+/// - account_idx (u32): Account to liquidate
+/// - deficit_target (u128): Deficit amount to cover (16 bytes)
+/// - liquidation_fee_bps (u16): Liquidation fee in basis points
+/// - price_band_bps (u16): Price band limit in basis points
+fn handle_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.is_empty() {
+        msg!("Error: Liquidate instruction requires at least 1 account");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let slab_account = &accounts[0];
+    validate_owner(slab_account, program_id)?;
+    validate_writable(slab_account)?;
+
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
+
+    // Parse instruction data (4 + 16 + 2 + 2 = 24 bytes)
+    if data.len() < 24 {
+        msg!("Error: Invalid Liquidate instruction data length: {}", data.len());
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut offset = 0;
+    let account_idx = read_u32(data, &mut offset)?;
+    let deficit_target = read_u128(data, &mut offset)?;
+    let liquidation_fee_bps = read_u16(data, &mut offset)?;
+    let price_band_bps = read_u16(data, &mut offset)?;
+
+    // Call instruction handler
+    let result = process_liquidation(
+        slab,
+        account_idx,
+        deficit_target,
+        liquidation_fee_bps,
+        price_band_bps,
+    )?;
+
+    msg!("Liquidation executed: closed_qty={}, fee={}, remaining_deficit={}",
+        result.closed_qty, result.liquidation_fee, result.remaining_deficit);
 
     Ok(())
 }

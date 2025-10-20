@@ -3,12 +3,14 @@ pub mod commit;
 pub mod cancel;
 pub mod batch_open;
 pub mod update_funding;
+pub mod liquidate;
 
 pub use reserve::*;
 pub use commit::*;
 pub use cancel::*;
 pub use batch_open::*;
 pub use update_funding::*;
+pub use liquidate::*;
 
 /// Instruction discriminator
 #[repr(u8)]
@@ -28,4 +30,6 @@ pub enum SlabInstruction {
     AddInstrument = 5,
     /// Update funding rate
     UpdateFunding = 6,
+    /// Liquidate underwater account
+    Liquidate = 7,
 }
