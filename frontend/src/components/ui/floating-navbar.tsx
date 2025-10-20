@@ -21,20 +21,18 @@ export function FloatingNavbar() {
   const navItems: NavItem[] = pathname === '/info' 
     ? [
         { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
-        { name: "Features", href: "/#features", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
         { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
       ]
     : pathname === '/what-i-added'
     ? [
         { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
-        { name: "Features", href: "/#features", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
-        { name: "Info", href: "/info", icon: <User className="w-5 h-5" /> },
+        { name: "Read More", href: "/info", icon: <Info className="w-5 h-5" /> },
       ]
     : [
         { name: "Home", href: "#home", icon: <Home className="w-5 h-5" /> },
-        { name: "Features", href: "#features", icon: <Info className="w-5 h-5" /> },
+        { name: "Read More", href: "/info", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "#architecture", icon: <Settings className="w-5 h-5" /> },
         { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
       ]
