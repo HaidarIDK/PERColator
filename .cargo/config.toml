@@ -1,0 +1,6 @@
+# Cargo configuration for Percolator
+
+[env]
+# Increase stack size for tests due to large SlabState (10MB) structures
+RUST_MIN_STACK = "16777216"  # 16MB stack for test threads
+

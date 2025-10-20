@@ -247,6 +247,8 @@ pub struct Reservation {
     pub book_seqno: u64,
     /// Expiry timestamp
     pub expiry_ms: u64,
+    /// Oracle/index price at reserve time (for kill band)
+    pub reserve_oracle_px: u64,
     /// Head of slice linked list
     pub slice_head: u32,
     /// Reservation index
