@@ -4,6 +4,7 @@ pub mod state;
 pub mod instructions;
 pub mod matching;
 pub mod pda;
+pub mod init;
 
 #[cfg(feature = "bpf-entrypoint")]
 mod entrypoint;
@@ -19,6 +20,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 pub use state::*;
+pub use init::*;
 
 // Re-export modules without glob to avoid ambiguous names
 pub use instructions::SlabInstruction;
