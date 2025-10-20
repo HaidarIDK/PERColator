@@ -109,20 +109,15 @@ export default function Home() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 1.6 }}
-            className="flex flex-col sm:flex-row gap-6 justify-center items-center mb-16"
+            className="flex justify-center items-center mb-16"
           >
-             <ShimmerButton className="shadow-2xl">
-              <span className="text-center text-sm leading-none font-medium tracking-tight whitespace-pre-wrap text-white lg:text-lg dark:from-white dark:to-slate-900/10">
-                Shimmer Button
-              </span>
-            </ShimmerButton>
-            
-            <a 
-              href="/info"
-              className="px-8 py-3 rounded-xl bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm"
-            >
-              Read More
-            </a>
+             <a href="/info">
+               <ShimmerButton className="shadow-2xl">
+                 <span className="text-center text-sm leading-none font-medium tracking-tight whitespace-pre-wrap text-white lg:text-lg dark:from-white dark:to-slate-900/10">
+                   Read More
+                 </span>
+               </ShimmerButton>
+             </a>
           </motion.div>
 
         </motion.div>
