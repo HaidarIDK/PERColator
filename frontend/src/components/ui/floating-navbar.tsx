@@ -4,6 +4,7 @@ import { motion } from "motion/react"
 import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
 import { Menu, X, Home, Info, Settings, User } from "lucide-react"
+import { usePathname } from "next/navigation"
 
 interface NavItem {
   name: string
@@ -11,16 +12,25 @@ interface NavItem {
   icon: React.ReactNode
 }
 
-const navItems: NavItem[] = [
-  { name: "Home", href: "#home", icon: <Home className="w-5 h-5" /> },
-  { name: "Features", href: "#features", icon: <Info className="w-5 h-5" /> },
-  { name: "Architecture", href: "#architecture", icon: <Settings className="w-5 h-5" /> },
-  { name: "About", href: "#about", icon: <User className="w-5 h-5" /> },
-]
-
 export function FloatingNavbar() {
   const [isScrolled, setIsScrolled] = useState(false)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+  const pathname = usePathname()
+
+  // Different nav items based on current page
+  const navItems: NavItem[] = pathname === '/info' 
+    ? [
+        { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
+        { name: "Features", href: "/#features", icon: <Info className="w-5 h-5" /> },
+        { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
+        { name: "About", href: "/#about", icon: <User className="w-5 h-5" /> },
+      ]
+    : [
+        { name: "Home", href: "#home", icon: <Home className="w-5 h-5" /> },
+        { name: "Features", href: "#features", icon: <Info className="w-5 h-5" /> },
+        { name: "Architecture", href: "#architecture", icon: <Settings className="w-5 h-5" /> },
+        { name: "About", href: "#about", icon: <User className="w-5 h-5" /> },
+      ]
 
   useEffect(() => {
     const handleScroll = () => {
@@ -31,10 +41,16 @@ export function FloatingNavbar() {
     return () => window.removeEventListener("scroll", handleScroll)
   }, [])
 
-  const scrollToSection = (href: string) => {
-    const element = document.querySelector(href)
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth" })
+  const handleNavClick = (href: string) => {
+    if (href.startsWith('/')) {
+      // External link - navigate to page
+      window.location.href = href
+    } else {
+      // Anchor link - scroll to section
+      const element = document.querySelector(href)
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth" })
+      }
     }
     setIsMobileMenuOpen(false)
   }
@@ -62,7 +78,7 @@ export function FloatingNavbar() {
                   initial={{ opacity: 0, y: -20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.4, delay: 0.7 + index * 0.1 }}
-                  onClick={() => scrollToSection(item.href)}
+                  onClick={() => handleNavClick(item.href)}
                   className="group relative px-4 py-2 rounded-xl text-white hover:text-[#B8B8FF] transition-all duration-300 hover:bg-[#B8B8FF]/10"
                 >
                   <div className="flex items-center space-x-2">
@@ -117,7 +133,7 @@ export function FloatingNavbar() {
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: isMobileMenuOpen ? 1 : 0, x: isMobileMenuOpen ? 0 : -20 }}
                   transition={{ duration: 0.3, delay: index * 0.1 }}
-                  onClick={() => scrollToSection(item.href)}
+                  onClick={() => handleNavClick(item.href)}
                   className="w-full px-4 py-3 text-left text-white hover:text-[#B8B8FF] hover:bg-[#B8B8FF]/10 transition-all duration-300 flex items-center space-x-3"
                 >
                   <div className="text-[#B8B8FF]/60">
