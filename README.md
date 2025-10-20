@@ -5,8 +5,7 @@
 A perpetual exchange protocol on PERCS (Percolator Exchange Resource Coordination System)
 
 **Forked from:** [Toly's Percolator](https://github.com/toly-labs/percolator)  
-**Status:** Ready for devnet deployment  
-**Live Demo:** Coming soon on devnet at https://solscan.io/?cluster=devnet
+
 
 ---
 
@@ -171,24 +170,124 @@ This fork extends Toly's original Percolator with production-ready backend infra
 - Data length validation (prevents buffer overflows)
 - Authority checks (only authorized users can modify state)
 
+**Slab Instruction Handlers:**
+- **Reserve** - Parse 71 bytes: account_idx, instrument_idx, side, qty, limit_px, ttl, commitment_hash, route_id
+- **Commit** - Parse 16 bytes: hold_id, current_ts; execute trades at reserved prices
+- **Cancel** - Parse 8 bytes: hold_id; release reservation
+- **BatchOpen** - Parse 10 bytes: instrument_idx, current_ts; increment epoch, promote pending
+- **Initialize** - Parse 114 bytes: authority, oracle, router, imr, mmr, fees, batch_ms, freeze_levels
+- **AddInstrument** - Parse 40 bytes: symbol, contract_size, tick, lot, index_price
+- **UpdateFunding** - Parse 11 bytes: update_all flag, instrument_idx, current_ts
+- **Liquidate** - Parse 24 bytes: account_idx, deficit_target, fee_bps, band_bps
+
 **Files:** `programs/common/src/serialize.rs`, `programs/slab/src/entrypoint.rs`, `programs/router/src/entrypoint.rs`
 
 ---
 
-### 6. Comprehensive Testing & CI (NEW)
+### 6. Complete Liquidation Engine (NEW)
+
+**Purpose:** Forced closure of underwater positions to protect the system
+
+**What It Does:**
+- Detects underwater accounts (equity < maintenance margin)
+- Closes positions via market orders within price bands
+- Applies liquidation fees to incentivize liquidators
+- Handles partial liquidations (close just enough to restore margin)
+- Realizes PnL on forced closure
+- Updates portfolio state
+
+**Slab-Side Execution:**
+- `execute_liquidation()` - Main coordinator for position closure
+- `close_position()` - Close individual positions via market sweep
+- `execute_liquidation_sweep()` - Walk book within price bands
+- `execute_liquidation_trade()` - Execute single liquidation fill
+- Position list management (removal after close)
+
+**Features:**
+- Price band enforcement (e.g., ±3% from mark) prevents excessive slippage
+- Liquidation fee configurable in basis points (capped at 10%)
+- No maker rebates on liquidations (all fees positive)
+- Sequential position closure until deficit covered
+- Proper PnL realization and cash updates
+
+**Router-Side Coordination:**
+- Underwater account detection
+- Deficit calculation (MM - equity)
+- Cross-slab position offsetting during grace window
+- Forced liquidation distribution across slabs
+- Liquidator reward calculation and transfer
+- Portfolio margin recalculation
+
+**Testing:**
+- 7 liquidation tests (Slab)
+- 11 liquidation tests (Router)
+- Fee calculation validation
+- Price band tests
+- Deficit calculation tests
+- Grace window tests
+- Portfolio update tests
+
+**Files:** `programs/slab/src/matching/liquidate.rs`, `programs/slab/src/instructions/liquidate.rs`, `programs/router/src/instructions/liquidate.rs`
+
+---
+
+### 7. Router Multi-Slab Orchestration (NEW)
+
+**Purpose:** Coordinate trading across multiple liquidity sources for best execution
+
+**What It Does:**
+- Routes orders to multiple slabs simultaneously
+- Selects best execution path based on VWAP
+- Manages escrow and capability tokens
+- Provides atomic rollback on failures
+- Aggregates cross-slab exposures
+
+**Multi-Reserve Orchestration (8 Tests):**
+- Calls reserve() on multiple slabs
+- Sorts results by VWAP (best price first)
+- Greedy selection within price/quantity limits
+- Credits escrow for selected slabs
+- Mints time-limited capability tokens
+- Cancels non-selected reserves
+
+**Multi-Commit Orchestration (10 Tests):**
+- Validates all capability tokens
+- Executes commits sequentially across slabs
+- Atomic rollback if ANY commit fails
+- Updates cross-slab portfolio exposures
+- Recalculates margin requirements
+- Burns caps and refunds escrow
+
+**Key Algorithms:**
+- VWAP selection: O(N log N) sorting for optimal routing
+- Price limit enforcement: Reject slabs outside user's tolerance
+- Atomic semantics: All-or-nothing execution
+- Rollback on failure: Cancel remaining, refund all
+
+**Testing:**
+- 8 multi-reserve tests (sorting, selection, escrow, caps)
+- 10 multi-commit tests (validation, rollback, portfolio)
+- 11 liquidation coordinator tests
+- All edge cases covered
+
+**Files:** `programs/router/src/instructions/multi_reserve.rs`, `programs/router/src/instructions/multi_commit.rs`
+
+---
+
+### 8. Comprehensive Testing & CI (NEW)
 
 **Purpose:** Ensure code quality and catch bugs before deployment
 
 **What It Does:**
-- 93 automated tests across all components
+- 126 automated tests across all components
 - GitHub Actions CI that runs on every push
 - Caching for faster CI runs
 - Tests all critical paths and edge cases
 
 **Test Coverage:**
 - 32 tests: Common library (math, VWAP, PnL, margin, serialization)
-- 12 tests: Router (vault, escrow, caps, portfolio, registry)
-- 49 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding)
+- 38 tests: Router (vault, escrow, caps, portfolio, registry, orchestration, liquidation)
+- 56 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding, liquidation)
 
 **CI Configuration:**
 - Runs on every push and pull request
