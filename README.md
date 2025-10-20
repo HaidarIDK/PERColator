@@ -332,15 +332,15 @@ perc portfolio show
 **Purpose:** Ensure code quality and catch bugs before deployment
 
 **What It Does:**
-- 126 automated tests across all components
+- 140 automated tests across all components
 - GitHub Actions CI that runs on every push
 - Caching for faster CI runs
 - Tests all critical paths and edge cases
 
 **Test Coverage:**
 - 32 tests: Common library (math, VWAP, PnL, margin, serialization)
-- 38 tests: Router (vault, escrow, caps, portfolio, registry, orchestration, liquidation)
-- 56 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding, liquidation)
+- 45 tests: Router (vault, escrow, caps, portfolio, registry, orchestration, liquidation, initialization)
+- 63 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding, liquidation, initialization)
 
 **CI Configuration:**
 - Runs on every push and pull request
