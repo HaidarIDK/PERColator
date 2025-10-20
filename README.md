@@ -98,24 +98,52 @@ This fork extends Toly's original Percolator with production-ready backend infra
 - Tests cover all freeze scenarios, DLP exemptions, expiry conditions
 - Helper functions for realistic test setups
 
-**Files:** `programs/slab/src/matching/commit.rs`, `programs/slab/src/matching/reserve.rs`, `programs/slab/src/instructions/batch_open.rs`
+**Files:** `programs/slab/src/matching/commit.rs`, `programs/slab/src/matching/reserve.rs`, `programs/slab/src/instructions/batch_open.rs`, `programs/slab/src/matching/antitoxic.rs`
 
 ---
 
-### 4. Comprehensive Testing & CI (NEW)
+### 4. Funding Rate System (NEW)
+
+**Purpose:** Periodic funding payments to keep perpetual prices anchored to spot
+
+**What It Does:**
+- Calculates hourly funding rates based on mark-index spread
+- Updates cumulative funding for each instrument
+- Applies funding payments to all open positions automatically
+- Supports multi-instrument updates in a single call
+
+**How It Works:**
+- **Formula:** `rate = k * (mark_price - index_price) / index_price`
+- **Coefficient:** 1 basis point per hour base rate
+- **Rate Cap:** ±500 bps (5%) maximum to prevent extreme funding
+- **Interval:** Updates hourly (3,600,000 ms)
+- **Time-Weighted:** Calculates funding proportional to time elapsed
+- **Position Integration:** Funding applied via cumulative tracking in equity calculations
+
+**Testing:**
+- 8 dedicated funding system tests
+- Tests balanced markets, premium/discount scenarios, multi-instrument updates
+- Validates early call rejection, cumulative tracking accuracy
+- Integration with position PnL calculations
+
+**Files:** `programs/slab/src/matching/funding.rs`, `programs/slab/src/instructions/update_funding.rs`
+
+---
+
+### 5. Comprehensive Testing & CI (NEW)
 
 **Purpose:** Ensure code quality and catch bugs before deployment
 
 **What It Does:**
-- 50 automated tests across all components
+- 89 automated tests across all components
 - GitHub Actions CI that runs on every push
 - Caching for faster CI runs
 - Tests all critical paths and edge cases
 
 **Test Coverage:**
-- 27 tests: Common library (math, VWAP, PnL, margin calculations)
+- 28 tests: Common library (math, VWAP, PnL, margin calculations)
 - 12 tests: Router (vault, escrow, caps, portfolio, registry)
-- 11 tests: Slab (pools, matching, anti-toxicity, reserve/commit)
+- 49 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding)
 
 **CI Configuration:**
 - Runs on every push and pull request
@@ -127,7 +155,7 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 5. Critical Bug Fixes (FIXED)
+### 6. Critical Bug Fixes (FIXED)
 
 **Stack Overflow Fix:**
 - Problem: 10MB SlabState caused test thread stack overflow
@@ -147,7 +175,7 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 6. Documentation (NEW)
+### 7. Documentation (NEW)
 
 **Created:**
 - `WORK_PLAN.md` - Implementation roadmap and architecture details
