@@ -10,7 +10,7 @@ A perpetual exchange protocol on PERCS (Percolator Exchange Resource Coordinatio
 
 ---
 
-## What Haidar Added to This Fork
+## What I Added to This Fork
 
 This fork extends Toly's original Percolator with production-ready backend infrastructure and user-facing capabilities.
 
