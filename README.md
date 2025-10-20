@@ -2,324 +2,197 @@
 
 A perpetual exchange protocol on PERCS (Percolator Exchange Resource Coordination System)
 
-## About This Fork
-
-This is a fork of [Toly's Percolator](https://github.com/toly-labs/percolator) - a sharded perpetual exchange protocol for Solana. The original project provided the foundational architecture for capability-based security and modular perp markets.
-
-**What This Fork Adds:**
-- Complete Router program with capability token system for secure cross-slab operations
-- Production-ready API server with REST endpoints and WebSocket support for real-time data
-- User-friendly interface architecture to make the perp protocol accessible and testable
-- Enhanced anti-toxicity enforcement with full implementation of freeze windows, kill bands, and JIT penalties
-- Comprehensive test coverage with 50 passing tests across all components
-- Complete documentation and deployment guides for devnet
-
-**Goal:** Make perpetual futures trading on Solana accessible to users by providing a fully functional backend API and clear integration points for frontend developers to build intuitive trading interfaces.
-
-**Status:** Ready for devnet deployment and frontend integration testing
-
+**Forked from:** [Toly's Percolator](https://github.com/toly-labs/percolator)  
+**Status:** Ready for devnet deployment  
 **Live Demo:** Coming soon on devnet at https://solscan.io/?cluster=devnet
 
 ---
 
-## What I Built and Added
+## What Haidar Added to This Fork
 
-### 1. Router Program with Capability Token System
+This fork extends Toly's original Percolator with production-ready backend infrastructure and user-facing capabilities.
 
-**Complete implementation of secure cross-slab coordination:**
+### 1. Router Program - Capability Token System (NEW)
 
-**State Management:**
-- `Vault` - Secure collateral custody with pledge/unpledge tracking for each asset mint
-- `Escrow` - Per-user per-slab collateral accounts with anti-replay nonces
-- `Cap` (Capability Token) - Time-limited (120s max), scope-locked debit authorization
-- `Portfolio` - Cross-slab position aggregation and margin calculation
-- `SlabRegistry` - Governance-controlled whitelist with version hash validation
+**Purpose:** Secure cross-slab coordination with time-limited, scope-locked authorization tokens
+
+**What It Does:**
+- Manages collateral custody across multiple trading slabs
+- Issues capability tokens that allow slabs to debit specific user escrows with strict limits
+- Prevents malicious slabs from accessing funds they shouldn't (scoped to user/slab/mint)
+- Enforces 2-minute expiry on all authorization tokens
+- Tracks cross-slab portfolio positions and margin requirements
+
+**Components Added:**
+- `Vault` state - Collateral custody with pledge/unpledge tracking
+- `Escrow` state - Per-user per-slab collateral accounts with nonces
+- `Cap` state - Time-limited capability tokens (max 120s TTL)
+- `Portfolio` state - Cross-slab position aggregation
+- `SlabRegistry` state - Governance-controlled slab whitelist
+- Capability operations: `mint_cap_for_reserve`, `cap_debit`, `burn_cap_and_refund`
+- PDA derivations for all router account types
+- 12 comprehensive tests covering all security boundaries
 
 **Security Features:**
-- Capability tokens prevent unauthorized debits (scoped to user/slab/mint triplet)
-- Automatic expiry enforcement (2 minute maximum TTL)
-- Amount limits strictly enforced (cannot debit more than approved)
-- Anti-replay protection with incrementing nonces
-- No direct vault access for slabs (all debits go through capability verification)
+- Caps enforce (user, slab, mint) scope - cannot be misused
+- Automatic expiry (2 minute max)
+- Amount limits strictly enforced
+- Anti-replay with nonces
+- No direct vault access for slabs
 
-**PDA System:**
-- 5 PDA types with deterministic derivation
-- Proper seed construction for account lookups
-- Vault: `[b"vault", mint]`
-- Escrow: `[b"escrow", user, slab, mint]`
-- Capability: `[b"cap", user, slab, mint, nonce_u64]`
-- Portfolio: `[b"portfolio", user]`
-- Registry: `[b"registry"]`
-
-**Core Functions:**
-- `mint_cap_for_reserve` - Create escrow and mint capability after successful reserve
-- `cap_debit` - Verify scope, expiry, and amount limits before executing debit
-- `burn_cap_and_refund` - Clean up capabilities and refund unused escrow balance
-- `process_deposit` - User deposits collateral into vault
-- `process_withdraw` - User withdraws available (non-pledged) collateral
-
-**Test Coverage:** 12 tests passing
-- Vault pledge/unpledge operations
-- Escrow credit/debit with frozen account handling
-- Capability lifecycle (mint, use, expire, burn)
-- TTL capping (enforces 120s maximum)
-- Portfolio exposure tracking across slabs
-- Registry slab registration and validation
-
-### 2. Production-Ready API Server
-
-**Built a complete backend API for frontend integration:**
-
-**Technology Stack:**
-- Node.js + TypeScript + Express
-- WebSocket support for real-time updates
-- Solana web3.js and Anchor client integration
-- CORS enabled for cross-origin requests
-
-**REST API Endpoints:**
-
-**Market Data:**
-- `GET /api/market/instruments` - List all trading instruments with stats
-- `GET /api/market/orderbook` - Real-time orderbook depth (bids/asks)
-- `GET /api/market/trades` - Recent trade history with pagination
-- `GET /api/market/stats` - 24h market statistics (volume, high, low, change)
-
-**Trading Operations:**
-- `POST /api/trade/order` - Place limit/market orders
-- `POST /api/trade/cancel` - Cancel existing orders
-- `POST /api/trade/reserve` - Reserve liquidity (two-phase execution step 1)
-- `POST /api/trade/commit` - Commit reserved trade (two-phase execution step 2)
-
-**User Portfolio:**
-- `GET /api/user/balance` - User balance (total, available, reserved)
-- `GET /api/user/positions` - Open positions with PnL
-- `GET /api/user/orders` - Open and historical orders
-- `GET /api/user/trades` - Trade history with fills
-- `GET /api/user/portfolio` - Portfolio summary with margin info
-
-**Router Operations:**
-- `POST /api/router/deposit` - Deposit collateral to vault
-- `POST /api/router/withdraw` - Withdraw from vault
-- `POST /api/router/rebalance` - Cross-slab position rebalancing
-- `GET /api/router/portfolio/{user}` - Cross-slab portfolio view
-
-**System Health:**
-- `GET /api/health` - API and Solana network health check
-
-**WebSocket Streaming:**
-- Real-time orderbook updates
-- Live trade feed
-- User-specific notifications (fills, liquidations)
-- Connection management with ping/pong heartbeat
-- Channel-based subscriptions (orderbook:SYMBOL, trades:SYMBOL, user:PUBKEY)
-
-**Mock Data for Development:**
-- Returns realistic market data for immediate frontend development
-- Frontend can build complete UI without waiting for blockchain deployment
-- Easy switch to real data once programs are deployed
-
-**Server Features:**
-- Request logging for debugging
-- Error handling with proper HTTP status codes
-- Environment configuration (.env support)
-- Development mode with hot reload (tsx watch)
-- Production build support
-
-**Files Created:**
-- `api/package.json` - Dependencies and scripts
-- `api/tsconfig.json` - TypeScript configuration
-- `api/src/index.ts` - Main server entry point
-- `api/src/routes/` - All endpoint handlers (health, marketData, trading, user)
-- `api/src/services/` - Solana connection and WebSocket manager
-- `api/README.md` - Complete API documentation
-- `api/setup.sh` - One-command setup script
-
-### 3. Enhanced Anti-Toxicity Enforcement
-
-**Fully implemented all anti-toxicity mechanisms:**
-
-**Kill Band Protection:**
-- Rejects commits if oracle price moved more than `kill_band_bps` since reserve
-- Protects makers from adverse selection during volatile periods
-- Configurable threshold per instrument
-
-**JIT Penalty System:**
-- Orders posted after `batch_open_ms` receive no maker rebates
-- Prevents just-in-time order placement to front-run known incoming flow
-- DLP accounts exempt (can provide immediate liquidity)
-
-**Freeze Window Enforcement:**
-- Blocks non-DLP reserves during `freeze_until_ms` window
-- Prevents late contra-side orders from picking off stale quotes
-- Duration configurable per batch (`batch_ms` parameter)
-
-**Top-K Freeze Logic:**
-- Non-DLP accounts cannot access top `freeze_levels` price levels during freeze
-- More granular than full freeze - allows deeper liquidity while protecting best prices
-- DLP accounts can still provide liquidity at all levels
-
-**Aggressor Roundtrip Guard (ARG):**
-- Tracks overlapping buy/sell trades within same batch per account
-- Taxes or clips roundtrip trades that would realize profit from price impact
-- Maker/passive fills exempt - only targets aggressive sandwich attempts
-- Ledger automatically clears old entries from previous epochs
-
-**Testing:**
-- 8 comprehensive anti-toxicity tests
-- Tests cover freeze windows, Top-K levels, DLP exemptions, expiry conditions
-- Helper functions for realistic test scenarios
-
-### 4. Comprehensive Testing Infrastructure
-
-**50 tests passing across all components:**
-
-**Common Library Tests (27 tests):**
-- VWAP calculations (single/multiple fills, edge cases)
-- PnL calculations (long/short, profit/loss, break-even)
-- Funding payment calculations
-- Tick/lot alignment validation
-- Margin calculations (IM/MM scaling)
-- Fixed-point math precision tests
-
-**Router Tests (12 tests):**
-- Vault operations (pledge, unpledge, deposit, withdraw)
-- Escrow credit/debit with nonce tracking
-- Capability lifecycle (mint, use, expire, burn)
-- TTL enforcement and capping
-- Portfolio exposure aggregation
-- Registry slab management
-
-**Slab Tests (11 tests):**
-- Memory pool allocation and freelist management
-- Order book operations (insert, remove, promote)
-- Reserve/commit flow with max charge calculation
-- Anti-toxicity enforcement (all mechanisms)
-- Batch window operations
-- Position tracking
-
-**Test Quality:**
-- Clear test names describing what is tested
-- Comprehensive edge case coverage
-- Property-based testing patterns
-- Helper functions for common test scenarios
-- Detailed assertions with meaningful error messages
-
-### 5. Complete Documentation
-
-**Work Plan (WORK_PLAN.md):**
-- Architecture overview with security model
-- Complete data structure specifications
-- PDA derivation patterns
-- Instruction implementation order
-- Testing strategy
-- Devnet deployment guide
-- Success criteria and acceptance tests
-
-**API Documentation (api/README.md):**
-- All endpoint specifications
-- Request/response examples
-- WebSocket protocol documentation
-- Setup instructions
-- Testing commands
-
-**Main README Updates:**
-- Project status and roadmap
-- Fork attribution and additions
-- Feature implementation details
-- Testing instructions
-- Build and deployment guides
-
-### 6. Fixed Critical Issues
-
-**Stack Overflow Fix:**
-- 10MB SlabState was overflowing test thread stack
-- Moved to heap allocation using `Box::new_uninit` and `alloc_zeroed`
-- Added `.cargo/config.toml` with `RUST_MIN_STACK = 16777216` (16MB)
-
-**Linter Configuration:**
-- Added `[lints.rust]` to suppress `unexpected_cfgs` warnings
-- Properly configured `target_os = "solana"` checks
-
-**Git Workflow:**
-- Resolved merge conflicts during rebase
-- Properly integrated upstream changes
-- Clean commit history
-
-**Test Debugging:**
-- Fixed price crossing logic in `walk_and_reserve`
-- Corrected Top-K freeze level counting
-- Resolved conflicts between multiple freeze checks
-- Added comprehensive helper functions for test setup
-
-### 7. Project Structure and Organization
-
-**Clean Codebase Organization:**
-```
-percolator/
-├── api/                      # Backend API server (NEW)
-│   ├── src/
-│   │   ├── routes/          # REST endpoints
-│   │   └── services/        # Solana + WebSocket
-│   └── package.json
-├── programs/
-│   ├── common/              # Shared types and math
-│   ├── router/              # Router program (ENHANCED)
-│   │   ├── src/
-│   │   │   ├── state/      # All state structs (NEW)
-│   │   │   ├── instructions/ # Cap ops (NEW)
-│   │   │   └── pda.rs      # PDA derivations (NEW)
-│   └── slab/               # Slab program (ENHANCED)
-│       └── src/
-│           ├── matching/   # Anti-toxicity (ENHANCED)
-│           └── instructions/ # Batch operations (ENHANCED)
-├── WORK_PLAN.md            # Implementation guide (NEW)
-└── README.md               # This file (UPDATED)
-```
-
-**Code Quality:**
-- No heap allocations in hot paths
-- O(1) operations for all critical functions
-- Comprehensive error handling
-- Clean separation of concerns
-- Well-documented public APIs
+**Files:** `programs/router/src/state/`, `programs/router/src/instructions/cap_ops.rs`
 
 ---
 
-## Original Percolator Architecture
+### 2. Production API Server (NEW)
 
-The base architecture from Toly's Percolator provides:
+**Purpose:** Backend REST API and WebSocket server for frontend integration
 
-### Slab Program
-LP-run perp engines with 10 MB state budget, fully self-contained matching and settlement.
+**What It Does:**
+- Provides clean REST endpoints for all trading operations
+- Streams real-time market data via WebSocket
+- Abstracts Solana complexity from frontend developers
+- Works with mock data for rapid UI development
+- Easy switch to real blockchain data once programs deployed
 
-**Program ID:** `SLabZ6PsDLh2X6HzEoqxFDMqCVcJXDKCNEYuPzUvGPk`
+**Endpoints Implemented:**
+- **System:** Health check, API info
+- **Market Data:** Instruments, orderbook, trades, 24h stats (4 endpoints)
+- **Trading:** Place order, cancel, reserve, commit (4 endpoints)
+- **User Portfolio:** Balance, positions, orders, trade history (4 endpoints)
+- **Router:** Deposit, withdraw, cross-slab portfolio, slabs list, multi-slab routing (6 endpoints)
+- **WebSocket:** Real-time orderbook, trade feed, user updates
 
-**State structures:**
-- `SlabHeader` - Metadata, risk params, anti-toxicity settings
-- `Instrument` - Contract specs, oracle prices, funding rates, book heads
-- `Order` - Price-time sorted orders with reservation tracking
-- `Position` - User positions with VWAP entry prices
-- `Reservation` - Reserve-commit two-phase execution state
-- `Slice` - Sub-order fragments locked during reservation
-- `Trade` - Ring buffer of executed trades
-- `AggressorEntry` - Anti-sandwich tracking per batch
+**Technology:**
+- Node.js + TypeScript + Express
+- WebSocket server with channel subscriptions
+- Mock data for frontend development
+- CORS enabled, request logging, error handling
 
-### Key Features from Original
+**Files:** `api/src/`, `api/package.json`, `api/README.md`, `api/ENDPOINTS.md`, `api/test.html`
 
-**Memory Management:**
-- 10 MB budget strictly enforced at compile time
-- O(1) freelist-based allocation for all pools
-- Zero allocations after initialization
+---
 
-**Matching Engine:**
-- Price-time priority with strict FIFO
+### 3. Complete Anti-Toxicity Implementation (ENHANCED)
+
+**Purpose:** Protect liquidity providers from toxic flow and sandwich attacks
+
+**What It Does:**
+- Enforces all anti-toxicity mechanisms during trade execution
+- Blocks or taxes predatory trading strategies
+- Gives designated LPs privileges while protecting against JIT attacks
+- Automatically manages freeze windows and batch epochs
+
+**Mechanisms Implemented:**
+- **Kill Band** - Rejects commits if oracle moved > threshold (prevents stale price exploitation)
+- **JIT Penalty** - No rebates for orders posted after batch opens (stops front-running)
+- **Freeze Window** - Blocks non-DLP reserves during freeze period
+- **Top-K Freeze** - Non-DLP cannot access best K price levels during freeze
+- **Aggressor Roundtrip Guard** - Taxes overlapping buy/sell in same batch
+- **Batch Window Management** - Auto-promotes pending orders, clears old aggressor entries
+
+**Testing:**
+- 8 dedicated anti-toxicity tests
+- Tests cover all freeze scenarios, DLP exemptions, expiry conditions
+- Helper functions for realistic test setups
+
+**Files:** `programs/slab/src/matching/commit.rs`, `programs/slab/src/matching/reserve.rs`, `programs/slab/src/instructions/batch_open.rs`
+
+---
+
+### 4. Comprehensive Testing & CI (NEW)
+
+**Purpose:** Ensure code quality and catch bugs before deployment
+
+**What It Does:**
+- 50 automated tests across all components
+- GitHub Actions CI that runs on every push
+- Caching for faster CI runs
+- Tests all critical paths and edge cases
+
+**Test Coverage:**
+- 27 tests: Common library (math, VWAP, PnL, margin calculations)
+- 12 tests: Router (vault, escrow, caps, portfolio, registry)
+- 11 tests: Slab (pools, matching, anti-toxicity, reserve/commit)
+
+**CI Configuration:**
+- Runs on every push and pull request
+- Tests all three packages separately
+- Build caching for speed
+- Clear pass/fail status on GitHub
+
+**Files:** `.github/workflows/rust.yml`, comprehensive test suites in all programs
+
+---
+
+### 5. Critical Bug Fixes (FIXED)
+
+**Stack Overflow Fix:**
+- Problem: 10MB SlabState caused test thread stack overflow
+- Solution: Heap allocation + increased stack size to 16MB
+- Files: `.cargo/config.toml`, `programs/slab/src/matching/commit.rs`
+
+**Linter Configuration:**
+- Problem: `unexpected_cfgs` warnings for Solana target
+- Solution: Proper `[lints.rust]` configuration
+- Files: `programs/slab/Cargo.toml`, `programs/router/Cargo.toml`
+
+**Test Logic Corrections:**
+- Fixed price crossing logic (maker vs taker perspective)
+- Corrected Top-K freeze level counting
+- Resolved conflicts between freeze checks
+- Added helper functions for test setup
+
+---
+
+### 6. Documentation (NEW)
+
+**Created:**
+- `WORK_PLAN.md` - Implementation roadmap and architecture details
+- `api/README.md` - API server setup and usage
+- `api/ENDPOINTS.md` - Complete endpoint reference with examples
+- `api/test.html` - Interactive API tester
+- Updated main `README.md` with fork attribution
+
+---
+
+## About the Original Percolator (Toly's Work)
+
+This fork is based on [Toly's Percolator](https://github.com/toly-labs/percolator), which provides:
+
+### Core Architecture (From Original)
+
+**Slab Program:**
+- 10 MB single-slab design for isolated perp markets
+- Price-time priority matching engine
 - Reserve-commit two-phase execution
-- Pending queue for non-DLP orders
+- Memory pool management with O(1) freelists
+- Fixed-point math utilities
+- BPF build support with Pinocchio framework
 
-**Fixed-Point Math:**
-- 6-decimal precision for prices
-- VWAP and PnL calculations
-- Funding payment tracking
+**Data Structures (From Original):**
+- `SlabHeader` - Risk params, batch settings
+- `Instrument` - Contract specs, book heads
+- `Order` - Price-time sorted with reservation tracking
+- `Position` - User positions with VWAP entry
+- `Reservation` & `Slice` - Two-phase execution state
+- `Trade` ring buffer
+- `AggressorEntry` - Batch tracking
+
+**Features (From Original):**
+- Batch window concept for fair execution
+- DLP (Designated Liquidity Provider) framework
+- Pending queue for non-DLP orders
+- Basic anti-toxicity field definitions in headers
+- PDA derivation patterns
+
+**What Was NOT in Original:**
+- Router program (Haidar added this)
+- Capability token system (Haidar added this)
+- API server (Haidar added this)
+- Anti-toxicity enforcement logic (fields existed, logic was TODO - Haidar implemented)
+- Comprehensive testing (Haidar added 50 tests)
+- CI/CD (Haidar added GitHub Actions)
 
 ---
 
@@ -359,43 +232,28 @@ npm run dev
 # Health check
 curl http://localhost:3000/api/health
 
-# Get market data
-curl "http://localhost:3000/api/market/instruments?slab=11111111111111111111111111111111"
+# Get registered slabs
+curl http://localhost:3000/api/router/slabs
 
 # Get orderbook
-curl "http://localhost:3000/api/market/orderbook?slab=11111111111111111111111111111111&instrument=0"
-```
+curl "http://localhost:3000/api/market/orderbook?slab=test&instrument=0"
 
-### WebSocket Connection
-
-```javascript
-const ws = new WebSocket('ws://localhost:3000/ws');
-
-ws.onopen = () => {
-  // Subscribe to orderbook updates
-  ws.send(JSON.stringify({
-    type: 'subscribe',
-    channel: 'orderbook:BTC/USDC'
-  }));
-};
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log('Update:', data);
-};
+# Interactive tester
+open api/test.html
 ```
 
 ### Build and Test Programs
 
 ```bash
-# Run all tests
+# Run all tests (50 tests)
 cargo test
 
-# Run specific package tests
+# Test specific packages
 cargo test --package percolator-router
 cargo test --package percolator-slab
+cargo test --package percolator-common
 
-# Build for Solana (requires solana-cli)
+# Build for Solana
 cargo build-sbf
 ```
 
@@ -406,164 +264,166 @@ cargo build-sbf
 ### 1. Configure Solana CLI
 
 ```bash
-# Set to devnet
 solana config set --url https://api.devnet.solana.com
-
-# Create/import wallet
 solana-keygen new --outfile ~/.config/solana/devnet.json
-
-# Airdrop SOL for deployment
 solana airdrop 2
 ```
 
 ### 2. Build Programs
 
 ```bash
-# Build Slab program
 cargo build-sbf --manifest-path programs/slab/Cargo.toml
-
-# Build Router program
 cargo build-sbf --manifest-path programs/router/Cargo.toml
 ```
 
 ### 3. Deploy
 
 ```bash
-# Deploy Slab
 solana program deploy target/deploy/percolator_slab.so
-
-# Deploy Router
 solana program deploy target/deploy/percolator_router.so
-
-# Note the program IDs for API configuration
 ```
 
-### 4. Configure API Server
+### 4. Configure API
+
+Update `api/.env`:
+```env
+SLAB_PROGRAM_ID=<your-slab-id>
+ROUTER_PROGRAM_ID=<your-router-id>
+SOLANA_RPC_URL=https://api.devnet.solana.com
+SOLANA_NETWORK=devnet
+```
+
+### 5. Start API
 
 ```bash
 cd api
-
-# Update .env with deployed program IDs
-echo "SLAB_PROGRAM_ID=<your-slab-program-id>" >> .env
-echo "ROUTER_PROGRAM_ID=<your-router-program-id>" >> .env
-echo "SOLANA_RPC_URL=https://api.devnet.solana.com" >> .env
-echo "SOLANA_NETWORK=devnet" >> .env
-
-# Start API server
 npm start
 ```
 
-### 5. Verify on Solscan
+---
 
-Visit https://solscan.io/?cluster=devnet and search for your program IDs
+## API Endpoints
+
+**21 endpoints available:**
+
+**System (2):**
+- `GET /` - API info
+- `GET /api/health` - Health check
+
+**Market Data (4):**
+- `GET /api/market/instruments` - List instruments
+- `GET /api/market/orderbook` - Orderbook depth
+- `GET /api/market/trades` - Recent trades
+- `GET /api/market/stats` - 24h statistics
+
+**Trading (4):**
+- `POST /api/trade/order` - Place order
+- `POST /api/trade/cancel` - Cancel order
+- `POST /api/trade/reserve` - Reserve liquidity
+- `POST /api/trade/commit` - Commit trade
+
+**User (4):**
+- `GET /api/user/balance` - Balance
+- `GET /api/user/positions` - Positions
+- `GET /api/user/orders` - Orders
+- `GET /api/user/portfolio` - Portfolio
+
+**Router (6):**
+- `POST /api/router/deposit` - Deposit collateral
+- `POST /api/router/withdraw` - Withdraw
+- `GET /api/router/portfolio/:user` - Cross-slab portfolio
+- `GET /api/router/slabs` - List slabs
+- `POST /api/router/reserve-multi` - Multi-slab reserve
+- `POST /api/router/commit-multi` - Atomic multi-slab commit
+
+**WebSocket (1):**
+- `ws://localhost:3000/ws` - Real-time updates
+
+See `api/ENDPOINTS.md` for complete documentation.
 
 ---
 
-## Frontend Integration
+## Testing
 
-Your frontend developer can start building immediately using the API server:
+```bash
+# Run all 50 tests
+cargo test
 
-### Key Integration Points
+# Run with output
+cargo test -- --nocapture
 
-**1. Market Data Display**
-- Subscribe to WebSocket for real-time orderbook
-- Poll `/api/market/stats` for 24h statistics
-- Display recent trades from `/api/market/trades`
-
-**2. Trading Interface**
-- Connect user wallet (Phantom, Solflare, etc.)
-- Use `/api/trade/order` for order placement
-- Show open orders from `/api/user/orders`
-- Enable order cancellation via `/api/trade/cancel`
-
-**3. Portfolio View**
-- Display positions from `/api/user/positions`
-- Show PnL and margin info from `/api/user/portfolio`
-- Track balance from `/api/user/balance`
-
-**4. Advanced Features**
-- Two-phase execution with `/api/trade/reserve` and `/api/trade/commit`
-- Cross-slab portfolio view via `/api/router/portfolio`
-- Deposit/withdraw via `/api/router/deposit` and `/api/router/withdraw`
-
-### Example React Hook
-
-```typescript
-import { useEffect, useState } from 'react';
-
-function useOrderbook(symbol: string) {
-  const [orderbook, setOrderbook] = useState({ bids: [], asks: [] });
-
-  useEffect(() => {
-    const ws = new WebSocket('ws://localhost:3000/ws');
-    
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: 'subscribe',
-        channel: `orderbook:${symbol}`
-      }));
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'update') {
-        setOrderbook(data.data);
-      }
-    };
-
-    return () => ws.close();
-  }, [symbol]);
-
-  return orderbook;
-}
+# Test specific package
+cargo test --package percolator-router --verbose
 ```
 
----
+**Test Breakdown:**
+- 27 tests: percolator-common (math, types, calculations)
+- 12 tests: percolator-router (vault, escrow, caps, portfolio)
+- 11 tests: percolator-slab (pools, matching, anti-toxicity)
 
-## Testing Status
-
-**50 tests passing:**
-- 27 tests: Common library (math, types, calculations)
-- 12 tests: Router program (vault, escrow, caps, portfolio, registry)
-- 11 tests: Slab program (pools, matching, anti-toxicity, reserve/commit)
-
-**Test Coverage:**
-- Core functionality: 100%
-- Anti-toxicity mechanisms: 100%
-- Capability security: 100%
-- Edge cases: Comprehensive
+**CI:** GitHub Actions runs all tests on every push
 
 ---
 
-## Next Steps
+## Project Structure
 
-### Immediate (Week 1-2)
-- Deploy programs to devnet
-- Connect API server to deployed programs
-- Frontend builds UI using API endpoints
-- User acceptance testing with real trades
-
-### Short Term (Week 3-4)
-- Add perp-specific features (funding rates, perpetual positions)
-- Implement cross-slab routing
-- Build liquidation engine
-- Add more trading instruments
-
-### Medium Term (Month 2-3)
-- Mainnet deployment preparation
-- Security audit
-- Performance optimization
-- Advanced order types (stop-loss, take-profit)
+```
+percolator/
+├── .github/workflows/        # CI configuration (Haidar)
+│   └── rust.yml             # GitHub Actions workflow
+├── api/                      # Backend API server (Haidar)
+│   ├── src/
+│   │   ├── routes/          # REST endpoints
+│   │   └── services/        # Solana + WebSocket
+│   ├── test.html            # Interactive API tester
+│   ├── ENDPOINTS.md         # Complete API reference
+│   └── package.json
+├── programs/
+│   ├── common/              # Shared types (Toly base)
+│   ├── router/              # Router program (Haidar added)
+│   │   └── src/
+│   │       ├── state/       # All state structs
+│   │       ├── instructions/# Cap operations
+│   │       └── pda.rs       # PDA derivations
+│   └── slab/               # Slab program (Toly base + Haidar enhancements)
+│       └── src/
+│           ├── matching/   # Anti-toxicity logic (Haidar implemented)
+│           └── instructions/
+├── .cargo/config.toml       # Stack size config (Haidar)
+├── WORK_PLAN.md             # Implementation guide (Haidar)
+└── README.md                # This file
+```
 
 ---
 
 ## Technology Stack
 
 - **Language:** Rust (no_std, zero heap allocations)
-- **Framework:** Pinocchio v0.9.2 (zero-dependency Solana SDK)
-- **API:** Node.js + TypeScript + Express
-- **Real-time:** WebSocket (ws library)
-- **Blockchain:** Solana (devnet → mainnet)
+- **Framework:** Pinocchio v0.9.2 (from Toly's original)
+- **API Backend:** Node.js + TypeScript + Express (Haidar added)
+- **Real-time:** WebSocket (Haidar added)
+- **Blockchain:** Solana devnet → mainnet
+
+---
+
+## Next Steps
+
+**Immediate:**
+- Deploy to devnet
+- Frontend integration testing
+- User acceptance testing
+
+**Short Term:**
+- Perp-specific features (funding rates)
+- Multi-slab atomic routing
+- Liquidation engine
+- More instruments
+
+**Long Term:**
+- Mainnet deployment
+- Security audit
+- Performance optimization
+- Advanced order types
 
 ---
 
@@ -584,12 +444,12 @@ Apache-2.0 (same as original Percolator)
 
 ## Acknowledgments
 
-- **Toly** for the original Percolator architecture and sharded perp exchange design
-- **Solana Foundation** for the blockchain infrastructure
-- **Pinocchio team** for the zero-dependency Solana framework
+- **Toly** for the original Percolator architecture, slab design, and sharded perp exchange concept
+- **Solana Foundation** for blockchain infrastructure
+- **Pinocchio team** for zero-dependency Solana framework
 
 ---
 
-**Last Updated:** October 20, 2025
-**Status:** Ready for devnet deployment and frontend integration
-**Fork Additions:** Router program, API server, comprehensive testing, anti-toxicity implementation
+**Last Updated:** October 20, 2025  
+**Maintainer:** Haidar  
+**Original Author:** Toly
