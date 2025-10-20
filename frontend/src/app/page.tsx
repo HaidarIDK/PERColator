@@ -267,27 +267,42 @@ export default function Home() {
                 {/* Memory Layout */}
                 <div className="bg-gradient-to-r from-[#B8B8FF]/5 to-[#B8B8FF]/10 border border-[#B8B8FF]/20 rounded-xl p-4">
                   <h4 className="text-lg font-bold text-white mb-3">Memory Layout (10MB)</h4>
-                  <div className="grid grid-cols-5 gap-2">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
-                      <div className="text-xs text-gray-400">Header</div>
-                      <div className="text-xs text-white">64KB</div>
+                      <div className="text-gray-400">Header</div>
+                      <div className="text-white">200B</div>
                     </div>
                     <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
-                      <div className="text-xs text-gray-400">Orders</div>
-                      <div className="text-xs text-white">2MB</div>
+                      <div className="text-gray-400">Accounts</div>
+                      <div className="text-white">320KB</div>
                     </div>
                     <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
-                      <div className="text-xs text-gray-400">Reservations</div>
-                      <div className="text-xs text-white">2MB</div>
+                      <div className="text-gray-400">Orders</div>
+                      <div className="text-white">2.4MB</div>
                     </div>
                     <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
-                      <div className="text-xs text-gray-400">Positions</div>
-                      <div className="text-xs text-white">2MB</div>
+                      <div className="text-gray-400">Positions</div>
+                      <div className="text-white">1.4MB</div>
                     </div>
                     <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
-                      <div className="text-xs text-gray-400">Free Lists</div>
-                      <div className="text-xs text-white">2MB</div>
+                      <div className="text-gray-400">Reservations</div>
+                      <div className="text-white">480KB</div>
                     </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-gray-400">Slices</div>
+                      <div className="text-white">512KB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-gray-400">Trades</div>
+                      <div className="text-white">800KB</div>
+                    </div>
+                    <div className="bg-[#B8B8FF]/20 rounded p-2 text-center">
+                      <div className="text-gray-400">Aggressor</div>
+                      <div className="text-white">192KB</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-center text-xs text-gray-400">
+                    Total: ~6.2MB (under 10MB limit)
                   </div>
                 </div>
               </div>
