@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PERColator API Tester</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #e0e0e0;
+        }
+        h1 {
+            color: #00ff88;
+        }
+        .endpoint-group {
+            margin: 30px 0;
+            padding: 20px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #00ff88;
+            color: #0a0a0a;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #00cc6a;
+        }
+        pre {
+            background: #0f0f0f;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            border: 1px solid #00ff88;
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status.healthy {
+            background: #00ff88;
+            color: #0a0a0a;
+        }
+        .status.mock {
+            background: #ff9900;
+            color: #0a0a0a;
+        }
+        .ws-status {
+            margin-top: 10px;
+            padding: 10px;
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>PERColator API Tester</h1>
+    <div id="connection-status"></div>
+
+    <div class="endpoint-group">
+        <h2>System</h2>
+        <button onclick="testRoot()">Test Root</button>
+        <button onclick="testHealth()">Test Health</button>
+        <pre id="system-result">Click buttons to test endpoints...</pre>
+    </div>
+
+    <div class="endpoint-group">
+        <h2>Market Data</h2>
+        <button onclick="testInstruments()">Get Instruments</button>
+        <button onclick="testOrderbook()">Get Orderbook</button>
+        <button onclick="testTrades()">Get Trades</button>
+        <button onclick="testStats()">Get Stats</button>
+        <pre id="market-result">Click buttons to test endpoints...</pre>
+    </div>
+
+    <div class="endpoint-group">
+        <h2>User Portfolio</h2>
+        <button onclick="testUserBalance()">Get Balance</button>
+        <button onclick="testUserPositions()">Get Positions</button>
+        <button onclick="testUserOrders()">Get Orders</button>
+        <button onclick="testUserPortfolio()">Get Portfolio</button>
+        <pre id="user-result">Click buttons to test endpoints...</pre>
+    </div>
+
+    <div class="endpoint-group">
+        <h2>Router Operations</h2>
+        <button onclick="testRouterSlabs()">Get Slabs</button>
+        <button onclick="testRouterPortfolio()">Get Router Portfolio</button>
+        <button onclick="testVault()">Get Vault Info</button>
+        <pre id="router-result">Click buttons to test endpoints...</pre>
+    </div>
+
+    <div class="endpoint-group">
+        <h2>WebSocket Test</h2>
+        <button onclick="connectWS()">Connect WebSocket</button>
+        <button onclick="subscribeOrderbook()">Subscribe to Orderbook</button>
+        <button onclick="disconnectWS()">Disconnect</button>
+        <div class="ws-status">
+            <div>Status: <span id="ws-status">Disconnected</span></div>
+            <div>Messages received: <span id="ws-count">0</span></div>
+        </div>
+        <pre id="ws-result">Click Connect WebSocket to start...</pre>
+    </div>
+
+    <script>
+        const BASE_URL = 'http://localhost:3000';
+        let ws = null;
+        let wsMessageCount = 0;
+
+        async function testEndpoint(url, result ElementId, method = 'GET', body = null) {
+            try {
+                const options = {
+                    method,
+                    headers: { 'Content-Type': 'application/json' }
+                };
+                if (body) options.body = JSON.stringify(body);
+                
+                const response = await fetch(url, options);
+                const data = await response.json();
+                document.getElementById(resultElementId).textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById(resultElementId).textContent = `Error: ${error.message}`;
+            }
+        }
+
+        // System tests
+        async function testRoot() {
+            await testEndpoint(`${BASE_URL}/`, 'system-result');
+        }
+
+        async function testHealth() {
+            await testEndpoint(`${BASE_URL}/api/health`, 'system-result');
+        }
+
+        // Market data tests
+        async function testInstruments() {
+            await testEndpoint(`${BASE_URL}/api/market/instruments?slab=test`, 'market-result');
+        }
+
+        async function testOrderbook() {
+            await testEndpoint(`${BASE_URL}/api/market/orderbook?slab=test&instrument=0`, 'market-result');
+        }
+
+        async function testTrades() {
+            await testEndpoint(`${BASE_URL}/api/market/trades?slab=test&instrument=0&limit=5`, 'market-result');
+        }
+
+        async function testStats() {
+            await testEndpoint(`${BASE_URL}/api/market/stats?slab=test`, 'market-result');
+        }
+
+        // User tests
+        async function testUserBalance() {
+            await testEndpoint(`${BASE_URL}/api/user/balance?slab=test&user=testuser`, 'user-result');
+        }
+
+        async function testUserPositions() {
+            await testEndpoint(`${BASE_URL}/api/user/positions?slab=test&user=testuser`, 'user-result');
+        }
+
+        async function testUserOrders() {
+            await testEndpoint(`${BASE_URL}/api/user/orders?slab=test&user=testuser`, 'user-result');
+        }
+
+        async function testUserPortfolio() {
+            await testEndpoint(`${BASE_URL}/api/user/portfolio?slab=test&user=testuser`, 'user-result');
+        }
+
+        // Router tests
+        async function testRouterSlabs() {
+            await testEndpoint(`${BASE_URL}/api/router/slabs`, 'router-result');
+        }
+
+        async function testRouterPortfolio() {
+            await testEndpoint(`${BASE_URL}/api/router/portfolio/testuser`, 'router-result');
+        }
+
+        async function testVault() {
+            await testEndpoint(`${BASE_URL}/api/router/vault/USDC`, 'router-result');
+        }
+
+        // WebSocket tests
+        function connectWS() {
+            ws = new WebSocket('ws://localhost:3000/ws');
+            
+            ws.onopen = () => {
+                document.getElementById('ws-status').textContent = 'Connected';
+                document.getElementById('ws-result').textContent = 'WebSocket connected!\n\nWaiting for messages...';
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                wsMessageCount++;
+                document.getElementById('ws-count').textContent = wsMessageCount;
+                document.getElementById('ws-result').textContent = JSON.stringify(data, null, 2);
+            };
+
+            ws.onclose = () => {
+                document.getElementById('ws-status').textContent = 'Disconnected';
+            };
+
+            ws.onerror = (error) => {
+                document.getElementById('ws-result').textContent = `Error: ${error}`;
+            };
+        }
+
+        function subscribeOrderbook() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'subscribe',
+                    channel: 'orderbook:BTC/USDC'
+                }));
+                document.getElementById('ws-result').textContent = 'Subscribed to orderbook:BTC/USDC\n\nWaiting for updates...';
+            } else {
+                alert('Connect WebSocket first!');
+            }
+        }
+
+        function disconnectWS() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                wsMessageCount = 0;
+                document.getElementById('ws-count').textContent = '0';
+            }
+        }
+
+        // Auto-test on load
+        window.onload = () => {
+            testRoot();
+        };
+    </script>
+</body>
+</html>
+
