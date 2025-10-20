@@ -102,13 +102,15 @@ LP-run perp engines with 10 MB state budget, fully self-contained matching and s
 - Error handling for invalid instructions
 - Account validation framework ready
 
-### ✅ Anti-Toxicity Infrastructure
-- Batch windows (`batch_ms`)
-- Delayed maker posting (pending → live promotion)
-- JIT penalty detection
-- Kill band parameters
-- Freeze levels configuration
-- Aggressor roundtrip guard (ARG) data structures
+### ✅ Anti-Toxicity Enforcement (COMPLETE)
+- **Batch windows** (`batch_ms`) - discrete matching windows for fair execution
+- **Delayed maker posting** - pending → live promotion (non-DLP orders wait one epoch)
+- **Kill Band** ✅ - rejects commits if oracle moved > `kill_band_bps` since reserve
+- **JIT Penalty** ✅ - removes maker rebates for orders posted after `batch_open_ms`
+- **Freeze Window** ✅ - blocks non-DLP reserves during `freeze_until_ms` window
+- **Top-K Freeze** ✅ - non-DLP accounts skip top `freeze_levels` during freeze (configurable)
+- **Aggressor Roundtrip Guard (ARG)** ✅ - taxes overlapping buy/sell within same batch
+- All anti-toxicity checks active and tested (38 tests passing)
 
 ### ✅ BPF Build Support
 - Panic handlers for no_std builds
