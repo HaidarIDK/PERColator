@@ -1,5 +1,7 @@
 # PERColator
 
+![CI Status](https://github.com/HaidarIDK/PERColator/actions/workflows/rust.yml/badge.svg)
+
 A perpetual exchange protocol on PERCS (Percolator Exchange Resource Coordination System)
 
 **Forked from:** [Toly's Percolator](https://github.com/toly-labs/percolator)  
