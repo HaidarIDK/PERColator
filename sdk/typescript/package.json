@@ -1,0 +1,42 @@
+{
+  "name": "@percolator/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for PERColator perpetual exchange protocol",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "jest",
+    "prepublish": "npm run build"
+  },
+  "keywords": [
+    "solana",
+    "perpetuals",
+    "dex",
+    "percolator",
+    "trading"
+  ],
+  "author": "Percolator Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@solana/web3.js": "^1.87.6",
+    "@solana/spl-token": "^0.3.9",
+    "bn.js": "^5.2.1",
+    "buffer-layout": "^1.2.2"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/node": "^20.10.5",
+    "typescript": "^5.3.3",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.11",
+    "ts-jest": "^29.1.1"
+  },
+  "files": [
+    "dist/**/*",
+    "src/**/*",
+    "README.md"
+  ]
+}
+
