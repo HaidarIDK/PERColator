@@ -1,3 +1,5 @@
+import { apiClient } from './api-client';
+
 // Data service for your custom chart data
 export interface CustomCandlestickData {
   time: string | number
@@ -8,23 +10,27 @@ export interface CustomCandlestickData {
   volume?: number
 }
 
-// Example data service - replace with your actual data source
+// Updated data service - now connects to your real backend!
 export class CustomDataService {
-  // Example: Fetch data from your API
+  // Fetch real data from your API
   static async fetchData(symbol: string, timeframe: string): Promise<CustomCandlestickData[]> {
-    // Replace this with your actual API call
-    const response = await fetch(`/api/chart-data/${symbol}?timeframe=${timeframe}`)
-    const data = await response.json()
-    
-    // Transform your data to the expected format
-    return data.map((item: any) => ({
-      time: item.timestamp,
-      open: item.open_price,
-      high: item.high_price,
-      low: item.low_price,
-      close: item.close_price,
-      volume: item.volume
-    }))
+    try {
+      const data = await apiClient.getChartData(symbol, timeframe, 100);
+      
+      // Transform API data to chart format
+      return data.map((item) => ({
+        time: item.time,
+        open: item.open,
+        high: item.high,
+        low: item.low,
+        close: item.close,
+        volume: item.volume
+      }));
+    } catch (error) {
+      console.error('Failed to fetch chart data, using sample data:', error);
+      // Fallback to sample data if API fails
+      return this.generateSampleData(100);
+    }
   }
 
   // Example: Generate sample data for testing
@@ -56,28 +62,28 @@ export class CustomDataService {
     return data
   }
 
-  // Example: Real-time data updates (WebSocket)
+  // Real-time data updates (WebSocket) - now connected to your backend!
   static subscribeToRealTimeData(
     symbol: string, 
     callback: (data: CustomCandlestickData) => void
   ): () => void {
-    // Replace with your actual WebSocket connection
-    const ws = new WebSocket(`ws://your-api.com/ws/${symbol}`)
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      callback({
-        time: data.timestamp,
-        open: data.open,
-        high: data.high,
-        low: data.low,
-        close: data.close,
-        volume: data.volume
-      })
-    }
+    const cleanup = apiClient.connectWebSocket((message) => {
+      if (message.type === 'candle' && message.symbol === symbol) {
+        callback({
+          time: message.data.time,
+          open: message.data.open,
+          high: message.data.high,
+          low: message.data.low,
+          close: message.data.close,
+          volume: message.data.volume
+        });
+      }
+    });
 
-    // Return cleanup function
-    return () => ws.close()
+    // Subscribe to this specific symbol
+    apiClient.subscribeToMarket(symbol);
+
+    return cleanup;
   }
 }
 

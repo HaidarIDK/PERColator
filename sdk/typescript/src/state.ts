@@ -5,7 +5,7 @@
 import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
 import { Portfolio, Orderbook, OrderbookLevel } from './types';
-import { readBN } from './pda';
+import { readBN } from './instructions';
 
 /**
  * Decode Portfolio account

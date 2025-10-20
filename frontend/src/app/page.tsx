@@ -90,7 +90,7 @@ export default function Home() {
                 colors={["#B8B8FF", "#B8B8FF", "#B8B8FF", "#B8B8FF"]}
                 className="bg-gradient-to-r from-orange-400 via-yellow-400 to-orange-500 bg-clip-text text-transparent"
               >
-                Per-colator
+                PERColator
               </AuroraText>
             </motion.div>
           </div>
