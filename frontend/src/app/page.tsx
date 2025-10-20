@@ -373,7 +373,7 @@ export default function Home() {
           animate={{ opacity: 1 }}
           transition={{ duration: 0.8, delay: 2.8 }}
         >
-          © 2024 PERColator. Powered by Solana.
+          © 2025 PERColator. Powered by Solana.
         </motion.p>
       </footer>
     </div>
