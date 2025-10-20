@@ -23,13 +23,20 @@ export function FloatingNavbar() {
         { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
         { name: "Features", href: "/#features", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
-        { name: "About", href: "/#about", icon: <User className="w-5 h-5" /> },
+        { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
+      ]
+    : pathname === '/what-i-added'
+    ? [
+        { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
+        { name: "Features", href: "/#features", icon: <Info className="w-5 h-5" /> },
+        { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
+        { name: "Info", href: "/info", icon: <User className="w-5 h-5" /> },
       ]
     : [
         { name: "Home", href: "#home", icon: <Home className="w-5 h-5" /> },
         { name: "Features", href: "#features", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "#architecture", icon: <Settings className="w-5 h-5" /> },
-        { name: "About", href: "#about", icon: <User className="w-5 h-5" /> },
+        { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
       ]
 
   useEffect(() => {
@@ -92,6 +99,20 @@ export function FloatingNavbar() {
                   <div className="absolute inset-0 bg-gradient-to-r from-[#B8B8FF]/0 via-[#B8B8FF]/5 to-[#B8B8FF]/0 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
                 </motion.button>
               ))}
+              
+              {/* PerpDEX Button */}
+              <motion.a
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.4, delay: 1.0 }}
+                href="/dex"
+                className="ml-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/30 text-white font-semibold hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/40 transition-all duration-300 shadow-[0_0_15px_rgba(184,184,255,0.3)] hover:shadow-[0_0_20px_rgba(184,184,255,0.5)] relative"
+              >
+                <span className="text-sm">PerpDEX →</span>
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 text-[10px] bg-yellow-500/90 text-black rounded-full font-bold">
+                  Soon
+                </span>
+              </motion.a>
             </div>
 
             {/* Mobile Menu Button */}

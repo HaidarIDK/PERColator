@@ -11,8 +11,8 @@ const poppins = Poppins({
 export const metadata: Metadata = {
   title: "PERC-o-DEX",
   description: "Decentralized Perpetual Exchange on Solana",
-  icons: {
-    icon: '/favicon.ico',
+  other: {
+    'Content-Security-Policy': "script-src 'self' 'unsafe-eval' 'unsafe-inline';",
   },
 };
 

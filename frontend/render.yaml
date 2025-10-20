@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: percolator-frontend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: http://localhost:3000
+

@@ -5,22 +5,15 @@ import { AuroraText } from "@/components/ui/aurora-text"
 import { motion } from "motion/react"
 import { ShimmerButton } from "@/components/ui/shimmer-button"
 import { FloatingNavbar } from "@/components/ui/floating-navbar"
-import { cn } from "@/lib/utils"
 import { 
-  Router, 
-  Wallet, 
-  User, 
   Shield, 
-  Clock, 
   Zap, 
   Lock, 
   TrendingUp, 
   Layers, 
   Database, 
-  Settings,
-  Code2,
-  Package,
-  Terminal
+  GitBranch,
+  Settings
 } from "lucide-react"
 
 const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description: string }> = ({
@@ -104,10 +97,40 @@ export default function Home() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8, delay: 1.2 }}
-            className="text-lg md:text-xl text-gray-400 mb-12 max-w-4xl mx-auto leading-relaxed"
+            className="text-lg md:text-xl text-gray-400 mb-6 max-w-4xl mx-auto leading-relaxed"
           >
             a perp DEX program that just uses one slab of memory in an account for everything with its own LP/risk/matching engine
           </motion.p>
+
+          {/* Fork Attribution */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, delay: 1.3 }}
+            className="mb-12 max-w-2xl mx-auto"
+          >
+            <div className="bg-gradient-to-r from-[#B8B8FF]/10 to-[#B8B8FF]/5 border border-[#B8B8FF]/30 rounded-xl p-4 backdrop-blur-sm">
+              <div className="flex items-center justify-center gap-2 text-sm text-gray-300">
+                <GitBranch className="w-4 h-4 text-[#B8B8FF]" />
+                <span>
+                  Forked from{" "}
+                  <a 
+                    href="https://github.com/aeyakovenko/percolator" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-[#B8B8FF] hover:text-white transition-colors underline"
+                  >
+                    Anatoly Yakovenko&apos;s Percolator
+                  </a>
+                </span>
+                <span className="text-gray-500">|</span>
+                <span className="text-[#B8B8FF] font-semibold">~28 commits ahead</span>
+              </div>
+              <p className="text-xs text-gray-500 text-center mt-2">
+                This is an enhanced fork with production-ready infrastructure, not a copy of the original work.
+              </p>
+            </div>
+          </motion.div>
 
           {/* CTA Buttons */}
           <motion.div
@@ -125,8 +148,122 @@ export default function Home() {
              </a>
           </motion.div>
 
+          {/* Scroll Down Indicator */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 1, delay: 2.0 }}
+            className="flex justify-center mt-8"
+          >
+            <motion.div
+              animate={{ y: [0, 10, 0] }}
+              transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
+              className="flex flex-col items-center gap-2 cursor-pointer"
+            >
+              <span className="text-sm text-gray-400">Scroll to explore</span>
+              <svg
+                className="w-6 h-6 text-[#B8B8FF]"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 14l-7 7m0 0l-7-7m7 7V3"
+                />
+              </svg>
+            </motion.div>
+          </motion.div>
+
         </motion.div>
       </main>
+
+      {/* Key Concepts Section - Moved to Top */}
+      <section className="relative z-10 py-20 px-4 bg-gradient-to-b from-black to-black/50">
+        <div className="max-w-7xl mx-auto">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8 }}
+            viewport={{ once: true }}
+            className="text-center mb-16"
+          >
+            <h2 className="text-4xl md:text-5xl font-bold text-white mb-4">
+              Key Concepts
+            </h2>
+            <p className="text-xl text-gray-400 max-w-3xl mx-auto">
+              Essential terms to understand how PERColator works
+            </p>
+          </motion.div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {/* Slab */}
+            <GlossaryCard
+              term="Slab"
+              definition="A 10MB memory block containing an entire market - order book, positions, and all trading data in one contiguous space for maximum speed."
+              icon={<Database className="w-6 h-6" />}
+            />
+
+            {/* Reserve-Commit */}
+            <GlossaryCard
+              term="Reserve-Commit"
+              definition="Two-phase trading: First 'reserve' locks liquidity at current prices, then 'commit' executes the trade - preventing price manipulation between steps."
+              icon={<Lock className="w-6 h-6" />}
+            />
+
+            {/* Slice */}
+            <GlossaryCard
+              term="Slice"
+              definition="A piece of reserved liquidity from a specific order. Your reservation might grab slices from multiple orders to fill your size."
+              icon={<Layers className="w-6 h-6" />}
+            />
+
+            {/* DLP */}
+            <GlossaryCard
+              term="DLP"
+              definition="Designated Liquidity Provider - VIP traders who can post orders immediately and trade during freeze windows. Think of them as market makers with special access."
+              icon={<Shield className="w-6 h-6" />}
+            />
+
+            {/* Kill Band */}
+            <GlossaryCard
+              term="Kill Band"
+              definition="Safety check that rejects trades if the price moved too much (default 1%) since you reserved. Protects you from stale prices."
+              icon={<Zap className="w-6 h-6" />}
+            />
+
+            {/* ARG */}
+            <GlossaryCard
+              term="ARG Tax"
+              definition="Aggressor Roundtrip Guard - detects if you buy AND sell in the same batch (sandwich attempt) and charges you extra. Anti-manipulation."
+              icon={<Shield className="w-6 h-6" />}
+            />
+
+            {/* Portfolio */}
+            <GlossaryCard
+              term="Portfolio"
+              definition="Your cross-market account tracking total exposure and risk across all slabs. One portfolio, many markets."
+              icon={<TrendingUp className="w-6 h-6" />}
+            />
+
+            {/* Capability Token */}
+            <GlossaryCard
+              term="Capability Token"
+              definition="Time-limited (2min max) authorization pass that lets specific markets access your funds. Scoped security - no blanket permissions."
+              icon={<Lock className="w-6 h-6" />}
+            />
+
+            {/* Funding Rate */}
+            <GlossaryCard
+              term="Funding Rate"
+              definition="Hourly payment between longs and shorts that keeps perpetual prices anchored to spot. If perp > spot, longs pay shorts (and vice versa)."
+              icon={<TrendingUp className="w-6 h-6" />}
+            />
+          </div>
+        </div>
+      </section>
 
       {/* Features Section */}
       <section id="features" className="relative z-10 py-32 px-4">
@@ -392,5 +529,30 @@ export default function Home() {
         </motion.p>
       </footer>
     </div>
+  )
+}
+
+// Glossary Card Component
+function GlossaryCard({ term, definition, icon }: { term: string; definition: string; icon: React.ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.6 }}
+      viewport={{ once: true }}
+      className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300 group"
+    >
+      <div className="flex items-start gap-4 mb-3">
+        <div className="p-2 rounded-lg bg-[#B8B8FF]/20 text-[#B8B8FF] group-hover:bg-[#B8B8FF]/30 transition-colors flex-shrink-0">
+          {icon}
+        </div>
+        <h3 className="text-lg font-bold text-white group-hover:text-[#B8B8FF] transition-colors">
+          {term}
+        </h3>
+      </div>
+      <p className="text-sm text-gray-400 leading-relaxed group-hover:text-gray-300 transition-colors">
+        {definition}
+      </p>
+    </motion.div>
   )
 }

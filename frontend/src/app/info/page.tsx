@@ -261,12 +261,12 @@ export default function InfoPage() {
             transition={{ duration: 0.8, delay: 1.6 }}
             className="mt-16 text-center"
           >
-            <a
-              href="/"
-              className="inline-flex items-center gap-2 px-8 py-3 rounded-xl bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm"
-            >
-              ← Back to Home
-            </a>
+          <a
+            href="/"
+            className="inline-flex items-center gap-2 px-8 py-3 rounded-xl bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm"
+          >
+            &larr; Back to Home
+          </a>
           </motion.div>
         </div>
       </main>
