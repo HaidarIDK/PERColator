@@ -59,6 +59,13 @@ pub enum PercolatorError {
     InvalidCommitment = 503,
     JitPenaltyApplied = 504,
     RoundtripDetected = 505,
+
+    // Liquidation & orchestration errors (600-699)
+    NotLiquidatable = 600,
+    CommitFailed = 601,
+
+    // Authorization errors (700-799)
+    Unauthorized = 700,
 }
 
 impl From<PercolatorError> for u64 {
