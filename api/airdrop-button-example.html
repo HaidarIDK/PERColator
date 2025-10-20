@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Devnet SOL Airdrop - PERColator</title>
+    <style>
+        body {
+            font-family: system-ui;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #e0e0e0;
+        }
+        .container {
+            background: #1a1a1a;
+            padding: 30px;
+            border-radius: 12px;
+            border: 1px solid #00ff88;
+        }
+        button {
+            background: #00ff88;
+            color: #0a0a0a;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            margin: 10px 0;
+        }
+        button:hover {
+            background: #00cc6a;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            background: #0f0f0f;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background: #0f0f0f;
+            border-radius: 4px;
+            border: 1px solid #333;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .success {
+            color: #00ff88;
+        }
+        .error {
+            color: #ff4444;
+        }
+        h1 {
+            color: #00ff88;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Get Free Devnet SOL</h1>
+        <p>Get free SOL to trade on PERColator testnet. Use for both gas fees and trading collateral.</p>
+        
+        <label>Your Wallet Address:</label>
+        <input 
+            type="text" 
+            id="walletInput" 
+            placeholder="Enter Solana wallet address..."
+            value="11111111111111111111111111111111111111111111"
+        />
+        
+        <button onclick="airdropSOL()">Get 2 SOL (Free)</button>
+        <button onclick="checkBalance()">Check Balance</button>
+        
+        <div id="result" class="result">
+            Click "Get 2 SOL" to receive free devnet SOL
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:3000';
+
+        async function airdropSOL() {
+            const wallet = document.getElementById('walletInput').value;
+            const resultDiv = document.getElementById('result');
+            
+            if (!wallet || wallet.length < 32) {
+                resultDiv.innerHTML = '<span class="error">Please enter a valid wallet address</span>';
+                return;
+            }
+
+            resultDiv.innerHTML = 'Requesting airdrop...';
+
+            try {
+                const response = await fetch(`${API_URL}/api/faucet/airdrop-sol`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user: wallet, amount: 2 })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    resultDiv.innerHTML = `
+                        <span class="success">SUCCESS!</span><br>
+                        Airdropped: ${data.amount} SOL<br>
+                        Signature: ${data.signature}<br>
+                        <br>
+                        You can now trade with this SOL!
+                    `;
+                } else {
+                    resultDiv.innerHTML = `<span class="error">Error: ${data.error}</span>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">Error: ${error.message}</span>`;
+            }
+        }
+
+        async function checkBalance() {
+            const wallet = document.getElementById('walletInput').value;
+            const resultDiv = document.getElementById('result');
+            
+            if (!wallet || wallet.length < 32) {
+                resultDiv.innerHTML = '<span class="error">Please enter a valid wallet address</span>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/api/faucet/balance/${wallet}`);
+                const data = await response.json();
+
+                resultDiv.innerHTML = `
+                    Balance: <span class="success">${data.balance} SOL</span><br>
+                    Network: ${data.network}<br>
+                    ${data.note || ''}
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">Error: ${error.message}</span>`;
+            }
+        }
+    </script>
+</body>
+</html>
+

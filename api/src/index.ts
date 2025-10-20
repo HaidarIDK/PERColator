@@ -7,6 +7,7 @@ import { userRouter } from './routes/user';
 import { healthRouter } from './routes/health';
 import { routerRouter } from './routes/router';
 import { claimsRouter } from './routes/claims';
+import { faucetRouter } from './routes/faucet';
 import { initializeSolana } from './services/solana';
 import { startWebSocketServer } from './services/websocket';
 
@@ -39,6 +40,7 @@ app.get('/', (req, res) => {
       user: '/api/user/*',
       router: '/api/router/*',
       claims: '/api/claims/*',
+      faucet: '/api/faucet/*',
       websocket: 'ws://localhost:3000/ws'
     },
     docs: 'See api/README.md for full API documentation'
@@ -52,6 +54,7 @@ app.use('/api/trade', tradingRouter);
 app.use('/api/user', userRouter);
 app.use('/api/router', routerRouter);
 app.use('/api/claims', claimsRouter);
+app.use('/api/faucet', faucetRouter);
 
 // 404 handler for unknown routes
 app.use((req, res) => {
