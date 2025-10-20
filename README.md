@@ -130,18 +130,63 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 5. Comprehensive Testing & CI (NEW)
+### 5. Complete Instruction Handler System (NEW)
+
+**Purpose:** Full BPF-ready instruction processing for both Router and Slab programs
+
+**What It Does:**
+- Deserializes instruction data from raw bytes
+- Validates all accounts (owner, signer, writable flags)
+- Enforces security checks before execution
+- Routes to appropriate business logic handlers
+- Returns descriptive error messages
+
+**Slab Instruction Handlers:**
+- **Reserve** - Parse 71 bytes: account_idx, instrument_idx, side, qty, limit_px, ttl, commitment_hash, route_id
+- **Commit** - Parse 16 bytes: hold_id, current_ts; execute trades at reserved prices
+- **Cancel** - Parse 8 bytes: hold_id; release reservation
+- **BatchOpen** - Parse 10 bytes: instrument_idx, current_ts; increment epoch, promote pending
+- **Initialize** - Parse 114 bytes: authority, oracle, router, imr, mmr, fees, batch_ms, freeze_levels
+- **AddInstrument** - Parse 40 bytes: symbol, contract_size, tick, lot, index_price
+- **UpdateFunding** - Parse 11 bytes: update_all flag, instrument_idx, current_ts
+
+**Router Instruction Handlers:**
+- **Initialize** - Setup registry with program authority
+- **Deposit** - Parse mint + amount (48 bytes); validate collateral, update portfolio
+- **Withdraw** - Check free collateral, validate amount, update vault and portfolio
+- **MultiReserve** - Parse slab count + per-slab params; coordinate multi-slab reserves
+- **MultiCommit** - Parse slab count + hold_ids; execute coordinated commits
+- **Liquidate** - Parse liquidatee + max_debt (48 bytes); check eligibility, close positions
+
+**Serialization Utilities:**
+- Zero-copy read/write for all primitive types (u8, u16, u32, u64, u128, i64)
+- Fixed-size byte array serialization
+- Error-safe with bounds checking
+- 5 comprehensive serialization tests
+
+**Security Features:**
+- Account owner validation (prevents unauthorized program access)
+- Writable flag enforcement (protects read-only accounts)
+- Signer verification (prevents impersonation)
+- Data length validation (prevents buffer overflows)
+- Authority checks (only authorized users can modify state)
+
+**Files:** `programs/common/src/serialize.rs`, `programs/slab/src/entrypoint.rs`, `programs/router/src/entrypoint.rs`
+
+---
+
+### 6. Comprehensive Testing & CI (NEW)
 
 **Purpose:** Ensure code quality and catch bugs before deployment
 
 **What It Does:**
-- 89 automated tests across all components
+- 93 automated tests across all components
 - GitHub Actions CI that runs on every push
 - Caching for faster CI runs
 - Tests all critical paths and edge cases
 
 **Test Coverage:**
-- 28 tests: Common library (math, VWAP, PnL, margin calculations)
+- 32 tests: Common library (math, VWAP, PnL, margin, serialization)
 - 12 tests: Router (vault, escrow, caps, portfolio, registry)
 - 49 tests: Slab (pools, matching, anti-toxicity, reserve/commit, funding)
 
@@ -155,7 +200,7 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 6. Critical Bug Fixes (FIXED)
+### 7. Critical Bug Fixes (FIXED)
 
 **Stack Overflow Fix:**
 - Problem: 10MB SlabState caused test thread stack overflow
@@ -175,7 +220,7 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 7. Documentation (NEW)
+### 8. Documentation (NEW)
 
 **Created:**
 - `WORK_PLAN.md` - Implementation roadmap and architecture details
