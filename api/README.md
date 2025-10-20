@@ -1,6 +1,6 @@
-# Percolator API Server
+# PERColator API Server
 
-REST API server for Percolator spot trading DEX.
+REST API server for PERColator perpetual exchange protocol on PERCS.
 
 ## 🚀 Quick Start
 

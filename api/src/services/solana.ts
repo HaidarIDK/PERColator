@@ -18,8 +18,9 @@ export async function initializeSolana() {
   try {
     const walletData = JSON.parse(fs.readFileSync(walletPath, 'utf-8'));
     keypair = Keypair.fromSecretKey(new Uint8Array(walletData));
+    console.log('Loaded wallet from', walletPath);
   } catch (error) {
-    console.warn('⚠️  No wallet found, using dummy keypair (read-only mode)');
+    console.warn('No wallet found, using dummy keypair (read-only mode)');
     keypair = Keypair.generate();
   }
 
@@ -28,6 +29,14 @@ export async function initializeSolana() {
     commitment: 'confirmed',
     preflightCommitment: 'confirmed',
   });
+
+  // Test connection
+  try {
+    const version = await connection.getVersion();
+    console.log('Connected to Solana cluster version:', version['solana-core']);
+  } catch (error) {
+    console.warn('Solana RPC not available, API will work with mock data only');
+  }
 
   // TODO: Load slab program IDL and initialize Program
   // const slabProgramId = new PublicKey(process.env.SLAB_PROGRAM_ID!);
