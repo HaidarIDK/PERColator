@@ -118,10 +118,10 @@ export default function Home() {
             </ShimmerButton>
             
             <a 
-              href="/dashboard"
+              href="/info"
               className="px-8 py-3 rounded-xl bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm"
             >
-              View Dashboard
+              Read More
             </a>
           </motion.div>
 
