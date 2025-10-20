@@ -274,7 +274,60 @@ This fork extends Toly's original Percolator with production-ready backend infra
 
 ---
 
-### 8. Comprehensive Testing & CI (NEW)
+### 8. TypeScript SDK & CLI Tools (NEW)
+
+**Purpose:** Production-ready SDK for frontend integration and CLI for LP/admin operations
+
+**TypeScript SDK (@percolator/sdk):**
+- Complete client library with all protocol interactions
+- `PercolatorClient` - Main class (reserve, commit, cancel, deposit, withdraw, etc.)
+- Instruction builders for all 13 instructions
+- PDA derivation helpers (slab, vault, escrow, portfolio, cap, registry)
+- State decoders (portfolio, orderbook, vault, escrow)
+- Utility functions (price conversion, PnL calc, VWAP, etc.)
+- Full TypeScript type definitions
+- Comprehensive examples
+
+**CLI Tools (@percolator/cli):**
+- `perc lp create-slab` - Initialize new perpetual market
+- `perc lp add-instrument` - Add trading pairs
+- `perc lp set-params` - Update risk parameters
+- `perc trade reserve/commit/cancel` - Trading operations
+- `perc portfolio show/positions` - Portfolio management
+- `perc mm quote/watch` - Market making automation
+- `perc monitor equity/liquidations` - Real-time monitoring
+- `perc admin deploy/initialize` - Deployment & setup
+- `perc balance/airdrop/config` - Utilities
+
+**Developer Experience:**
+- NPM packages ready for publication
+- TypeScript with full type safety
+- Beautiful terminal UI (chalk, ora, inquirer)
+- Configuration file support
+- Comprehensive documentation
+- Code examples for all operations
+
+**Frontend Integration:**
+```typescript
+import { PercolatorClient, Side, priceToProtocol } from '@percolator/sdk';
+
+const client = new PercolatorClient(connection, ROUTER_ID, SLAB_ID);
+await client.reserve(slab, wallet, 0, 0, Side.Buy, qty, price, 60000);
+```
+
+**CLI Usage:**
+```bash
+npm install -g @percolator/cli
+perc lp create-slab --market BTC-PERP
+perc trade reserve --slab <ADDR> --side buy --qty 1 --price 65000
+perc portfolio show
+```
+
+**Files:** `sdk/typescript/src/*` (14 files), `cli/src/*` (comprehensive CLI)
+
+---
+
+### 9. Comprehensive Testing & CI (NEW)
 
 **Purpose:** Ensure code quality and catch bugs before deployment
 
