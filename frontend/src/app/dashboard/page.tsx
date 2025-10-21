@@ -5,6 +5,13 @@ import { AuroraText } from "@/components/ui/aurora-text"
 import { motion } from "motion/react"
 import { cn } from "@/lib/utils"
 import { 
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { 
   TrendingUp, 
   TrendingDown, 
   BarChart3, 
@@ -21,8 +28,11 @@ import {
   Shield,
   Target,
   Eye,
-  EyeOff
+  EyeOff,
+  LineChart
 } from "lucide-react"
+import { FaBitcoin, FaEthereum } from "react-icons/fa"
+import { SiSolana } from "react-icons/si"
 import { useState, useEffect, useRef, memo } from "react"
 import { useWallet, useConnection } from "@solana/wallet-adapter-react"
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui"
@@ -33,97 +43,502 @@ import { CustomDataService } from "@/lib/data-service"
 import { apiClient, type MarketData, type Orderbook, type OrderbookLevel } from "@/lib/api-client"
 import Link from "next/link"
 import { ToastContainer } from "@/components/ui/toast"
+import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickSeries, Time, CandlestickData, IRange } from 'lightweight-charts'
+import axios from "axios"
 
-// Chart Widget Component using TradingView - Simplified
-function CoinGeckoWidget({ coinId }: { coinId: "ethereum" | "bitcoin" | "solana" }) {
-  const container = useRef<HTMLDivElement>(null);
+// Lightweight Charts Component
+function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin" | "solana", timeframe: "1" | "5" | "15" | "60" | "240" | "D" }) {
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<any> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPrice, setCurrentPrice] = useState<number>(0);
+  const [priceChange, setPriceChange] = useState<number>(0);
+  const wsCleanupRef = useRef<(() => void) | null>(null);
+  const [oldestTimestamp, setOldestTimestamp] = useState<number | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  // Function to get symbol from coinId for server WebSocket
+  const getServerSymbolFromCoinId = (coinId: "ethereum" | "bitcoin" | "solana") => {
+    switch(coinId) {
+      case "ethereum": return "ETH";
+      case "bitcoin": return "BTC";
+      case "solana": return "SOL";
+      default: return "SOL";
+    }
+  };
+
+  // Function to get server interval from timeframe
+  const getServerIntervalFromTimeframe = (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => {
+    switch(timeframe) {
+      case "1": return "1m";
+      case "5": return "5m";
+      case "15": return "15m";
+      case "60": return "1h";
+      case "240": return "4h";
+      case "D": return "1d";
+      default: return "1m";
+    }
+  };
+
+  // Function to get base price for mock data
+  const getBasePrice = (coinId: "ethereum" | "bitcoin" | "solana") => {
+    switch(coinId) {
+      case "ethereum": return 3882;
+      case "bitcoin": return 97500;
+      case "solana": return 185;
+      default: return 3882;
+    }
+  };
 
   useEffect(() => {
-    if (!container.current) return;
-    
-    // Clear previous content
-    container.current.innerHTML = '';
-    
-    const getSymbol = () => {
-      switch(coinId) {
-        case "ethereum": return "BINANCE:ETHUSDT";
-        case "bitcoin": return "BINANCE:BTCUSDT";
-        case "solana": return "BINANCE:SOLUSDT";
-        default: return "BINANCE:ETHUSDT";
+    if (!chartContainerRef.current) return;
+  
+    // Cleanup existing chart if any
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    }
+  
+    const timeoutId = setTimeout(async () => {
+      if (!chartContainerRef.current) return;
+  
+      // Create chart
+      const chart = createChart(chartContainerRef.current, {
+        layout: {
+          background: { type: ColorType.Solid, color: "transparent" },
+          textColor: "#ffffff",
+        },
+        grid: {
+          vertLines: { color: "#181825" },
+          horzLines: { color: "#181825" },
+        },
+        crosshair: {
+          mode: 1,
+          vertLine: { color: "#B8B8FF", width: 1, style: 2 },
+          horzLine: { color: "#B8B8FF", width: 1, style: 2 },
+        },
+        rightPriceScale: {
+          borderColor: "#181825",
+          textColor: "#ffffff",
+        },
+        timeScale: {
+          borderColor: "#181825",
+          timeVisible: true,
+          secondsVisible: false,
+        },
+        width: chartContainerRef.current.clientWidth,
+        height: chartContainerRef.current.clientHeight,
+      });
+
+
+  
+      // Add candlestick series
+      const candlestickSeries = chart.addSeries(CandlestickSeries, {
+        upColor: "#4fff00",
+        borderUpColor: "#4fff00",
+        wickUpColor: "#4fff00",
+        downColor: "#ff4976",
+        borderDownColor: "#ff4976",
+        wickDownColor: "#ff4976",
+      });
+
+      chartRef.current = chart;
+      seriesRef.current = candlestickSeries;
+
+      const symbol = getServerSymbolFromCoinId(coinId);
+      console.log("Chart dimensions:", {
+        width: chartContainerRef.current.clientWidth,
+        height: chartContainerRef.current.clientHeight,
+      });
+
+      const loadMoreHistoricalData = async (endTime: number) => {
+        if (isLoadingMore) return;
+        
+        try {
+          setIsLoadingMore(true);
+          
+          const response = await fetch(`http://localhost:3000/api/chart/${symbol}/${timeframe}?limit=100&endTime=${endTime}`);
+          const data = await response.json();
+          
+          if (data && data.length > 0) {
+            const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
+              time: Math.floor(candle.timestamp / 1000) as Time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+            }));
+                        
+            const currentData = candlestickSeries.data();
+            const newData = [...chartData, ...currentData];
+            
+            candlestickSeries.setData(newData);
+            
+            if (chartData.length > 0) {
+              const oldestCandle = chartData[0];
+              setOldestTimestamp(oldestCandle.time as number);
+            }
+          }
+        } catch (error) {
+          console.error("❌ Failed to load more historical data:", error);
+        } finally {
+          setIsLoadingMore(false);
+        }
+      };
+
+      const loadInitialData = async () => {
+        try {
+          const response = await axios.post("https://api.hyperliquid.xyz/info", {
+            type: "candleSnapshot",
+            req: { coin: coinId, interval: timeframe, startTime: 1735689661000, endTime: 1735689661000 }
+          }, {
+            headers: {
+              "User-Agent": "Mozilla/5.0",
+              "Content-Type": "application/json"
+            }
+          });
+
+          const data = response.data;
+          
+          if (data && data.length > 0) {
+            const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
+              time: Math.floor(candle.timestamp / 1000) as Time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+            }));
+            
+            candlestickSeries.setData(chartData);
+            
+            // Track oldest timestamp for lazy loading
+            if (chartData.length > 0) {
+              const oldestCandle = chartData[0];
+              setOldestTimestamp(oldestCandle.time as number);
+              
+              const lastCandle = chartData[chartData.length - 1];
+              setCurrentPrice(lastCandle.close);
+            }
+          }
+        } catch (error) {
+          console.error("❌ Failed to load initial data:", error);
+        }
+      };
+
+      loadInitialData();
+  
+      const ws = new WebSocket("ws://localhost:3000/ws");
+      ws.onopen = () => {
+        console.log("✅ Connected to Hyperliquid WebSocket");
+  
+        const intervalMap: Record<string, string> = {
+          "1": "1m",
+          "5": "5m",
+          "15": "15m",
+          "60": "1h",
+          "240": "4h",
+        };
+        const interval = intervalMap[timeframe] || "1d";
+  
+        ws.send(
+          JSON.stringify({
+            method: "subscribe",
+            subscription: { type: "candle", coin: symbol.toUpperCase(), interval },
+          })
+        );
+      };
+  
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          console.log("Received WebSocket message:", msg);
+          
+          if (msg.type === "candle" && msg.data) {
+            const candleData = msg.data;
+            
+            const currentSymbol = getServerSymbolFromCoinId(coinId);
+            const intervalMap: Record<string, string> = {
+              "1": "1m",
+              "5": "5m", 
+              "15": "15m",
+              "60": "1h",
+              "240": "4h",
+            };
+            const currentInterval = intervalMap[timeframe] || "1d";
+                        
+            if (candleData.symbol === currentSymbol && candleData.timeframe === currentInterval) {
+              const timestamp = Math.floor(candleData.timestamp / 1000);
+              
+              const candle: CandlestickData<Time> = {
+                time: timestamp as Time,
+                open: candleData.open,
+                high: candleData.high,
+                low: candleData.low,
+                close: candleData.close,
+              };
+                            
+              candlestickSeries.update(candle);
+              setCurrentPrice(candleData.close);
+              setPriceChange(candleData.priceChangePercent);
+            } else {
+              console.log("⏭️ Skipping candle - not for current chart");
+            }
+          }
+        } catch (err) {
+        }
+      };
+  
+      ws.onerror = (err) => console.error("WebSocket error:", err);
+      ws.onclose = () => console.log("WebSocket closed");
+  
+      wsCleanupRef.current = () => {
+        ws.close();
+        console.log("WebSocket cleanup");
+      };
+  
+      // Resize handling
+      const handleResize = () => {
+        if (chartContainerRef.current && chart) {
+          chart.applyOptions({
+            width: chartContainerRef.current.clientWidth,
+            height: chartContainerRef.current.clientHeight,
+          });
+        }
+      };
+      window.addEventListener("resize", handleResize);
+
+      // Add scroll event listener for lazy loading historical data
+      const handleVisibleRangeChange = (timeRange: IRange<Time> | null) => {
+        if (!timeRange || !oldestTimestamp) return;
+        
+        // Check if user has scrolled to the beginning (oldest data)
+        const currentOldestTime = timeRange.from as number;
+        const buffer = 60 * 60; // 1 hour buffer before triggering load
+        
+        if (currentOldestTime <= oldestTimestamp + buffer && !isLoadingMore) {
+          console.log("🔄 User scrolled to beginning, loading more historical data");
+          loadMoreHistoricalData(oldestTimestamp * 1000); // Convert to milliseconds
+        }
+      };
+      
+      chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+  
+      return () => {
+        window.removeEventListener("resize", handleResize);
+        chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+        ws.close();
+        chart.remove();
+      };
+    }, 100);
+  
+    return () => {
+      clearTimeout(timeoutId);
+      if (wsCleanupRef.current) wsCleanupRef.current();
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
       }
     };
-    
-    const widgetContainer = document.createElement("div");
-    widgetContainer.className = "tradingview-widget-container__widget";
-    widgetContainer.style.height = "100%";
-    widgetContainer.style.width = "100%";
-    
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-    script.type = "text/javascript";
-    script.async = true;
-    script.innerHTML = JSON.stringify({
-      autosize: true,
-      symbol: getSymbol(),
-      interval: "1",
-      timezone: "Etc/UTC",
-      theme: "dark",
-      style: "1",
-      locale: "en",
-      enable_publishing: false,
-      backgroundColor: "rgba(0, 0, 0, 0.1)",
-      hide_top_toolbar: false,
-      hide_legend: false,
-      save_image: false,
-      support_host: "https://www.tradingview.com"
-    });
-    
-    script.onerror = () => {
-      // Silently handle script loading errors
-    };
-    
-    widgetContainer.appendChild(script);
-    container.current.appendChild(widgetContainer);
-  }, [coinId]);
+  }, [coinId, timeframe]);
+  
+
+  const generateMockPriceUpdate = (basePrice: number) => {
+    const volatility = 0.02; // 2% volatility
+    const change = (Math.random() - 0.5) * volatility * basePrice;
+    return basePrice + change;
+  };
+
 
   return (
-    <div ref={container} style={{ height: "100%", width: "100%" }}>
+    <div className="relative h-full w-full">
+      {/* Price Display */}
+      <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-lg p-3 border border-[#181825]">
+        <div className="flex items-center space-x-3">
+          <div>
+            <div className="text-white text-lg font-bold">
+              ${currentPrice.toFixed(2)}
+            </div>
+            <div className={`text-sm font-medium ${priceChange >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}%
+            </div>
+          </div>
+          <div className="flex items-center space-x-1">
+            {priceChange >= 0 ? (
+              <TrendingUp className="w-4 h-4 text-green-400" />
+            ) : (
+              <TrendingDown className="w-4 h-4 text-red-400" />
+            )}
+          </div>
+        </div>
+      </div>
+
+      
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/20 backdrop-blur-sm z-10">
+          <div className="text-red-400 text-sm">{error}</div>
+        </div>
+      )}
+      
+      {isLoadingMore && (
+        <div className="absolute top-4 right-4 z-20 bg-black/40 backdrop-blur-sm rounded-lg p-2 border border-[#181825]">
+          <div className="flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#B8B8FF]"></div>
+            <div className="text-white text-sm">Loading more data...</div>
+          </div>
+        </div>
+      )}
+      
+      <div ref={chartContainerRef} style={{ height: "100%", width: "100%", minHeight: "400px" }} />
     </div>
   );
 }
 
-const CoinGeckoWidgetMemo = memo(CoinGeckoWidget);
+const LightweightChartMemo = memo(LightweightChart);
 
-// Chart Component with CoinGecko
 const TradingViewChartComponent = ({ 
   symbol = "ETH-PERP",
   selectedCoin,
-  onCoinChange
+  onCoinChange,
+  selectedTimeframe,
+  onTimeframeChange
 }: { 
   symbol?: string;
   selectedCoin: "ethereum" | "bitcoin" | "solana";
   onCoinChange: (coin: "ethereum" | "bitcoin" | "solana") => void;
+  selectedTimeframe: "1" | "5" | "15" | "60" | "240" | "D";
+  onTimeframeChange: (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => void;
 }) => {
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [selectedTimeframe, setSelectedTimeframe] = useState<"15" | "1" | "3" | "5" | "30" | "60" | "240" | "120" | "180" | "D" | "W">("15")
   const [chartData, setChartData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [ohlcData, setOhlcData] = useState({ open: 0, high: 0, low: 0, close: 0, change: 0 })
+  const wsCleanupRef = useRef<(() => void) | null>(null)
+
+  // Function to get base price for mock data
+  const getBasePrice = (coinId: "ethereum" | "bitcoin" | "solana") => {
+    switch(coinId) {
+      case "ethereum": return 3882;
+      case "bitcoin": return 97500;
+      case "solana": return 185;
+      default: return 3882;
+    }
+  };
+
+  // Function to generate mock real-time price updates
+  const generateMockPriceUpdate = (basePrice: number) => {
+    const volatility = 0.02; // 2% volatility
+    const change = (Math.random() - 0.5) * volatility * basePrice;
+    return basePrice + change;
+  };
+
+  // Function to generate coin-specific mock data
+  const generateCoinSpecificMockData = (basePrice: number, count: number) => {
+    const data: any[] = [];
+    let price = basePrice;
+    const baseTime = new Date('2024-01-01').getTime();
+
+    for (let i = 0; i < count; i++) {
+      const volatility = Math.random() * 0.05; // 5% max volatility
+      const change = (Math.random() - 0.5) * volatility * price;
+      const open = price;
+      const close = price + change;
+      const high = Math.max(open, close) + Math.random() * volatility * price * 0.5;
+      const low = Math.min(open, close) - Math.random() * volatility * price * 0.5;
+
+      data.push({
+        time: (baseTime + i * 24 * 60 * 60 * 1000) / 1000,
+        open: Number(open.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        low: Number(low.toFixed(2)),
+        close: Number(close.toFixed(2)),
+        volume: Math.floor(Math.random() * 1000000) + 100000
+      });
+
+      price = close;
+    }
+
+    return data;
+  };
+
+  // Connect to WebSocket for real-time price updates
+  const connectPriceWebSocket = () => {
+    // Clean up existing connection
+    if (wsCleanupRef.current) {
+      wsCleanupRef.current();
+    }
+
+    const basePrice = getBasePrice(selectedCoin);
+    
+    // Try to connect to real WebSocket
+    const cleanup = apiClient.connectWebSocket((data: any) => {
+      if (data.type === 'price_update' && data.symbol === symbol) {
+        const newPrice = data.price;
+        const change = data.change || 0;
+        
+        // Update OHLC data with new price
+        setOhlcData(prev => ({
+          ...prev,
+          close: newPrice,
+          high: Math.max(prev.high, newPrice),
+          low: Math.min(prev.low, newPrice),
+          change: change
+        }));
+      }
+    });
+
+    wsCleanupRef.current = cleanup;
+
+    // Fallback to mock updates if WebSocket fails
+    const mockInterval = setInterval(() => {
+      const newPrice = generateMockPriceUpdate(basePrice);
+      const change = ((newPrice - basePrice) / basePrice) * 100;
+      
+      // Update OHLC data with mock price
+      setOhlcData(prev => ({
+        ...prev,
+        close: newPrice,
+        high: Math.max(prev.high, newPrice),
+        low: Math.min(prev.low, newPrice),
+        change: change
+      }));
+    }, 3000); // Update every 3 seconds
+
+    return () => {
+      clearInterval(mockInterval);
+      if (cleanup) cleanup();
+    };
+  };
 
   // Fetch real chart data from backend
   useEffect(() => {
     const fetchChartData = async () => {
       try {
         setLoading(true)
-        const data = await apiClient.getChartData(symbol, selectedTimeframe, 100)
+        const response = await apiClient.getChartData(symbol, selectedTimeframe, 100)
+        
+        // Handle API response format - convert object to array
+        let data;
+        if (Array.isArray(response)) {
+          data = response;
+        } else if (typeof response === 'object' && response !== null) {
+          // Convert object with numeric keys to array
+          data = Object.values(response);
+        } else {
+          throw new Error('Invalid API response format');
+        }
+        
         setChartData(data)
         
         // Update OHLC display
         if (data.length > 0) {
-          const latest = data[data.length - 1]
-          const first = data[0]
-          const high = Math.max(...data.map(d => d.high))
-          const low = Math.min(...data.map(d => d.low))
+          const latest = data[data.length - 1] as any
+          const first = data[0] as any
+          const high = Math.max(...data.map((d: any) => d.high))
+          const low = Math.min(...data.map((d: any) => d.low))
           const change = latest.close - first.open
           
           setOhlcData({
@@ -137,35 +552,103 @@ const TradingViewChartComponent = ({
         setLoading(false)
       } catch (error) {
         console.error('Failed to fetch chart data:', error)
-        // Fallback to sample data
-        const sampleData = CustomDataService.generateSampleData(50)
+        console.error('API URL:', `${apiClient.baseUrl}/api/market/${symbol}/candles?timeframe=${selectedTimeframe}&limit=100`)
+        
+        // Generate coin-specific mock data
+        const basePrice = getBasePrice(selectedCoin);
+        const sampleData = generateCoinSpecificMockData(basePrice, 50);
         setChartData(sampleData)
+        
+        // Update OHLC display with mock data
+        if (sampleData.length > 0) {
+          const latest = sampleData[sampleData.length - 1]
+          const first = sampleData[0]
+          const high = Math.max(...sampleData.map(d => d.high))
+          const low = Math.min(...sampleData.map(d => d.low))
+          const change = latest.close - first.open
+          
+          setOhlcData({
+            open: first.open,
+            high,
+            low,
+            close: latest.close,
+            change
+          })
+        }
+        
         setLoading(false)
       }
     }
 
     fetchChartData()
 
-    // Subscribe to real-time candle updates
-    const cleanup = apiClient.connectWebSocket((message: any) => {
-      if (message.type === 'candle' && message.symbol === symbol) {
-        setChartData(prev => [...prev.slice(-99), message.data])
-      }
-    })
+    // Connect to WebSocket for real-time price updates
+    const priceWsCleanup = connectPriceWebSocket();
 
-    apiClient.subscribeToMarket(symbol)
+    // Subscribe to server real-time candle updates
+    const connectServerChartWebSocket = async () => {
+      try {
+        await apiClient.connectServerWebSocket();
+        
+        // Subscribe to SOL candles with the selected timeframe
+        const interval = selectedTimeframe === '15' ? '15m' : 
+                        selectedTimeframe === '60' ? '1h' : 
+                        selectedTimeframe === '240' ? '4h' : '1m';
+        
+        apiClient.subscribeToServerCandle('SOL', interval);
+        
+        // Listen for candle updates
+        const cleanup = apiClient.onServerMessage((message: any) => {
+          if (message.type === 'candle' && message.symbol === 'SOL') {
+            const candleData = message.data;
+            
+            // Convert to our chart data format
+            const chartCandle = {
+              time: candleData.time,
+              open: candleData.open,
+              high: candleData.high,
+              low: candleData.low,
+              close: candleData.close,
+              volume: candleData.volume
+            };
+            
+            setChartData(prev => [...prev.slice(-99), chartCandle]);
+            
+            // Update OHLC display
+            setOhlcData(prev => ({
+              ...prev,
+              close: candleData.close,
+              high: Math.max(prev.high, candleData.high),
+              low: Math.min(prev.low, candleData.low),
+              change: candleData.close - prev.open
+            }));
+          }
+        });
+        
+        return cleanup;
+      } catch (error) {
+        console.error('Failed to connect to Hyperliquid WebSocket for chart:', error);
+        return () => {};
+      }
+    };
+    
+    let chartCleanup: (() => void) | null = null;
+    connectServerChartWebSocket().then((cleanupFn) => {
+      chartCleanup = cleanupFn;
+    });
 
     // Refresh every 30 seconds
     const interval = setInterval(fetchChartData, 30000)
 
     return () => {
-      cleanup()
+      priceWsCleanup();
+      if (chartCleanup) chartCleanup();
       clearInterval(interval)
     }
   }, [symbol, selectedTimeframe])
 
-  const handleTimeframeChange = (timeframe: "15" | "1" | "3" | "5" | "30" | "60" | "240" | "120" | "180" | "D" | "W") => {
-    setSelectedTimeframe(timeframe)
+  const handleTimeframeChange = (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => {
+    onTimeframeChange(timeframe)
   }
 
   const toggleFullscreen = () => {
@@ -185,42 +668,84 @@ const TradingViewChartComponent = ({
             <span className="text-white font-semibold text-sm">Price Charts</span>
             </div>
           
-          {/* Coin Selection Buttons */}
-          <div className="flex bg-[#181825] rounded-lg p-0.5">
-            <button
-              onClick={() => onCoinChange("ethereum")}
-              className={cn(
-                "px-3 py-1 text-xs font-medium rounded-md transition-colors",
-                selectedCoin === "ethereum" 
-                  ? "bg-blue-500/20 text-blue-400" 
-                  : "text-gray-400 hover:text-white"
-              )}
-            >
-              ETH/USD
-            </button>
-            <button
-              onClick={() => onCoinChange("bitcoin")}
-              className={cn(
-                "px-3 py-1 text-xs font-medium rounded-md transition-colors",
-                selectedCoin === "bitcoin" 
-                  ? "bg-orange-500/20 text-orange-400" 
-                  : "text-gray-400 hover:text-white"
-              )}
-            >
-              BTC/USD
-            </button>
-            <button
-              onClick={() => onCoinChange("solana")}
-              className={cn(
-                "px-3 py-1 text-xs font-medium rounded-md transition-colors",
-                selectedCoin === "solana" 
-                  ? "bg-purple-500/20 text-purple-400" 
-                  : "text-gray-400 hover:text-white"
-              )}
-            >
-              SOL/USD
-            </button>
-        </div>
+          {/* Coin Selection Combobox */}
+          <Select value={selectedCoin} onValueChange={(value: "ethereum" | "bitcoin" | "solana") => onCoinChange(value)}>
+            <SelectTrigger className="w-[180px] h-10 bg-black/30 backdrop-blur-md border border-[#181825] hover:border-[#B8B8FF]/50 focus:border-[#B8B8FF]/50 focus:ring-[#B8B8FF]/20 text-white text-sm font-medium rounded-xl transition-all duration-500 hover:shadow-lg hover:shadow-[#B8B8FF]/10 px-3">
+              <div className="flex items-center gap-2">
+                {selectedCoin === "ethereum" && <FaEthereum className="w-4 h-4 text-blue-400" />}
+                {selectedCoin === "bitcoin" && <FaBitcoin className="w-4 h-4 text-orange-400" />}
+                {selectedCoin === "solana" && <SiSolana className="w-4 h-4 text-purple-400" />}
+                <span className="text-sm font-medium">
+                  {selectedCoin === "ethereum" && "ETH/USD"}
+                  {selectedCoin === "bitcoin" && "BTC/USD"}
+                  {selectedCoin === "solana" && "SOL/USD"}
+                  {!selectedCoin && "Select asset"}
+                </span>
+              </div>
+            </SelectTrigger>
+            <SelectContent className="bg-black/30 backdrop-blur-md border border-[#181825] text-white rounded-xl shadow-2xl shadow-black/50 p-2">
+              <SelectItem 
+                value="ethereum" 
+                className="text-white hover:text-white hover:bg-gradient-to-r hover:from-blue-500/20 hover:to-blue-400/10 focus:text-white focus:bg-gradient-to-r focus:from-blue-500/20 focus:to-blue-400/10 rounded-lg transition-all duration-300 cursor-pointer group data-[highlighted]:bg-gradient-to-r data-[highlighted]:from-blue-500/20 data-[highlighted]:to-blue-400/10 border-0 outline-none !border-none ring-0 focus:ring-0 focus:outline-none"
+              >
+                <div className="flex items-center gap-3 py-3 px-3">
+                  <div className="flex items-center justify-center w-8 h-8 rounded-full bg-blue-500/10 group-hover:bg-blue-500/20 transition-all duration-300">
+                    <FaEthereum className="w-5 h-5 text-blue-400 group-hover:text-blue-300 transition-colors duration-300" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-semibold text-sm text-white">Ethereum</span>
+                    <span className="text-xs text-gray-400 font-medium">ETH/USD</span>
+                  </div>
+                </div>
+              </SelectItem>
+              <SelectItem 
+                value="bitcoin" 
+                className="text-white hover:text-white hover:bg-gradient-to-r hover:from-orange-500/20 hover:to-yellow-500/10 focus:text-white focus:bg-gradient-to-r focus:from-orange-500/20 focus:to-yellow-500/10 rounded-lg transition-all duration-300 cursor-pointer group data-[highlighted]:bg-gradient-to-r data-[highlighted]:from-orange-500/20 data-[highlighted]:to-yellow-500/10 border-0 outline-none !border-none ring-0 focus:ring-0 focus:outline-none"
+              >
+                <div className="flex items-center gap-3 py-3 px-3">
+                  <div className="flex items-center justify-center w-8 h-8 rounded-full bg-orange-500/10 group-hover:bg-orange-500/20 transition-all duration-300">
+                    <FaBitcoin className="w-5 h-5 text-orange-400 group-hover:text-orange-300 transition-colors duration-300" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-semibold text-sm text-white">Bitcoin</span>
+                    <span className="text-xs text-gray-400 font-medium">BTC/USD</span>
+                  </div>
+                </div>
+              </SelectItem>
+              <SelectItem 
+                value="solana" 
+                className="text-white hover:text-white hover:bg-gradient-to-r hover:from-purple-500/20 hover:to-pink-500/10 focus:text-white focus:bg-gradient-to-r focus:from-purple-500/20 focus:to-pink-500/10 rounded-lg transition-all duration-300 cursor-pointer group data-[highlighted]:bg-gradient-to-r data-[highlighted]:from-purple-500/20 data-[highlighted]:to-pink-500/10 border-0 outline-none !border-none ring-0 focus:ring-0 focus:outline-none"
+              >
+                <div className="flex items-center gap-3 py-3 px-3">
+                  <div className="flex items-center justify-center w-8 h-8 rounded-full bg-purple-500/10 group-hover:bg-purple-500/20 transition-all duration-300">
+                    <SiSolana className="w-5 h-5 text-purple-400 group-hover:text-purple-300 transition-colors duration-300" />
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="font-semibold text-sm text-white">Solana</span>
+                    <span className="text-xs text-gray-400 font-medium">SOL/USD</span>
+                  </div>
+                </div>
+              </SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Timeframe Buttons */}
+          <div className="flex items-center space-x-1">
+            {(["1", "5", "15", "60", "240", "D"] as const).map((tf) => (
+              <button
+                key={tf}
+                onClick={() => onTimeframeChange(tf)}
+                className={cn(
+                  "px-3 py-1 text-xs font-medium rounded-lg transition-all duration-300",
+                  selectedTimeframe === tf
+                    ? "bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/10 text-[#B8B8FF] border border-[#B8B8FF]/30"
+                    : "bg-black/20 backdrop-blur-sm border border-[#181825] text-gray-400 hover:text-white hover:border-[#B8B8FF]/30 hover:bg-gradient-to-r hover:from-[#B8B8FF]/10 hover:to-transparent"
+                )}
+              >
+                {tf === "D" ? "1D" : `${tf}m`}
+              </button>
+            ))}
+          </div>
         </div>
         
         <div className="flex items-center space-x-2">
@@ -242,19 +767,12 @@ const TradingViewChartComponent = ({
         </div>
       </div>
       
-      {/* CoinGecko Chart Widget */}
+      {/* Lightweight Charts */}
       <div className={cn(
         "transition-all duration-300",
         isFullscreen ? "h-[calc(100vh-48px)]" : "h-[calc(100%-48px)]"
       )}>
-        <CoinGeckoWidgetMemo coinId={selectedCoin} />
-      </div>
-      
-      {/* Chart footer - Powered by TradingView */}
-      <div className="h-10 flex items-center justify-center px-4 border-t border-[#181825]">
-        <div className="text-xs text-gray-500">
-          Charts powered by <span className="text-gray-400">TradingView</span>
-        </div>
+        <LightweightChartMemo coinId={selectedCoin} timeframe={selectedTimeframe} />
       </div>
     </div>
   )
@@ -283,7 +801,6 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
 
     fetchOrderbook()
 
-    // Subscribe to real-time orderbook updates via WebSocket
     const cleanup = apiClient.connectWebSocket((message: any) => {
       setWsConnected(true); // Mark as connected when we receive any message
       if (message.type === 'orderbook' && message.symbol === symbol) {
@@ -292,10 +809,11 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
       if (message.type === 'trade' && message.symbol === symbol) {
         setRecentTrades(prev => [message.data, ...prev].slice(0, 20))
       }
-    }, () => {
-      // WebSocket error (silently handled)
-      setWsConnected(false);
     })
+    
+    return () => {
+      if (cleanup) cleanup();
+    };
 
     apiClient.subscribeToOrderbook(symbol)
 
@@ -1330,7 +1848,7 @@ Margin calculation on NET exposure:
             className={cn(
               "flex-1 py-2 rounded-md text-sm font-bold transition-all",
               tradeSide === "buy"
-                ? "bg-gradient-to-r from-green-500/30 to-emerald-600/20 text-green-300 border border-green-500/40"
+                ? "bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 text-[#B8B8FF] border border-[#B8B8FF]/40"
                 : "text-gray-500 hover:text-gray-300"
             )}
           >
@@ -1341,7 +1859,7 @@ Margin calculation on NET exposure:
             className={cn(
               "flex-1 py-2 rounded-md text-sm font-bold transition-all",
               tradeSide === "sell"
-                ? "bg-gradient-to-r from-red-500/30 to-rose-600/20 text-red-300 border border-red-500/40"
+                ? "bg-gradient-to-r from-orange-500/30 to-yellow-500/20 text-orange-300 border border-orange-500/40"
                 : "text-gray-500 hover:text-gray-300"
             )}
           >
@@ -1941,7 +2459,7 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowArchitecture(true)}
-              className="h-7 w-7 flex items-center justify-center text-[11px] font-medium bg-gradient-to-r from-purple-600/20 to-pink-600/20 hover:from-purple-600/30 hover:to-pink-600/30 border border-purple-500/30 rounded-md transition-all duration-200 text-purple-400 hover:text-purple-300"
+              className="h-7 w-7 flex items-center justify-center text-[11px] font-medium bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/10 hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-md transition-all duration-200 text-[#B8B8FF] hover:text-white"
               title="How it works"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1952,7 +2470,7 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
             </button>
             <Link 
               href="/monitor"
-              className="h-7 px-3 flex items-center gap-1.5 text-[11px] font-medium bg-gradient-to-r from-cyan-600/20 to-blue-600/20 hover:from-cyan-600/30 hover:to-blue-600/30 border border-cyan-500/30 rounded-md transition-all duration-200 text-cyan-400 hover:text-cyan-300"
+              className="h-7 px-3 flex items-center gap-1.5 text-[11px] font-medium bg-gradient-to-r from-orange-500/20 to-yellow-500/10 hover:from-orange-500/30 hover:to-yellow-500/20 border border-orange-500/30 rounded-md transition-all duration-200 text-orange-300 hover:text-orange-200"
             >
               <Activity className="w-3 h-3" />
               <span>Monitor</span>
@@ -1968,7 +2486,7 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
             className={cn(
               "flex-1 py-3 px-4 rounded-lg text-sm font-bold transition-all",
               tradeSide === "buy"
-                ? "bg-gradient-to-r from-green-500/30 to-emerald-500/20 text-green-400 border-2 border-green-500/50 shadow-lg shadow-green-500/20"
+                ? "bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 text-[#B8B8FF] border-2 border-[#B8B8FF]/50 shadow-lg shadow-[#B8B8FF]/20"
                 : "text-gray-500 hover:text-gray-300"
             )}
           >
@@ -1982,7 +2500,7 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
             className={cn(
               "flex-1 py-3 px-4 rounded-lg text-sm font-bold transition-all",
               tradeSide === "sell"
-                ? "bg-gradient-to-r from-red-500/30 to-rose-500/20 text-red-400 border-2 border-red-500/50 shadow-lg shadow-red-500/20"
+                ? "bg-gradient-to-r from-orange-500/30 to-yellow-500/20 text-orange-300 border-2 border-orange-500/50 shadow-lg shadow-orange-500/20"
                 : "text-gray-500 hover:text-gray-300"
             )}
           >
@@ -2047,11 +2565,6 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
                 <span className="text-gray-400 text-[10px]">Tx Fee (each):</span>
                 <span className="text-gray-500 text-[10px]">~0.000005 SOL</span>
               </div>
-            </div>
-            <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-2">
-              <p className="text-[10px] text-blue-400">
-                💡 <span className="font-semibold">Testing Mode:</span> Only SOL needed for transaction fees!
-              </p>
             </div>
           </div>
         )}
@@ -2484,59 +2997,10 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
   )
 }
 
-// Bottom Assets Bar
-const AssetsBar = () => {
-  const assets = [
-    { symbol: "144.1", price: "+1.14%", positive: true },
-    { symbol: "ZEN", price: "12.810 +13.16%", positive: true },
-    { symbol: "USELESS", price: "0.32951 +3.89%", positive: true },
-    { symbol: "S", price: "0.1738 -2.79%", positive: false },
-    { symbol: "ZEC", price: "280.92 +20.58%", positive: true },
-    { symbol: "ASTER", price: "1.1430 -6.62%", positive: false },
-    { symbol: "AAVE", price: "225.86 +0.54%", positive: true },
-    { symbol: "SPX", price: "1.0177 -1.59%", positive: false },
-    { symbol: "IP", price: "5.4900 -0.16%", positive: false },
-    { symbol: "XPL", price: "0.3833 -9.59%", positive: false },
-    { symbol: "TRUMP", price: "5.932 -C", positive: false },
-  ]
-
-  return (
-    <div className="w-full bg-black/20 backdrop-blur-md border border-[#181825] rounded-2xl p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-6">
-          <div className="flex items-center space-x-4 text-sm">
-            <span className="text-green-400">Operational</span>
-            <span className="text-gray-400">Join our community</span>
-            <span className="text-gray-400">Charts powered by TradingView</span>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-4 overflow-x-auto">
-          {assets.map((asset, index) => (
-            <div key={index} className="flex items-center space-x-2 whitespace-nowrap">
-              <span className="text-white text-sm">{asset.symbol}</span>
-              <span className={cn(
-                "text-sm",
-                asset.positive ? "text-green-400" : "text-red-400"
-              )}>
-                {asset.price}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex items-center space-x-2">
-          <input type="checkbox" className="w-4 h-4 text-[#B8B8FF] bg-[#181825] border-[#181825] rounded focus:ring-[#B8B8FF]/50" />
-          <span className="text-sm text-gray-400">Hide other symbols</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function TradingDashboard() {
   // Default to ETH chart
   const [selectedCoin, setSelectedCoin] = useState<"ethereum" | "bitcoin" | "solana">("ethereum")
+  const [selectedTimeframe, setSelectedTimeframe] = useState<"1" | "5" | "15" | "60" | "240" | "D">("15")
   const wallet = useWallet();
   const { publicKey, connected } = wallet;
   const [faucetLoading, setFaucetLoading] = useState(false);
@@ -2683,24 +3147,15 @@ export default function TradingDashboard() {
             </motion.div>
           )}
           
-          {/* Right - Phantom Wallet */}
           <div className="wallet-adapter-button-trigger-wrapper ml-auto">
             {mounted ? (
-              <WalletMultiButton style={{ 
-                height: '32px',
-                fontSize: '12px',
-                padding: '0 16px',
-                backgroundColor: 'rgba(184, 184, 255, 0.15)',
-                border: '1px solid rgba(184, 184, 255, 0.4)',
-                borderRadius: '8px'
-              }} />
+              <WalletMultiButton />
             ) : (
               <div style={{ 
                 height: '32px',
                 fontSize: '12px',
                 padding: '0 16px',
                 backgroundColor: 'rgba(184, 184, 255, 0.1)',
-                border: '1px solid rgba(184, 184, 255, 0.3)',
                 borderRadius: '8px',
                 display: 'flex',
                 alignItems: 'center',
@@ -2750,12 +3205,13 @@ export default function TradingDashboard() {
             )}
           </div>
 
-          {/* Center - Chart */}
           <div className="col-span-6">
             <TradingViewChartComponent 
               symbol={selectedSymbol} 
               selectedCoin={selectedCoin}
               onCoinChange={setSelectedCoin}
+              selectedTimeframe={selectedTimeframe}
+              onTimeframeChange={setSelectedTimeframe}
             />
           </div>
 
@@ -2765,9 +3221,6 @@ export default function TradingDashboard() {
             <PastTrades symbol={selectedSymbol} />
           </div>
         </div>
-
-        {/* Bottom Assets Bar */}
-        <AssetsBar />
       </main>
     </div>
   )

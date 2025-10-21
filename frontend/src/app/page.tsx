@@ -231,65 +231,65 @@ export default function Home() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {/* Slab */}
-            <GlossaryCard
-              term="Slab"
-              definition="A 10MB memory block containing an entire market - order book, positions, and all trading data in one contiguous space for maximum speed."
+            <FeatureCard
+              title="Slab"
+              description="A 10MB memory block containing an entire market - order book, positions, and all trading data in one contiguous space for maximum speed."
               icon={<Database className="w-6 h-6" />}
             />
 
             {/* Reserve-Commit */}
-            <GlossaryCard
-              term="Reserve-Commit"
-              definition="Two-phase trading: First 'reserve' locks liquidity at current prices, then 'commit' executes the trade - preventing price manipulation between steps."
+            <FeatureCard
+              title="Reserve-Commit"
+              description="Two-phase trading: First 'reserve' locks liquidity at current prices, then 'commit' executes the trade - preventing price manipulation between steps."
               icon={<Lock className="w-6 h-6" />}
             />
 
             {/* Slice */}
-            <GlossaryCard
-              term="Slice"
-              definition="A piece of reserved liquidity from a specific order. Your reservation might grab slices from multiple orders to fill your size."
+            <FeatureCard
+              title="Slice"
+              description="A piece of reserved liquidity from a specific order. Your reservation might grab slices from multiple orders to fill your size."
               icon={<Layers className="w-6 h-6" />}
             />
 
             {/* DLP */}
-            <GlossaryCard
-              term="DLP"
-              definition="Designated Liquidity Provider - VIP traders who can post orders immediately and trade during freeze windows. Think of them as market makers with special access."
+            <FeatureCard
+              title="DLP"
+              description="Designated Liquidity Provider - VIP traders who can post orders immediately and trade during freeze windows. Think of them as market makers with special access."
               icon={<Shield className="w-6 h-6" />}
             />
 
             {/* Kill Band */}
-            <GlossaryCard
-              term="Kill Band"
-              definition="Safety check that rejects trades if the price moved too much (default 1%) since you reserved. Protects you from stale prices."
+            <FeatureCard
+              title="Kill Band"
+              description="Safety check that rejects trades if the price moved too much (default 1%) since you reserved. Protects you from stale prices."
               icon={<Zap className="w-6 h-6" />}
             />
 
             {/* ARG */}
-            <GlossaryCard
-              term="ARG Tax"
-              definition="Aggressor Roundtrip Guard - detects if you buy AND sell in the same batch (sandwich attempt) and charges you extra. Anti-manipulation."
+            <FeatureCard
+              title="ARG Tax"
+              description="Aggressor Roundtrip Guard - detects if you buy AND sell in the same batch (sandwich attempt) and charges you extra. Anti-manipulation."
               icon={<Shield className="w-6 h-6" />}
             />
 
             {/* Portfolio */}
-            <GlossaryCard
-              term="Portfolio"
-              definition="Your cross-market account tracking total exposure and risk across all slabs. One portfolio, many markets."
+            <FeatureCard
+              title="Portfolio"
+              description="Your cross-market account tracking total exposure and risk across all slabs. One portfolio, many markets."
               icon={<TrendingUp className="w-6 h-6" />}
             />
 
             {/* Capability Token */}
-            <GlossaryCard
-              term="Capability Token"
-              definition="Time-limited (2min max) authorization pass that lets specific markets access your funds. Scoped security - no blanket permissions."
+            <FeatureCard
+              title="Capability Token"
+              description="Time-limited (2min max) authorization pass that lets specific markets access your funds. Scoped security - no blanket permissions."
               icon={<Lock className="w-6 h-6" />}
             />
 
             {/* Funding Rate */}
-            <GlossaryCard
-              term="Funding Rate"
-              definition="Hourly payment between longs and shorts that keeps perpetual prices anchored to spot. If perp > spot, longs pay shorts (and vice versa)."
+            <FeatureCard
+              title="Funding Rate"
+              description="Hourly payment between longs and shorts that keeps perpetual prices anchored to spot. If perp > spot, longs pay shorts (and vice versa)."
               icon={<TrendingUp className="w-6 h-6" />}
             />
           </div>

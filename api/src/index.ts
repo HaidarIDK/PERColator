@@ -11,7 +11,7 @@ import { claimsRouter } from './routes/claims';
 import { faucetRouter } from './routes/faucet';
 import { monitorRouter } from './routes/monitor';
 import { initializeSolana } from './services/solana';
-import { startWebSocketServer } from './services/websocket';
+import { initializeWebSocketServer } from './services/websocket-server';
 
 dotenv.config();
 
@@ -44,6 +44,7 @@ app.get('/', (req, res) => {
       claims: '/api/claims/*',
       faucet: '/api/faucet/*',
       monitor: '/api/monitor/*',
+      hyperliquid: '/api/hyperliquid/*',
       websocket: 'ws://localhost:3000/ws'
     },
     docs: 'See api/README.md for full API documentation'
@@ -95,8 +96,7 @@ async function start() {
     });
 
     // Start WebSocket server
-    startWebSocketServer(server);
-    console.log('🔌 WebSocket server started');
+    initializeWebSocketServer(server);
 
   } catch (error) {
     console.error('❌ Failed to start server:', error);

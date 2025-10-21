@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from "react"
 import { motion } from "motion/react"
+import { Particles } from "@/components/ui/particles"
+import { AuroraText } from "@/components/ui/aurora-text"
+import { FloatingNavbar } from "@/components/ui/floating-navbar"
 import { 
   Activity, 
   TrendingUp, 
@@ -105,12 +108,12 @@ export default function MonitorPage() {
 
   const getTypeColor = (type: string) => {
     const colors: Record<string, string> = {
-      trade: 'text-green-400',
-      position: 'text-blue-400',
+      trade: 'text-[#B8B8FF]',
+      position: 'text-[#B8B8FF]',
       liquidation: 'text-red-400',
-      funding: 'text-purple-400',
+      funding: 'text-[#B8B8FF]',
       reserve: 'text-yellow-400',
-      commit: 'text-cyan-400',
+      commit: 'text-[#B8B8FF]',
     }
     return colors[type] || 'text-gray-400'
   }
@@ -128,129 +131,166 @@ export default function MonitorPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="text-white">Loading monitor data...</div>
+      <div className="relative min-h-screen bg-black overflow-hidden">
+        <Particles
+          className="absolute inset-0 z-10"
+          quantity={30}
+          color="#B8B8FF"
+          size={0.6}
+          staticity={30}
+          ease={80}
+        />
+        <div className="relative z-10 min-h-screen flex items-center justify-center">
+          <div className="text-white">Loading monitor data...</div>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-black text-white p-6">
-      {/* Header */}
-      <div className="max-w-7xl mx-auto mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-4xl font-bold mb-2">Slab Monitor</h1>
-            <p className="text-gray-400">Real-time transaction and slab state monitoring</p>
-          </div>
-          <div className="flex gap-4 items-center">
-            <Link 
-              href="/dashboard"
-              className="px-4 py-2 bg-gray-800 rounded-lg hover:bg-gray-700 transition-colors"
-            >
-              Back to Dashboard
-            </Link>
-            <button
-              onClick={() => setAutoRefresh(!autoRefresh)}
-              className={`px-4 py-2 rounded-lg transition-colors flex items-center gap-2 ${
-                autoRefresh ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-800 hover:bg-gray-700'
-              }`}
-            >
-              <RefreshCw className={`w-4 h-4 ${autoRefresh ? 'animate-spin' : ''}`} />
-              {autoRefresh ? 'Auto-Refresh ON' : 'Auto-Refresh OFF'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats Cards */}
-      {stats && (
-        <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+    <div className="relative min-h-screen bg-black overflow-hidden">
+      <Particles
+        className="absolute inset-0 z-10"
+        quantity={30}
+        color="#B8B8FF"
+        size={0.6}
+        staticity={30}
+        ease={80}
+      />
+      
+      <FloatingNavbar />
+      
+      <main className="relative z-10 pt-32 pb-20 px-4 text-white">
+        {/* Header */}
+        <div className="max-w-7xl mx-auto mb-8">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-gradient-to-br from-purple-900/30 to-purple-600/10 border border-purple-500/30 rounded-lg p-6"
+            transition={{ duration: 0.8 }}
+            className="flex items-center justify-between"
           >
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-purple-400">
-                <Users className="w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">{stats.total_users}</div>
+            <div>
+              <h1 className="text-5xl md:text-6xl font-bold mb-4">
+                <AuroraText
+                  speed={0.8}
+                  colors={["#B8B8FF", "#B8B8FF", "#B8B8FF", "#B8B8FF"]}
+                  className="bg-gradient-to-r from-orange-400 via-yellow-400 to-orange-500 bg-clip-text text-transparent"
+                >
+                  Slab Monitor
+                </AuroraText>
+              </h1>
+              <p className="text-xl text-gray-400">Real-time transaction and slab state monitoring</p>
             </div>
-            <div className="text-sm text-gray-400">Total Users</div>
-            <div className="text-xs text-green-400 mt-1">
-              {stats.active_users_24h} active (24h)
-            </div>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="bg-gradient-to-br from-green-900/30 to-green-600/10 border border-green-500/30 rounded-lg p-6"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-green-400">
-                <DollarSign className="w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">${(stats.total_volume_24h / 1000000).toFixed(2)}M</div>
-            </div>
-            <div className="text-sm text-gray-400">24h Volume</div>
-            <div className="text-xs text-green-400 mt-1">
-              {stats.total_trades_24h} trades
-            </div>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="bg-gradient-to-br from-blue-900/30 to-blue-600/10 border border-blue-500/30 rounded-lg p-6"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-blue-400">
-                <TrendingUp className="w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">${(stats.total_tvl / 1000000).toFixed(2)}M</div>
-            </div>
-            <div className="text-sm text-gray-400">Total TVL</div>
-            <div className="text-xs text-blue-400 mt-1">
-              ${(stats.total_open_interest / 1000000).toFixed(2)}M OI
-            </div>
-          </motion.div>
-
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
-            className="bg-gradient-to-br from-cyan-900/30 to-cyan-600/10 border border-cyan-500/30 rounded-lg p-6"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-cyan-400">
-                <Activity className="w-6 h-6" />
-              </div>
-              <div className="text-2xl font-bold">{stats.total_slabs}</div>
-            </div>
-            <div className="text-sm text-gray-400">Active Slabs</div>
-            <div className="text-xs text-green-400 mt-1">
-              {stats.system_health} • {stats.uptime}% uptime
+            <div className="flex gap-4 items-center">
+              <Link 
+                href="/dashboard"
+                className="px-6 py-3 bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 rounded-xl hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm text-white"
+              >
+                Back to Dashboard
+              </Link>
+              <button
+                onClick={() => setAutoRefresh(!autoRefresh)}
+                className={`px-6 py-3 rounded-xl transition-all duration-300 flex items-center gap-2 backdrop-blur-sm ${
+                  autoRefresh 
+                    ? 'bg-[#B8B8FF]/20 border border-[#B8B8FF]/50 text-white hover:bg-[#B8B8FF]/30' 
+                    : 'bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50'
+                }`}
+              >
+                <RefreshCw className={`w-4 h-4 ${autoRefresh ? 'animate-spin' : ''}`} />
+                {autoRefresh ? 'Auto-Refresh ON' : 'Auto-Refresh OFF'}
+              </button>
             </div>
           </motion.div>
         </div>
-      )}
 
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Slab State */}
-        {slabState && (
-          <motion.div
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="bg-gray-900/50 border border-gray-800 rounded-lg p-6"
-          >
-            <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-              <Eye className="w-6 h-6 text-cyan-400" />
-              Slab State
-            </h2>
+        {/* Stats Cards */}
+        {stats && (
+          <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[#B8B8FF]">
+                  <Users className="w-6 h-6" />
+                </div>
+                <div className="text-2xl font-bold text-white">{stats.total_users}</div>
+              </div>
+              <div className="text-sm text-gray-400">Total Users</div>
+              <div className="text-xs text-[#B8B8FF] mt-1">
+                {stats.active_users_24h} active (24h)
+              </div>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[#B8B8FF]">
+                  <DollarSign className="w-6 h-6" />
+                </div>
+                <div className="text-2xl font-bold text-white">${(stats.total_volume_24h / 1000000).toFixed(2)}M</div>
+              </div>
+              <div className="text-sm text-gray-400">24h Volume</div>
+              <div className="text-xs text-[#B8B8FF] mt-1">
+                {stats.total_trades_24h} trades
+              </div>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[#B8B8FF]">
+                  <TrendingUp className="w-6 h-6" />
+                </div>
+                <div className="text-2xl font-bold text-white">${(stats.total_tvl / 1000000).toFixed(2)}M</div>
+              </div>
+              <div className="text-sm text-gray-400">Total TVL</div>
+              <div className="text-xs text-[#B8B8FF] mt-1">
+                ${(stats.total_open_interest / 1000000).toFixed(2)}M OI
+              </div>
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 }}
+              className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[#B8B8FF]">
+                  <Activity className="w-6 h-6" />
+                </div>
+                <div className="text-2xl font-bold text-white">{stats.total_slabs}</div>
+              </div>
+              <div className="text-sm text-gray-400">Active Slabs</div>
+              <div className="text-xs text-[#B8B8FF] mt-1">
+                {stats.system_health} • {stats.uptime}% uptime
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Slab State */}
+          {slabState && (
+            <motion.div
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+            >
+              <h2 className="text-2xl font-bold mb-4 flex items-center gap-2 text-white">
+                <Eye className="w-6 h-6 text-[#B8B8FF]" />
+                Slab State
+              </h2>
             
             <div className="space-y-4">
               <div className="bg-black/30 rounded-lg p-4">
@@ -305,15 +345,15 @@ export default function MonitorPage() {
                 </div>
               </div>
 
-              <div className="bg-gradient-to-br from-cyan-900/30 to-green-900/20 border border-cyan-500/30 rounded-lg p-4">
-                <div className="text-sm text-cyan-400 mb-1 flex items-center gap-2">
+              <div className="bg-gradient-to-br from-[#B8B8FF]/20 to-[#B8B8FF]/10 border border-[#B8B8FF]/30 rounded-xl p-4">
+                <div className="text-sm text-[#B8B8FF] mb-1 flex items-center gap-2">
                   <span>Rent Required</span>
-                  <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded-full font-bold">ULTRA-CHEAP!</span>
+                  <span className="text-xs bg-[#B8B8FF]/20 text-[#B8B8FF] px-2 py-0.5 rounded-full font-bold">ULTRA-CHEAP!</span>
                 </div>
-                <div className="text-3xl font-bold text-cyan-300 mb-1">
+                <div className="text-3xl font-bold text-white mb-1">
                   {slabState.stats.estimated_rent_sol.toFixed(2)} SOL
                 </div>
-                <div className="text-xs text-green-400 font-semibold mb-1">
+                <div className="text-xs text-[#B8B8FF] font-semibold mb-1">
                   Saved 72.5 SOL vs 10MB design! 🎉
                 </div>
                 <div className="text-xs text-gray-400">
@@ -324,16 +364,16 @@ export default function MonitorPage() {
           </motion.div>
         )}
 
-        {/* Transaction Feed */}
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="bg-gray-900/50 border border-gray-800 rounded-lg p-6"
-        >
-          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <Activity className="w-6 h-6 text-green-400" />
-            Last 5 Transactions
-          </h2>
+          {/* Transaction Feed */}
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-2xl p-6 hover:border-[#B8B8FF]/50 transition-all duration-300"
+          >
+            <h2 className="text-2xl font-bold mb-4 flex items-center gap-2 text-white">
+              <Activity className="w-6 h-6 text-[#B8B8FF]" />
+              Last 5 Transactions
+            </h2>
 
           <div className="space-y-3">
             {transactions.length === 0 ? (
@@ -349,7 +389,7 @@ export default function MonitorPage() {
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ delay: index * 0.05 }}
-                  className="bg-gradient-to-br from-gray-900/80 to-gray-900/50 border border-gray-800 rounded-lg p-4 hover:border-gray-700 hover:shadow-lg hover:shadow-gray-900/50 transition-all duration-200"
+                  className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/20 rounded-xl p-4 hover:border-[#B8B8FF]/40 hover:shadow-lg hover:shadow-[#B8B8FF]/10 transition-all duration-300"
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div className="flex items-center gap-2">
@@ -373,19 +413,19 @@ export default function MonitorPage() {
                   <div className="flex items-center justify-between">
                     {tx.user && (
                       <div className="text-xs text-gray-500">
-                        <span className="font-mono bg-gray-800/50 px-2 py-1 rounded">{tx.user}</span>
+                        <span className="font-mono bg-[#B8B8FF]/10 border border-[#B8B8FF]/20 px-2 py-1 rounded">{tx.user}</span>
                       </div>
                     )}
 
                     {tx.amount && (
-                      <div className="text-sm font-bold text-green-400">
+                      <div className="text-sm font-bold text-[#B8B8FF]">
                         ${tx.amount.toLocaleString()}
                       </div>
                     )}
                   </div>
 
                   {tx.signature && (
-                    <div className="text-xs text-gray-600 font-mono break-all mt-2 bg-black/30 px-2 py-1 rounded">
+                    <div className="text-xs text-gray-400 font-mono break-all mt-2 bg-[#B8B8FF]/5 border border-[#B8B8FF]/10 px-2 py-1 rounded">
                       {tx.signature}
                     </div>
                   )}
@@ -394,8 +434,8 @@ export default function MonitorPage() {
             )}
           </div>
         </motion.div>
-      </div>
-
+        </div>
+      </main>
     </div>
   )
 }

@@ -4,6 +4,7 @@
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3000/ws';
+const SERVER_WS_URL = process.env.NEXT_PUBLIC_SERVER_WS_URL || 'ws://localhost:3000/ws';
 
 // ============================================
 // TYPE DEFINITIONS
@@ -78,18 +79,251 @@ export interface FaucetClaimResult {
   error?: string;
 }
 
+// Server WebSocket types (matching your server implementation)
+export interface ServerCandleData {
+  symbol: string;
+  timeframe: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  trades: number;
+  priceChange: number;
+  priceChangePercent: number;
+}
+
+export interface ServerWebSocketMessage {
+  type: 'candle' | 'subscription' | 'error';
+  subscriptionId?: string;
+  data?: ServerCandleData;
+  error?: string;
+}
+
+// ============================================
+// SERVER WEBSOCKET CLIENT
+// ============================================
+
+class ServerWebSocketClient {
+  private ws: WebSocket | null = null;
+  private subscriptions = new Set<string>();
+  private messageHandlers = new Map<string, (data: any) => void>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+
+  connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        console.log('[Server] Already connected');
+        resolve();
+        return;
+      }
+
+      try {
+        console.log('[Server] Attempting to connect to:', SERVER_WS_URL);
+        this.ws = new WebSocket(SERVER_WS_URL);
+
+        this.ws.onopen = () => {
+          console.log('[Server] ✅ Connected successfully');
+          this.reconnectAttempts = 0;
+          this.reconnectDelay = 1000;
+          
+          // Resubscribe to all active subscriptions
+          this.resubscribeToAll();
+          
+          resolve();
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            const msg: ServerWebSocketMessage = JSON.parse(event.data);
+            this.handleMessage(msg);
+          } catch (e) {
+            console.error('[Server] Parse error:', e, 'Raw data:', event.data);
+          }
+        };
+
+        this.ws.onerror = (err) => {
+          console.error('[Server] ❌ WebSocket error:', err);
+          reject(err);
+        };
+
+        this.ws.onclose = (event) => {
+          console.log('[Server] ⚠️ Disconnected', event.code, event.reason);
+          this.ws = null;
+          
+          // Attempt to reconnect if not a manual close
+          if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.scheduleReconnect();
+          }
+        };
+      } catch (error) {
+        console.error('[Server] ❌ Failed to create WebSocket:', error);
+        reject(error);
+      }
+    });
+  }
+
+  private handleMessage(msg: ServerWebSocketMessage) {
+    console.log('[Server] Received message:', msg);
+    
+    if (msg.type === 'subscription') {
+      console.log('[Server] Subscription confirmed:', msg.subscriptionId);
+      return;
+    }
+    
+    if (msg.type === 'candle' && msg.data) {
+      const candleData = msg.data;
+      console.log('[Server] Candle data received:', candleData);
+      
+      const candle: CandlestickData = {
+        time: Math.floor(candleData.timestamp / 1000), // Convert milliseconds to seconds
+        open: candleData.open,
+        high: candleData.high,
+        low: candleData.low,
+        close: candleData.close,
+        volume: candleData.volume,
+      };
+
+      console.log('[Server] Processed candle:', candle);
+
+      this.messageHandlers.forEach((handler) =>
+        handler({ 
+          type: 'candle', 
+          symbol: candleData.symbol,
+          timeframe: candleData.timeframe,
+          subscriptionId: msg.subscriptionId,
+          data: candle,
+          serverData: candleData // Include full server data
+        })
+      );
+    }
+    
+    if (msg.type === 'error') {
+      console.error('[Server] Error:', msg.error);
+    }
+  }
+
+  subscribeToCandle(symbol: string, interval = '1m') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('[Server] WebSocket not ready for subscription');
+      return;
+    }
+
+    const key = `${symbol}-${interval}`;
+    if (this.subscriptions.has(key)) return;
+
+    const msg = {
+      type: 'subscribe',
+      symbol: symbol,
+      interval: interval
+    };
+
+    this.ws.send(JSON.stringify(msg));
+    this.subscriptions.add(key);
+    console.log(`[Server] Subscribed to ${symbol} ${interval}`, msg);
+  }
+
+  unsubscribeFromCandle(symbol: string, interval = '1m') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const key = `${symbol}-${interval}`;
+    if (!this.subscriptions.has(key)) return;
+
+    const msg = {
+      type: 'unsubscribe',
+      symbol: symbol,
+      interval: interval
+    };
+
+    this.ws.send(JSON.stringify(msg));
+    this.subscriptions.delete(key);
+    console.log(`[Server] Unsubscribed from ${symbol} ${interval}`, msg);
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+    }
+
+    this.reconnectAttempts++;
+    console.log(`[Server] Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${this.reconnectDelay}ms`);
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.connect().catch((error) => {
+        console.error('[Server] Reconnect failed:', error);
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
+          this.scheduleReconnect();
+        } else {
+          console.error('[Server] Max reconnect attempts reached');
+        }
+      });
+    }, this.reconnectDelay);
+  }
+
+  private resubscribeToAll() {
+    console.log('[Server] Resubscribing to all active subscriptions:', Array.from(this.subscriptions));
+    
+    for (const subscription of this.subscriptions) {
+      const [symbol, interval] = subscription.split('-');
+      const msg = {
+        type: 'subscribe',
+        symbol: symbol,
+        interval: interval
+      };
+      
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(msg));
+        console.log(`[Server] Resubscribed to ${symbol} ${interval}`);
+      }
+    }
+  }
+
+  onMessage(handler: (data: any) => void): () => void {
+    const id = Math.random().toString(36).slice(2);
+    this.messageHandlers.set(id, handler);
+    return () => this.messageHandlers.delete(id);
+  }
+
+  disconnect() {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+    
+    if (this.ws) {
+      this.ws.close(1000, 'Manual disconnect');
+      this.ws = null;
+    }
+    this.subscriptions.clear();
+    this.messageHandlers.clear();
+    this.reconnectAttempts = 0;
+    this.reconnectDelay = 1000;
+  }
+
+  isConnected(): boolean {
+    return !!this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+}
+
 // ============================================
 // API CLIENT CLASS
 // ============================================
 
 class PercolatorAPIClient {
-  private baseUrl: string;
+  public baseUrl: string;
   private wsUrl: string;
   private ws: WebSocket | null = null;
+  private serverWs: ServerWebSocketClient;
 
   constructor() {
     this.baseUrl = API_URL;
     this.wsUrl = WS_URL;
+    this.serverWs = new ServerWebSocketClient();
   }
 
   // ==========================================
@@ -103,7 +337,12 @@ class PercolatorAPIClient {
   }
 
   async getMarketData(symbol: string): Promise<MarketData> {
-    const res = await fetch(`${this.baseUrl}/api/market/${symbol}`);
+    // Map symbol to your API format
+    const apiSymbol = symbol === 'SOL' ? 'SOL-PERP' : 
+                     symbol === 'ETH' ? 'ETH-PERP' : 
+                     symbol === 'BTC' ? 'BTC-PERP' : symbol;
+    
+    const res = await fetch(`${this.baseUrl}/api/market/${apiSymbol}`);
     if (!res.ok) throw new Error(`Failed to fetch market data for ${symbol}`);
     return res.json();
   }
@@ -114,14 +353,13 @@ class PercolatorAPIClient {
     return res.json();
   }
 
-  async getChartData(
-    symbol: string,
-    timeframe: string = '15',
-    limit: number = 100
-  ): Promise<CandlestickData[]> {
-    const res = await fetch(
-      `${this.baseUrl}/api/market/${symbol}/candles?timeframe=${timeframe}&limit=${limit}`
-    );
+  async getChartData(symbol: string, timeframe: string = '15', limit: number = 100): Promise<CandlestickData[]> {
+    // Map timeframe to your API format
+    const apiSymbol = symbol === 'SOL' ? 'SOL-PERP' : 
+                     symbol === 'ETH' ? 'ETH-PERP' : 
+                     symbol === 'BTC' ? 'BTC-PERP' : symbol;
+    
+    const res = await fetch(`${this.baseUrl}/api/market/${apiSymbol}/candles?limit=${limit}`);
     if (!res.ok) throw new Error(`Failed to fetch chart data for ${symbol}`);
     return res.json();
   }
@@ -156,14 +394,14 @@ class PercolatorAPIClient {
     const res = await fetch(`${this.baseUrl}/api/faucet/claim`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ walletAddress })
+      body: JSON.stringify({ walletAddress }),
     });
-    
+
     if (!res.ok) {
       const error = await res.json();
       return { success: false, error: error.error || 'Failed to claim from faucet' };
     }
-    
+
     return res.json();
   }
 
@@ -177,69 +415,67 @@ class PercolatorAPIClient {
   // WEBSOCKET (Real-time updates)
   // ==========================================
 
-  connectWebSocket(
-    onMessage: (data: unknown) => void,
-    onError?: (error: Event) => void
-  ): () => void {
+  connectWebSocket(onMessage: (data: unknown) => void): () => void {
     try {
       this.ws = new WebSocket(this.wsUrl);
-
-      this.ws.onopen = () => {
-        // WebSocket connected
-      };
-
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           onMessage(data);
-        } catch (err) {
-          // Ignore parse errors
+        } catch {
+          /* ignore parse errors */
         }
       };
-
-      this.ws.onerror = () => {
-        // Silent - no console errors for clean demo
-      };
-
-      this.ws.onclose = () => {
-        // WebSocket closed
-      };
-
-      // Return cleanup function
       return () => {
-        if (this.ws) {
-          try {
-            this.ws.close();
-          } catch (e) {
-            // Ignore close errors
-          }
-          this.ws = null;
-        }
+        this.ws?.close();
+        this.ws = null;
       };
-    } catch (error) {
-      // WebSocket connection failed (normal during dev)
+    } catch {
       return () => {};
     }
   }
 
   subscribeToMarket(symbol: string) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        type: 'subscribe',
-        channel: 'market',
-        symbol
-      }));
-    }
+    this.ws?.readyState === WebSocket.OPEN &&
+      this.ws.send(JSON.stringify({ type: 'subscribe', channel: 'market', symbol }));
   }
 
   subscribeToOrderbook(symbol: string) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        type: 'subscribe',
-        channel: 'orderbook',
-        symbol
-      }));
+    this.ws?.readyState === WebSocket.OPEN &&
+      this.ws.send(JSON.stringify({ type: 'subscribe', channel: 'orderbook', symbol }));
+  }
+
+  // ==========================================
+  // SERVER WEBSOCKET METHODS (RECOMMENDED)
+  // ==========================================
+
+  async connectServerWebSocket(): Promise<void> {
+    try {
+      await this.serverWs.connect();
+    } catch (error) {
+      console.error('Failed to connect to Server WebSocket:', error);
+      throw error;
     }
+  }
+
+  subscribeToServerCandle(symbol: string, interval: string = '1m') {
+    this.serverWs.subscribeToCandle(symbol, interval);
+  }
+
+  unsubscribeFromServerCandle(symbol: string, interval: string = '1m') {
+    this.serverWs.unsubscribeFromCandle(symbol, interval);
+  }
+
+  onServerMessage(handler: (data: any) => void): () => void {
+    return this.serverWs.onMessage(handler);
+  }
+
+  disconnectServerWebSocket() {
+    this.serverWs.disconnect();
+  }
+
+  isServerConnected(): boolean {
+    return this.serverWs.isConnected();
   }
 }
 
@@ -248,4 +484,3 @@ export const apiClient = new PercolatorAPIClient();
 
 // Export class for custom instances
 export default PercolatorAPIClient;
-

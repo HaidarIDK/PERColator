@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { getConnection } from '../services/solana';
+import { getWebSocketServer } from '../services/websocket-server';
+import { hyperliquidWS } from '../services/hyperliquid-websocket';
 
 export const healthRouter = Router();
 
@@ -28,10 +30,28 @@ healthRouter.get('/', async (req, res) => {
       };
     }
     
+    // Get WebSocket server stats
+    const wsServer = getWebSocketServer();
+    const wsStats = wsServer ? wsServer.getStats() : null;
+    
+    // Get Hyperliquid WebSocket status
+    const hyperliquidStatus = {
+      connected: hyperliquidWS.getConnectionStatus(),
+      subscriptions: hyperliquidWS.getActiveSubscriptions().length,
+    };
+
     res.json({
       status: 'healthy',
       timestamp: Date.now(),
       solana: solanaStatus,
+      websocket: {
+        server: wsStats ? {
+          connectedClients: wsStats.connectedClients,
+          activeSubscriptions: wsStats.activeSubscriptions,
+          hyperliquidSubscriptions: wsStats.hyperliquidSubscriptions,
+        } : null,
+        hyperliquid: hyperliquidStatus,
+      },
       api: {
         version: '1.0.0',
         uptime: process.uptime(),
