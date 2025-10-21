@@ -29,7 +29,8 @@ import {
   Target,
   Eye,
   EyeOff,
-  LineChart
+  LineChart,
+  AlertCircle
 } from "lucide-react"
 import { FaBitcoin, FaEthereum } from "react-icons/fa"
 import { SiSolana } from "react-icons/si"
@@ -58,6 +59,8 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
   const wsCleanupRef = useRef<(() => void) | null>(null);
   const [oldestTimestamp, setOldestTimestamp] = useState<number | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadedChunks, setLoadedChunks] = useState<Set<string>>(new Set());
+  const [dataLoadingState, setDataLoadingState] = useState<'idle' | 'loading' | 'error'>('idle');
 
   // Function to get symbol from coinId for server WebSocket
   const getServerSymbolFromCoinId = (coinId: "ethereum" | "bitcoin" | "solana") => {
@@ -80,6 +83,34 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       case "D": return "1d";
       default: return "1m";
     }
+  };
+
+  // Helper function to calculate chunk size based on timeframe
+  const getChunkSizeMs = (timeframe: string): number => {
+    const chunkSizes: Record<string, number> = {
+      "1": 7 * 24 * 60 * 60 * 1000,    // 1m: 1 week chunks
+      "5": 7 * 24 * 60 * 60 * 1000,    // 5m: 1 week chunks  
+      "15": 14 * 24 * 60 * 60 * 1000,  // 15m: 2 week chunks
+      "60": 30 * 24 * 60 * 60 * 1000,  // 1h: 1 month chunks
+      "240": 90 * 24 * 60 * 60 * 1000, // 4h: 3 month chunks
+      "D": 365 * 24 * 60 * 60 * 1000,  // 1d: 1 year chunks
+    };
+    return chunkSizes[timeframe] || 7 * 24 * 60 * 60 * 1000; // Default to 1 week
+  };
+
+  // Helper function to generate chunk key
+  const getChunkKey = (startTime: number, endTime: number): string => {
+    return `${startTime}-${endTime}`;
+  };
+
+  // Helper function to check if we need to load more data
+  const shouldLoadMoreData = (visibleRange: IRange<Time> | null, oldestTimestamp: number | null): boolean => {
+    if (!visibleRange || !oldestTimestamp) return false;
+    
+    const currentOldestTime = visibleRange.from as number;
+    const buffer = 2 * 60 * 60; // 2 hour buffer
+    
+    return currentOldestTime <= oldestTimestamp + buffer && !isLoadingMore;
   };
 
   // Function to get base price for mock data
@@ -116,7 +147,7 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
           horzLines: { color: "#181825" },
         },
         crosshair: {
-          mode: 1,
+          mode: 3,
           vertLine: { color: "#B8B8FF", width: 1, style: 2 },
           horzLine: { color: "#B8B8FF", width: 1, style: 2 },
         },
@@ -159,13 +190,26 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
         
         try {
           setIsLoadingMore(true);
+          setDataLoadingState('loading');
           
-          const response = await fetch(`http://localhost:3000/api/chart/${symbol}/${timeframe}?limit=100&endTime=${endTime}`);
-          const data = await response.json();
+          const chunkSizeMs = getChunkSizeMs(timeframe);
+          const startTime = endTime - chunkSizeMs;
+          const chunkKey = getChunkKey(startTime, endTime);
+          
+          // Check if we've already loaded this chunk
+          if (loadedChunks.has(chunkKey)) {
+            console.log("📦 Chunk already loaded:", chunkKey);
+            return;
+          }
+          
+          console.log(`📦 Loading historical chunk: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
+          
+          // Convert timestamps to milliseconds for API
+          const data = await apiClient.getChartData(symbol, timeframe, 1000, startTime, endTime);
           
           if (data && data.length > 0) {
             const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
-              time: Math.floor(candle.timestamp / 1000) as Time,
+              time: Math.floor(candle.time) as Time, // API now returns time in seconds
               open: candle.open,
               high: candle.high,
               low: candle.low,
@@ -177,13 +221,19 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
             
             candlestickSeries.setData(newData);
             
+            // Mark chunk as loaded
+            setLoadedChunks(prev => new Set([...prev, chunkKey]));
+            
             if (chartData.length > 0) {
               const oldestCandle = chartData[0];
               setOldestTimestamp(oldestCandle.time as number);
             }
+            
+            console.log(`✅ Loaded ${chartData.length} candles for chunk ${chunkKey}`);
           }
         } catch (error) {
           console.error("❌ Failed to load more historical data:", error);
+          setDataLoadingState('error');
         } finally {
           setIsLoadingMore(false);
         }
@@ -191,21 +241,23 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
 
       const loadInitialData = async () => {
         try {
-          const response = await axios.post("https://api.hyperliquid.xyz/info", {
-            type: "candleSnapshot",
-            req: { coin: coinId, interval: timeframe, startTime: 1735689661000, endTime: 1735689661000 }
-          }, {
-            headers: {
-              "User-Agent": "Mozilla/5.0",
-              "Content-Type": "application/json"
-            }
-          });
-
-          const data = response.data;
+          setDataLoadingState('loading');
+          const symbol = getServerSymbolFromCoinId(coinId);
+          const interval = getServerIntervalFromTimeframe(timeframe);
+          
+          // Load initial chunk - get the most recent data
+          const now = Date.now();
+          const chunkSizeMs = getChunkSizeMs(timeframe);
+          const startTime = now - chunkSizeMs;
+          
+          console.log(`📊 Loading initial data for ${symbol} ${interval}`);
+          console.log(`📦 Initial chunk: ${new Date(startTime).toISOString()} to ${new Date(now).toISOString()}`);
+          
+          const data = await apiClient.getChartData(symbol, interval, 1000, startTime, now);
           
           if (data && data.length > 0) {
             const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
-              time: Math.floor(candle.timestamp / 1000) as Time,
+              time: candle.time as Time,
               open: candle.open,
               high: candle.high,
               low: candle.low,
@@ -213,6 +265,10 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
             }));
             
             candlestickSeries.setData(chartData);
+            
+            // Mark initial chunk as loaded
+            const chunkKey = getChunkKey(startTime, now);
+            setLoadedChunks(prev => new Set([...prev, chunkKey]));
             
             // Track oldest timestamp for lazy loading
             if (chartData.length > 0) {
@@ -222,33 +278,61 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
               const lastCandle = chartData[chartData.length - 1];
               setCurrentPrice(lastCandle.close);
             }
+            
+            console.log(`✅ Loaded ${chartData.length} candles for initial chunk`);
+            setDataLoadingState('idle');
           }
         } catch (error) {
           console.error("❌ Failed to load initial data:", error);
+          setDataLoadingState('error');
         }
       };
 
       loadInitialData();
   
       const ws = new WebSocket("ws://localhost:3000/ws");
-      ws.onopen = () => {
-        console.log("✅ Connected to Hyperliquid WebSocket");
-  
+      wsRef.current = ws; 
+      
+      const subscribeToTimeframe = (currentTimeframe: string) => {
         const intervalMap: Record<string, string> = {
           "1": "1m",
           "5": "5m",
           "15": "15m",
           "60": "1h",
           "240": "4h",
+          "D": "1d",
         };
-        const interval = intervalMap[timeframe] || "1d";
+        const interval = intervalMap[currentTimeframe] || "1m";
   
         ws.send(
           JSON.stringify({
-            method: "subscribe",
-            subscription: { type: "candle", coin: symbol.toUpperCase(), interval },
+            type: "subscribe",
+            symbol: symbol.toUpperCase(),
+            interval: interval,
           })
         );
+        
+        console.log(`Subscribed to ${symbol.toUpperCase()} ${interval} candles`);
+      };
+      
+      ws.onopen = () => {
+        console.log("Connected to WebSocket");
+        subscribeToTimeframe(timeframe);
+        
+        // Store initial subscription details
+        const intervalMap: Record<string, string> = {
+          "1": "1m",
+          "5": "5m",
+          "15": "15m",
+          "60": "1h",
+          "240": "4h",
+          "D": "1d",
+        };
+        const interval = intervalMap[timeframe] || "1m";
+        currentSubscriptionRef.current = { 
+          symbol: symbol.toUpperCase(), 
+          interval: interval 
+        };
       };
   
       ws.onmessage = (event) => {
@@ -295,11 +379,20 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       ws.onclose = () => console.log("WebSocket closed");
   
       wsCleanupRef.current = () => {
+        if (currentSubscriptionRef.current) {
+          ws.send(
+            JSON.stringify({
+              type: "unsubscribe",
+              symbol: currentSubscriptionRef.current.symbol,
+              interval: currentSubscriptionRef.current.interval,
+            })
+          );
+          console.log(`Unsubscribed from ${currentSubscriptionRef.current.symbol} ${currentSubscriptionRef.current.interval} candles`);
+        }
         ws.close();
         console.log("WebSocket cleanup");
       };
   
-      // Resize handling
       const handleResize = () => {
         if (chartContainerRef.current && chart) {
           chart.applyOptions({
@@ -310,17 +403,12 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       };
       window.addEventListener("resize", handleResize);
 
-      // Add scroll event listener for lazy loading historical data
       const handleVisibleRangeChange = (timeRange: IRange<Time> | null) => {
-        if (!timeRange || !oldestTimestamp) return;
+        if (!shouldLoadMoreData(timeRange, oldestTimestamp)) return;
         
-        // Check if user has scrolled to the beginning (oldest data)
-        const currentOldestTime = timeRange.from as number;
-        const buffer = 60 * 60; // 1 hour buffer before triggering load
-        
-        if (currentOldestTime <= oldestTimestamp + buffer && !isLoadingMore) {
-          console.log("🔄 User scrolled to beginning, loading more historical data");
-          loadMoreHistoricalData(oldestTimestamp * 1000); // Convert to milliseconds
+        console.log("🔄 User scrolled to beginning, loading more historical data");
+        if (oldestTimestamp) {
+          loadMoreHistoricalData(oldestTimestamp * 1000);
         }
       };
       
@@ -344,7 +432,58 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       }
     };
   }, [coinId, timeframe]);
+
+  // Reset loaded chunks when coin or timeframe changes
+  useEffect(() => {
+    setLoadedChunks(new Set());
+    setDataLoadingState('idle');
+  }, [coinId, timeframe]);
+
+  // Store WebSocket reference and current subscription details
+  const wsRef = useRef<WebSocket | null>(null);
+  const currentSubscriptionRef = useRef<{symbol: string, interval: string} | null>(null);
   
+  // Effect to handle timeframe changes - unsubscribe from old topic and subscribe to new one
+  useEffect(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    
+    const intervalMap: Record<string, string> = {
+      "1": "1m",
+      "5": "5m", 
+      "15": "15m",
+      "60": "1h",
+      "240": "4h",
+      "D": "1d",
+    };
+    const interval = intervalMap[timeframe] || "1m";
+    const symbol = getServerSymbolFromCoinId(coinId).toUpperCase();
+    
+    // Unsubscribe from previous topic if it exists
+    if (currentSubscriptionRef.current) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "unsubscribe",
+          symbol: currentSubscriptionRef.current.symbol,
+          interval: currentSubscriptionRef.current.interval,
+        })
+      );
+      console.log(`Unsubscribed from ${currentSubscriptionRef.current.symbol} ${currentSubscriptionRef.current.interval} candles`);
+    }
+    
+    // Subscribe to new topic
+    wsRef.current.send(
+      JSON.stringify({
+        type: "subscribe",
+        symbol: symbol,
+        interval: interval,
+      })
+    );
+    
+    // Store current subscription details
+    currentSubscriptionRef.current = { symbol, interval };
+    
+    console.log(`Subscribed to ${symbol} ${interval} candles`);
+  }, [timeframe, coinId]);
 
   const generateMockPriceUpdate = (basePrice: number) => {
     const volatility = 0.02; // 2% volatility
@@ -392,7 +531,25 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
         </div>
       )}
       
-      <div ref={chartContainerRef} style={{ height: "100%", width: "100%", minHeight: "400px" }} />
+      <div className="relative">
+        <div ref={chartContainerRef} style={{ height: "100%", width: "100%", minHeight: "400px" }} />
+        
+        {/* Loading Overlay */}
+        {dataLoadingState === 'loading' && (
+          <div className="absolute top-4 right-4 bg-black/80 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+            <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
+            Loading data...
+          </div>
+        )}
+        
+        {/* Error State */}
+        {dataLoadingState === 'error' && (
+          <div className="absolute top-4 right-4 bg-red-900/80 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-2">
+            <Activity className="w-4 h-4" />
+            Failed to load data
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -516,9 +673,20 @@ const TradingViewChartComponent = ({
   // Fetch real chart data from backend
   useEffect(() => {
     const fetchChartData = async () => {
+      // Convert timeframe format for API
+      const timeframeMap: Record<string, string> = {
+        "1": "1m",
+        "5": "5m", 
+        "15": "15m",
+        "60": "1h",
+        "240": "4h",
+        "D": "1d",
+      };
+      const apiTimeframe = timeframeMap[selectedTimeframe] || "15m";
+      
       try {
         setLoading(true)
-        const response = await apiClient.getChartData(symbol, selectedTimeframe, 100)
+        const response = await apiClient.getChartData(symbol, apiTimeframe, 100)
         
         // Handle API response format - convert object to array
         let data;
@@ -552,7 +720,7 @@ const TradingViewChartComponent = ({
         setLoading(false)
       } catch (error) {
         console.error('Failed to fetch chart data:', error)
-        console.error('API URL:', `${apiClient.baseUrl}/api/market/${symbol}/candles?timeframe=${selectedTimeframe}&limit=100`)
+        console.error('API URL:', `${apiClient.baseUrl}/api/market/${symbol}/candles?timeframe=${timeframeMap[selectedTimeframe] || "15m"}&limit=100`)
         
         // Generate coin-specific mock data
         const basePrice = getBasePrice(selectedCoin);

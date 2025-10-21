@@ -353,13 +353,29 @@ class PercolatorAPIClient {
     return res.json();
   }
 
-  async getChartData(symbol: string, timeframe: string = '15', limit: number = 100): Promise<CandlestickData[]> {
+  async getChartData(symbol: string, timeframe: string = '15m', limit: number = 100, from?: number, to?: number): Promise<CandlestickData[]> {
     // Map timeframe to your API format
     const apiSymbol = symbol === 'SOL' ? 'SOL-PERP' : 
                      symbol === 'ETH' ? 'ETH-PERP' : 
                      symbol === 'BTC' ? 'BTC-PERP' : symbol;
     
-    const res = await fetch(`${this.baseUrl}/api/market/${apiSymbol}/candles?limit=${limit}`);
+    // Build query parameters
+    const params = new URLSearchParams({
+      timeframe,
+      limit: limit.toString()
+    });
+    
+    if (from !== undefined) {
+      params.append('from', from.toString());
+    }
+    
+    if (to !== undefined) {
+      params.append('to', to.toString());
+    }
+    
+    console.log(`📊 Fetching chart data for ${apiSymbol} with params:`, Object.fromEntries(params));
+    
+    const res = await fetch(`${this.baseUrl}/api/market/${apiSymbol}/candles?${params.toString()}`);
     if (!res.ok) throw new Error(`Failed to fetch chart data for ${symbol}`);
     return res.json();
   }

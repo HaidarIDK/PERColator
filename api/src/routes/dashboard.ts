@@ -117,6 +117,111 @@ setInterval(safeFetchCoinGeckoData, 30000);
 safeFetchCoinGeckoData();
 
 // ============================================
+// HYPERLIQUID API HELPERS
+// ============================================
+
+/**
+ * Map our symbol names to Hyperliquid coin names
+ */
+function mapSymbolToHyperliquidCoin(symbol: string): string {
+  const symbolMap: { [key: string]: string } = {
+    'BTC-PERP': 'BTC',
+    'BTCUSDC': 'BTC',
+    'ETH-PERP': 'ETH',
+    'ETHUSDC': 'ETH',
+    'SOL-PERP': 'SOL',
+    'SOLUSDC': 'SOL',
+    'ETHSOL': 'ETH', // For ratios, we'll use the base asset
+    'ETH-SOL': 'ETH',
+    'BTCSOL': 'BTC',
+    'BTC-SOL': 'BTC'
+  };
+  
+  return symbolMap[symbol] || 'BTC'; // Default to BTC
+}
+
+/**
+ * Map timeframe to Hyperliquid interval format
+ */
+function mapTimeframeToHyperliquidInterval(timeframe: string): string {
+  const intervalMap: { [key: string]: string } = {
+    '1': '1m',
+    '5': '5m',
+    '15': '15m',
+    '30': '30m',
+    '60': '1h',
+    '240': '4h',
+    '1440': '1d'
+  };
+  
+  return intervalMap[timeframe] || '15m'; // Default to 15m
+}
+
+/**
+ * Fetch candlestick data from Hyperliquid API
+ */
+async function fetchHyperliquidCandles(coin: string, interval: string, limit: number, from?: number, to?: number): Promise<any[]> {
+  try {
+    const now = Date.now();
+    let startTime: number;
+    let endTime: number;
+    
+    // If from and to are provided, use them directly
+    if (from !== undefined && to !== undefined) {
+      startTime = from;
+      endTime = to;
+    } else {
+      // Fallback to limit-based calculation
+      const intervalMs = parseInt(interval.replace(/[^\d]/g, '')) * 60 * 1000; // Convert to milliseconds
+      startTime = now - (limit * intervalMs);
+      endTime = now;
+    }
+    
+    const payload = {
+      type: "candleSnapshot",
+      req: {
+        coin: coin,
+        interval: interval,
+        startTime: startTime,
+        endTime: endTime
+      }
+    };
+    
+    console.log(`Fetching Hyperliquid candles for ${coin} ${interval}:`, payload);
+    
+    const response = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      console.error(`Hyperliquid API error: ${response.status} ${response.statusText}`);
+      throw new Error(`Hyperliquid API error: ${response.status}`);
+    }
+    
+    const data = await response.json() as any[];
+    console.log(`Hyperliquid response for ${coin}:`, data.length, 'candles');
+    
+    // Transform Hyperliquid format to our format
+    return data.map((candle: any) => ({
+      time: Math.floor(candle.t / 1000), // Convert to seconds
+      open: parseFloat(candle.o),
+      high: parseFloat(candle.h),
+      low: parseFloat(candle.l),
+      close: parseFloat(candle.c),
+      volume: parseFloat(candle.v)
+    }));
+    
+  } catch (error) {
+    console.error('Failed to fetch Hyperliquid candles:', error);
+    throw error;
+  }
+}
+
+// ============================================
 // ROUTES - Order matters! Specific before wildcards
 // ============================================
 
@@ -320,79 +425,137 @@ dashboardRouter.get('/:symbol/orderbook', (req, res) => {
   });
 });
 
-/**
- * GET /api/market/:symbol/candles
- * Get candlestick data for charting
- */
-dashboardRouter.get('/:symbol/candles', (req, res) => {
+
+dashboardRouter.get('/:symbol/candles', async (req, res) => {
   const { symbol } = req.params;
-  const { timeframe = '15', limit = '100' } = req.query;
+  const { timeframe = '15', limit = '100', from, to } = req.query;
   
   const limitNum = Math.min(parseInt(limit as string), 500);
-  const candles: any[] = [];
   
-  // Determine current price based on symbol
-  let currentPrice = 2650; // Default
-  let volatilityPercent = 0.02; // 2% default volatility
+  // Parse from and to parameters (expecting Unix timestamps in milliseconds)
+  let fromTime: number | undefined;
+  let toTime: number | undefined;
   
-  if (symbol === 'ETHSOL' || symbol === 'ETH-SOL') {
-    if (ethData && solData) {
-      currentPrice = ethData.price / solData.price;
-      volatilityPercent = 0.03;
-    }
-  } else if (symbol === 'BTCSOL' || symbol === 'BTC-SOL') {
-    if (btcData && solData) {
-      currentPrice = btcData.price / solData.price;
-      volatilityPercent = 0.03;
-    }
-  } else if (symbol === 'BTC-PERP' || symbol === 'BTCUSDC') {
-    if (btcData) {
-      currentPrice = btcData.price;
-      volatilityPercent = 0.025;
-    }
-  } else if (symbol === 'SOL-PERP' || symbol === 'SOLUSDC') {
-    if (solData) {
-      currentPrice = solData.price;
-      volatilityPercent = 0.035;
-    }
-  } else {
-    if (ethData) {
-      currentPrice = ethData.price;
-      volatilityPercent = 0.025;
+  if (from) {
+    fromTime = parseInt(from as string);
+    if (isNaN(fromTime)) {
+      return res.status(400).json({ error: 'Invalid from parameter. Expected Unix timestamp in milliseconds.' });
     }
   }
   
-  // Generate realistic candlestick data
-  const now = Math.floor(Date.now() / 1000);
-  const interval = parseInt(timeframe as string) * 60; // Convert to seconds
-  
-  let price = currentPrice * 0.98; // Start slightly lower
-  
-  for (let i = limitNum - 1; i >= 0; i--) {
-    const time = now - (i * interval);
-    
-    // Random price movement with trend toward current price
-    const open = price;
-    const volatility = currentPrice * volatilityPercent;
-    const trend = (currentPrice - price) * 0.1; // Trend toward current price
-    const high = open + Math.random() * volatility + Math.max(0, trend);
-    const low = open - Math.random() * volatility + Math.min(0, trend);
-    const close = low + Math.random() * (high - low) + trend;
-    const volume = (Math.random() * 0.5 + 0.5) * (ethData?.volume24h || 1000000) / 288; // Daily volume / 288 (5min candles per day)
-    
-    candles.push({
-      time,
-      open: parseFloat(open.toFixed(2)),
-      high: parseFloat(high.toFixed(2)),
-      low: parseFloat(low.toFixed(2)),
-      close: parseFloat(close.toFixed(2)),
-      volume: parseFloat(volume.toFixed(2))
-    });
-    
-    price = close; // Next candle starts where this one ended
+  if (to) {
+    toTime = parseInt(to as string);
+    if (isNaN(toTime)) {
+      return res.status(400).json({ error: 'Invalid to parameter. Expected Unix timestamp in milliseconds.' });
+    }
   }
   
-  res.json(candles);
+  // Validate that from is before to if both are provided
+  if (fromTime !== undefined && toTime !== undefined && fromTime >= toTime) {
+    return res.status(400).json({ error: 'from parameter must be before to parameter.' });
+  }
+  
+  try {
+    // Map symbol to Hyperliquid coin
+    const coin = mapSymbolToHyperliquidCoin(symbol);
+    const interval = mapTimeframeToHyperliquidInterval(timeframe as string);
+    
+    console.log(`Fetching candles for ${symbol} -> ${coin} ${interval} (limit: ${limitNum}${fromTime ? `, from: ${fromTime}` : ''}${toTime ? `, to: ${toTime}` : ''})`);
+    
+    // Fetch real candlestick data from Hyperliquid
+    const candles = await fetchHyperliquidCandles(coin, interval, limitNum, fromTime, toTime);
+    
+    // For ratio pairs (ETHSOL, BTCSOL), we need to calculate ratios
+    if (symbol === 'ETHSOL' || symbol === 'ETH-SOL') {
+      if (!ethData || !solData) {
+        return res.status(503).json({ error: 'Market data not yet available for ratio calculation' });
+      }
+      
+      // For now, return ETH candles with a note that ratios need separate handling
+      // TODO: Implement proper ratio calculation using both ETH and SOL candles
+      console.log('Note: ETH/SOL ratio candles need separate ETH and SOL data for proper calculation');
+    } else if (symbol === 'BTCSOL' || symbol === 'BTC-SOL') {
+      if (!btcData || !solData) {
+        return res.status(503).json({ error: 'Market data not yet available for ratio calculation' });
+      }
+      
+      // For now, return BTC candles with a note that ratios need separate handling
+      console.log('Note: BTC/SOL ratio candles need separate BTC and SOL data for proper calculation');
+    }
+    
+    res.json(candles);
+    
+  } catch (error) {
+    console.error(`Failed to fetch candles for ${symbol}:`, error);
+    
+    // Fallback to generated data if API fails
+    console.log(`Falling back to generated data for ${symbol}`);
+    
+    const candles: any[] = [];
+    
+    // Determine current price based on symbol for fallback
+    let currentPrice = 2650; // Default
+    let volatilityPercent = 0.02; // 2% default volatility
+    
+    if (symbol === 'ETHSOL' || symbol === 'ETH-SOL') {
+      if (ethData && solData) {
+        currentPrice = ethData.price / solData.price;
+        volatilityPercent = 0.03;
+      }
+    } else if (symbol === 'BTCSOL' || symbol === 'BTC-SOL') {
+      if (btcData && solData) {
+        currentPrice = btcData.price / solData.price;
+        volatilityPercent = 0.03;
+      }
+    } else if (symbol === 'BTC-PERP' || symbol === 'BTCUSDC') {
+      if (btcData) {
+        currentPrice = btcData.price;
+        volatilityPercent = 0.025;
+      }
+    } else if (symbol === 'SOL-PERP' || symbol === 'SOLUSDC') {
+      if (solData) {
+        currentPrice = solData.price;
+        volatilityPercent = 0.035;
+      }
+    } else {
+      if (ethData) {
+        currentPrice = ethData.price;
+        volatilityPercent = 0.025;
+      }
+    }
+    
+    // Generate fallback candlestick data
+    const now = Math.floor(Date.now() / 1000);
+    const intervalSeconds = parseInt(timeframe as string) * 60; // Convert to seconds
+    
+    let price = currentPrice * 0.98; // Start slightly lower
+    
+    for (let i = limitNum - 1; i >= 0; i--) {
+      const time = now - (i * intervalSeconds);
+      
+      // Random price movement with trend toward current price
+      const open = price;
+      const volatility = currentPrice * volatilityPercent;
+      const trend = (currentPrice - price) * 0.1; // Trend toward current price
+      const high = open + Math.random() * volatility + Math.max(0, trend);
+      const low = open - Math.random() * volatility + Math.min(0, trend);
+      const close = low + Math.random() * (high - low) + trend;
+      const volume = (Math.random() * 0.5 + 0.5) * (ethData?.volume24h || 1000000) / 288; // Daily volume / 288 (5min candles per day)
+      
+      candles.push({
+        time,
+        open: parseFloat(open.toFixed(2)),
+        high: parseFloat(high.toFixed(2)),
+        low: parseFloat(low.toFixed(2)),
+        close: parseFloat(close.toFixed(2)),
+        volume: parseFloat(volume.toFixed(2))
+      });
+      
+      price = close; // Next candle starts where this one ended
+    }
+    
+    res.json(candles);
+  }
 });
 
 /**
