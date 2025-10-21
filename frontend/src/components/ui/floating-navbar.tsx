@@ -103,12 +103,12 @@ export function FloatingNavbar() {
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.4, delay: 1.0 }}
-                href="/dex"
+                href="/dashboard"
                 className="ml-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/30 text-white font-semibold hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/40 transition-all duration-300 shadow-[0_0_15px_rgba(184,184,255,0.3)] hover:shadow-[0_0_20px_rgba(184,184,255,0.5)] relative"
               >
                 <span className="text-sm">PerpDEX →</span>
-                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 text-[10px] bg-yellow-500/90 text-black rounded-full font-bold">
-                  Soon
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 text-[10px] bg-green-500/90 text-white rounded-full font-bold">
+                  LIVE
                 </span>
               </motion.a>
             </div>

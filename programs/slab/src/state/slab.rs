@@ -4,7 +4,7 @@ use super::header::SlabHeader;
 use super::pools::Pool;
 use percolator_common::*;
 
-/// Main Slab state (10 MB contiguous memory)
+/// Main Slab state (~70 KB contiguous memory, ULTRA-CHEAP: ~0.5 SOL rent!)
 /// Layout: Header + Pools + Data
 #[repr(C)]
 pub struct SlabState {
@@ -161,11 +161,11 @@ impl SlabState {
 // Size validation
 const _: () = {
     const SLAB_SIZE: usize = core::mem::size_of::<SlabState>();
-    const MAX_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+    const MAX_SIZE: usize = 128 * 1024; // 128 KB
 
-    // This will fail to compile if SlabState exceeds 10 MB
+    // This will fail to compile if SlabState exceeds 128 KB
     if SLAB_SIZE > MAX_SIZE {
-        panic!("SlabState exceeds 10 MB limit");
+        panic!("SlabState exceeds 128 KB limit");
     }
 };
 
@@ -176,7 +176,8 @@ mod tests {
     #[test]
     fn test_slab_size() {
         let size = core::mem::size_of::<SlabState>();
-        // Size should be <= 10 MB
-        assert!(size <= 10 * 1024 * 1024);
+        // Size should be ~50-80 KB (ULTRA-cheap: ~0.5 SOL rent!)
+        assert!(size > 40_000, "Size too small: {} bytes", size);
+        assert!(size < 100_000, "Size too large: {} bytes", size);
     }
 }

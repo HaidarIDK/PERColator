@@ -13,7 +13,7 @@ pub const AUTHORITY_SEED: &[u8] = b"authority";
 
 /// Derive slab state PDA
 ///
-/// The slab state is the main 10MB account storing all orderbook data
+/// The slab state is the main ~70KB account storing all orderbook data (ULTRA-CHEAP!)
 ///
 /// # Arguments
 /// * `market_id` - Unique identifier for this market/slab

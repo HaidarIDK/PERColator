@@ -148,6 +148,7 @@ dependencies = [
  "pinocchio",
  "pinocchio-log",
  "pinocchio-pubkey",
+ "pinocchio-system",
 ]
 
 [[package]]
@@ -158,6 +159,7 @@ dependencies = [
  "pinocchio",
  "pinocchio-log",
  "pinocchio-pubkey",
+ "pinocchio-system",
 ]
 
 [[package]]
@@ -195,6 +197,16 @@ dependencies = [
  "five8_const",
  "pinocchio",
  "sha2-const-stable",
+]
+
+[[package]]
+name = "pinocchio-system"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "141ed5eafb4ab04568bb0e224e3dc9a9de13c933de4c004e0d1a553498be3a7c"
+dependencies = [
+ "pinocchio",
+ "pinocchio-pubkey",
 ]
 
 [[package]]

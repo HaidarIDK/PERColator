@@ -9,7 +9,7 @@ use pinocchio::{
 };
 
 use crate::instructions::RouterInstruction;
-use crate::state::{Vault, Escrow, UserPortfolio, SlabRegistry};
+use crate::state::{Vault, Portfolio, SlabRegistry};
 use percolator_common::*;
 
 entrypoint!(process_instruction);
@@ -35,7 +35,7 @@ pub fn process_instruction(
         4 => RouterInstruction::MultiCommit,
         5 => RouterInstruction::Liquidate,
         _ => {
-            msg!("Error: Unknown instruction: {}", discriminator);
+            msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
         }
     };
@@ -92,7 +92,7 @@ fn handle_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
 
     // Parse instruction data (32 bytes for authority pubkey)
     if data.len() < 32 {
-        msg!("Error: Invalid Initialize instruction data length: {}", data.len());
+        msg!("Error: Invalid Initialize instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -102,7 +102,7 @@ fn handle_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
 
     // Initialize registry
     let registry = unsafe { borrow_account_data_mut::<SlabRegistry>(registry_account)? };
-    *registry = SlabRegistry::new(authority);
+    *registry = SlabRegistry::new(*program_id, authority, 0);
 
     msg!("Router initialized successfully");
     Ok(())
@@ -140,7 +140,7 @@ fn handle_deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
 
     // Parse instruction data (32 + 16 = 48 bytes)
     if data.len() < 48 {
-        msg!("Error: Invalid Deposit instruction data length: {}", data.len());
+        msg!("Error: Invalid Deposit instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -155,12 +155,12 @@ fn handle_deposit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
     crate::instructions::process_deposit(vault, amount)?;
 
     // Update user portfolio (add to equity)
-    let portfolio = unsafe { borrow_account_data_mut::<UserPortfolio>(portfolio_account)? };
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
     portfolio.equity = portfolio.equity.saturating_add(amount as i128);
 
     // TODO: Actual token transfer via CPI to SPL Token program
     // For now, just log the operation
-    msg!("Deposit successful: amount={}, new_vault_balance={}", amount, vault.balance);
+    msg!("Deposit successful");
 
     Ok(())
 }
@@ -197,7 +197,7 @@ fn handle_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
 
     // Parse instruction data (32 + 16 = 48 bytes)
     if data.len() < 48 {
-        msg!("Error: Invalid Withdraw instruction data length: {}", data.len());
+        msg!("Error: Invalid Withdraw instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -206,13 +206,12 @@ fn handle_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     let amount = read_u128(data, &mut offset)?;
 
     // Get portfolio and check free collateral
-    let portfolio = unsafe { borrow_account_data_mut::<UserPortfolio>(portfolio_account)? };
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
     
     // Check if user has sufficient free collateral
     let free_collateral = portfolio.equity.saturating_sub(portfolio.im as i128);
     if free_collateral < amount as i128 {
-        msg!("Error: Insufficient free collateral: free={}, requested={}", 
-            free_collateral, amount);
+        msg!("Error: Insufficient free collateral");
         return Err(PercolatorError::InsufficientFunds.into());
     }
 
@@ -224,7 +223,7 @@ fn handle_withdraw(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -
     portfolio.equity = portfolio.equity.saturating_sub(amount as i128);
 
     // TODO: Actual token transfer via CPI to SPL Token program
-    msg!("Withdraw successful: amount={}, new_vault_balance={}", amount, vault.balance);
+    msg!("Withdraw successful");
 
     Ok(())
 }
@@ -269,13 +268,13 @@ fn handle_multi_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u
     let mut offset = 0;
     let slab_count = read_u8(data, &mut offset)?;
 
-    msg!("MultiReserve: {} slabs", slab_count);
+    msg!("MultiReserve");
 
     // TODO: Implement actual multi-slab reserve coordination
     // For now, validate structure
     for i in 0..slab_count {
         if offset + 32 + 2 + 1 + 8 + 8 > data.len() {
-            msg!("Error: Incomplete reserve data for slab {}", i);
+            msg!("Error: Incomplete reserve data for slab");
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
@@ -285,8 +284,7 @@ fn handle_multi_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u
         let qty = read_u64(data, &mut offset)?;
         let limit_px = read_u64(data, &mut offset)?;
 
-        msg!("Reserve {}: instrument={}, side={}, qty={}, limit_px={}", 
-            i, instrument_idx, side, qty, limit_px);
+        msg!("Reserve");
     }
 
     msg!("MultiReserve validated - implementation pending");
@@ -331,18 +329,18 @@ fn handle_multi_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8
     let slab_count = read_u8(data, &mut offset)?;
     let current_ts = read_u64(data, &mut offset)?;
 
-    msg!("MultiCommit: {} slabs at ts={}", slab_count, current_ts);
+    msg!("MultiCommit");
 
     // TODO: Implement actual multi-slab commit coordination
     // For now, validate structure
     for i in 0..slab_count {
         if offset + 8 > data.len() {
-            msg!("Error: Incomplete commit data for slab {}", i);
+            msg!("Error: Incomplete commit data for slab");
             return Err(PercolatorError::InvalidInstruction.into());
         }
 
         let hold_id = read_u64(data, &mut offset)?;
-        msg!("Commit {}: hold_id={}", i, hold_id);
+        msg!("Commit");
     }
 
     msg!("MultiCommit validated - implementation pending");
@@ -380,7 +378,7 @@ fn handle_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
 
     // Parse instruction data (32 + 16 = 48 bytes)
     if data.len() < 48 {
-        msg!("Error: Invalid Liquidate instruction data length: {}", data.len());
+        msg!("Error: Invalid Liquidate instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -397,17 +395,15 @@ fn handle_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
     }
 
     // Get liquidatee portfolio and check if underwater
-    let portfolio = unsafe { borrow_account_data_mut::<UserPortfolio>(liquidatee_portfolio)? };
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(liquidatee_portfolio)? };
     
     // Check if account is eligible for liquidation (equity < maintenance margin)
     if portfolio.equity >= portfolio.mm as i128 {
-        msg!("Error: Account is not underwater: equity={}, mm={}", 
-            portfolio.equity, portfolio.mm);
+        msg!("Error: Account is not underwater");
         return Err(PercolatorError::NotLiquidatable.into());
     }
 
-    msg!("Liquidation eligible: equity={}, mm={}, deficit={}, max_debt={}", 
-        portfolio.equity, portfolio.mm, portfolio.mm as i128 - portfolio.equity, max_debt);
+    msg!("Liquidation eligible");
 
     // TODO: Implement actual liquidation logic
     // - Calculate deficit

@@ -130,28 +130,27 @@ userRouter.get('/trades', async (req, res) => {
 });
 
 /**
- * GET /api/user/portfolio
+ * GET /api/user/:walletAddress/portfolio
  * Get user's portfolio summary
  */
-userRouter.get('/portfolio', async (req, res) => {
+userRouter.get('/:walletAddress/portfolio', async (req, res) => {
   try {
-    const { slab, user } = req.query;
+    const { walletAddress } = req.params;
     
-    if (!slab || !user) {
-      return res.status(400).json({ error: 'slab and user address required' });
+    if (!walletAddress) {
+      return res.status(400).json({ error: 'wallet address required' });
     }
 
-    // TODO: Calculate from slab state
+    // TODO: Query real blockchain data when wallet connected
+    // For now, return realistic demo data
     res.json({
-      user: user,
-      total_value: 11484.50,
-      cash: 10000.00,
-      positions_value: 1484.50,
-      pnl_unrealized: 250.50,
-      pnl_realized_24h: 34.00,
-      pnl_realized_total: 1234.00,
-      num_positions: 1,
-      num_open_orders: 1,
+      user: walletAddress,
+      equity: 10000.00,
+      freeCollateral: 8500.00,
+      totalPositionValue: 1500.00,
+      unrealizedPnl: 250.50,
+      marginUsage: 15.0,
+      positions: []
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

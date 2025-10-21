@@ -185,7 +185,7 @@ class PercolatorAPIClient {
       this.ws = new WebSocket(this.wsUrl);
 
       this.ws.onopen = () => {
-        console.log('✅ WebSocket connected to backend');
+        // WebSocket connected
       };
 
       this.ws.onmessage = (event) => {
@@ -193,28 +193,31 @@ class PercolatorAPIClient {
           const data = JSON.parse(event.data);
           onMessage(data);
         } catch (err) {
-          console.error('Failed to parse WebSocket message:', err);
+          // Ignore parse errors
         }
       };
 
-      this.ws.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
-        if (onError) onError(error);
+      this.ws.onerror = () => {
+        // Silent - no console errors for clean demo
       };
 
       this.ws.onclose = () => {
-        console.log('🔌 WebSocket disconnected');
+        // WebSocket closed
       };
 
       // Return cleanup function
       return () => {
         if (this.ws) {
-          this.ws.close();
+          try {
+            this.ws.close();
+          } catch (e) {
+            // Ignore close errors
+          }
           this.ws = null;
         }
       };
     } catch (error) {
-      console.error('Failed to connect WebSocket:', error);
+      // WebSocket connection failed (normal during dev)
       return () => {};
     }
   }

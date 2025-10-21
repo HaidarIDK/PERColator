@@ -2,7 +2,7 @@
 
 use pinocchio::pubkey::Pubkey;
 
-/// Slab header (at start of 10 MB account)
+/// Slab header (at start of ~70 KB account, ULTRA-CHEAP!)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlabHeader {

@@ -8,23 +8,23 @@ pub const MAX_SLABS: usize = 256;
 /// Maximum number of instruments per slab
 pub const MAX_INSTRUMENTS: usize = 32;
 
-/// Maximum number of accounts per slab
-pub const MAX_ACCOUNTS: usize = 5_000;
+/// Maximum number of accounts per slab (50 accounts = ~3.2 KB)
+pub const MAX_ACCOUNTS: usize = 50;
 
-/// Maximum number of orders per slab
-pub const MAX_ORDERS: usize = 30_000;
+/// Maximum number of orders per slab (300 orders = ~30 KB)
+pub const MAX_ORDERS: usize = 300;
 
-/// Maximum number of positions per slab
-pub const MAX_POSITIONS: usize = 30_000;
+/// Maximum number of positions per slab (100 positions = ~8 KB)
+pub const MAX_POSITIONS: usize = 100;
 
-/// Maximum number of reservations per slab
-pub const MAX_RESERVATIONS: usize = 4_000;
+/// Maximum number of reservations per slab (50 reservations = ~3.2 KB)
+pub const MAX_RESERVATIONS: usize = 50;
 
-/// Maximum number of slices per slab
-pub const MAX_SLICES: usize = 16_000;
+/// Maximum number of slices per slab (100 slices = ~3.2 KB)
+pub const MAX_SLICES: usize = 100;
 
-/// Maximum number of trades in ring buffer
-pub const MAX_TRADES: usize = 10_000;
+/// Maximum number of trades in ring buffer (50 trades = ~3.2 KB)
+pub const MAX_TRADES: usize = 50;
 
 /// Maximum number of DLP accounts
 pub const MAX_DLP: usize = 100;
@@ -312,9 +312,10 @@ pub struct AggressorEntry {
 }
 
 /// Maximum aggressor ledger entries (shared pool, not per account-instrument)
-pub const MAX_AGGRESSOR_ENTRIES: usize = 4_000;
+/// 25 entries = ~1 KB
+pub const MAX_AGGRESSOR_ENTRIES: usize = 25;
 
-// Size checks to ensure we're within 10 MB for slab
+// Size checks to ensure we're within 128 KB for slab (ULTRA-cheap: ~0.5 SOL rent!)
 const _: () = {
     const fn check_size() {
         let total = 0
@@ -327,10 +328,10 @@ const _: () = {
             + (MAX_TRADES * core::mem::size_of::<Trade>())
             + (MAX_AGGRESSOR_ENTRIES * core::mem::size_of::<AggressorEntry>());
 
-        // Should be under 10 MB
-        const MAX_SLAB_SIZE: usize = 10 * 1024 * 1024;
+        // Should be under 128 KB (ULTRA-cheap: ~0.5 SOL rent vs 73 SOL for 10 MB!)
+        const MAX_SLAB_SIZE: usize = 128 * 1024;
         if total > MAX_SLAB_SIZE {
-            panic!("Slab size exceeds 10 MB");
+            panic!("Slab size exceeds 128 KB");
         }
     }
     check_size();

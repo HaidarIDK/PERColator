@@ -13,7 +13,8 @@ pub use withdraw::*;
 pub use initialize::*;
 pub use cap_ops::*;
 pub use multi_reserve::*;
-pub use multi_commit::*;
+// Only re-export multi_commit items except burn_cap_and_refund (already in cap_ops)
+pub use multi_commit::{process_multi_commit};
 pub use liquidate::*;
 
 use percolator_common::*;

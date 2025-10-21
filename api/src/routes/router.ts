@@ -99,35 +99,74 @@ routerRouter.get('/portfolio/:user', async (req, res) => {
 
 /**
  * GET /api/router/slabs
- * Get all registered slabs
+ * Get all registered slabs with current liquidity and pricing
+ * Query params: coin (ethereum, bitcoin, solana)
  */
 routerRouter.get('/slabs', async (req, res) => {
   try {
-    // TODO: Fetch from registry
-    res.json([
-      {
-        slab_id: 'Slab1111111111111111111111111111111',
-        name: 'Alpha Slab',
-        instruments: ['BTC/USDC', 'ETH/USDC', 'SOL/USDC'],
-        imr: 500,
-        mmr: 250,
-        maker_fee: 10,
-        taker_fee: 20,
-        active: true,
-        volume_24h: 1234567,
-      },
-      {
-        slab_id: 'Slab2222222222222222222222222222222',
-        name: 'Beta Slab',
-        instruments: ['BTC/USDC'],
-        imr: 600,
-        mmr: 300,
-        maker_fee: 5,
-        taker_fee: 15,
-        active: true,
-        volume_24h: 654321,
+    const { coin } = req.query;
+    
+    // Get base price for the selected coin
+    const getBasePrice = (coinType: string) => {
+      switch(coinType) {
+        case 'ethereum': return 3882;   // ETH/USDC
+        case 'bitcoin': return 97500;   // BTC/USDC
+        case 'solana': return 185;      // SOL/USDC
+        default: return 3882;
       }
-    ]);
+    };
+
+    const basePrice = getBasePrice(coin as string || 'ethereum');
+    
+    // TODO: Fetch real slab data from on-chain state
+    // For now, return mock slabs with coin-specific pricing
+    
+    res.json({
+      slabs: [
+        {
+          id: 1,
+          name: "Slab A",
+          slab_id: 'Slab1111111111111111111111111111111',
+          liquidity: 1500, // Available liquidity in base units
+          vwap: basePrice * 1.00005, // Slightly above market
+          fee: 0.02, // Fee percentage (0.02 = 2%)
+          instruments: ['BTC/USDC', 'ETH/USDC', 'SOL/USDC'],
+          imr: 500, // Initial margin ratio (bps)
+          mmr: 250, // Maintenance margin ratio (bps)
+          active: true,
+          volume_24h: 1234567,
+        },
+        {
+          id: 2,
+          name: "Slab B",
+          slab_id: 'Slab2222222222222222222222222222222',
+          liquidity: 2300,
+          vwap: basePrice * 1.00008, // Slightly higher
+          fee: 0.015, // 1.5% fee
+          instruments: ['BTC/USDC', 'ETH/USDC'],
+          imr: 600,
+          mmr: 300,
+          active: true,
+          volume_24h: 654321,
+        },
+        {
+          id: 3,
+          name: "Slab C",
+          slab_id: 'Slab3333333333333333333333333333333',
+          liquidity: 980,
+          vwap: basePrice * 0.99995, // Best price (slightly below market)
+          fee: 0.025, // 2.5% fee
+          instruments: ['ETH/USDC', 'SOL/USDC'],
+          imr: 500,
+          mmr: 250,
+          active: true,
+          volume_24h: 456789,
+        }
+      ],
+      coin: coin || 'ethereum',
+      basePrice,
+      timestamp: Date.now(),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -206,6 +245,124 @@ routerRouter.post('/commit-multi', async (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/router/execute-cross-slab
+ * ARCHITECTURE FLOW:
+ * 1. Frontend calls this endpoint
+ * 2. Backend/SDK builds ExecuteCrossSlab instruction
+ * 3. Returns serialized transaction
+ * 4. Frontend signs and submits → Router Program
+ * 5. Router Program CPIs to multiple Slab Programs
+ * 6. Portfolio updated with net exposure
+ */
+routerRouter.post('/execute-cross-slab', async (req, res) => {
+  try {
+    const { wallet, slabs, side, instrumentIdx, totalQuantity, limitPrice } = req.body;
+    
+    if (!wallet || !slabs || !side || totalQuantity === undefined) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Missing required fields: wallet, slabs, side, totalQuantity' 
+      });
+    }
+
+    // Generate route ID for this cross-slab trade
+    const routeId = Date.now();
+
+    console.log('🔧 SDK: Building ExecuteCrossSlab instruction');
+    console.log(`   Route ID: ${routeId}`);
+    console.log(`   User: ${wallet}`);
+    console.log(`   Slabs: ${slabs.length}`);
+    console.log(`   Total Qty: ${totalQuantity}`);
+    console.log(`   Side: ${side}`);
+
+    // TODO: Use actual Percolator SDK to build transaction
+    // For now, return mock transaction structure that demonstrates the flow
+    
+    // This transaction would contain:
+    // 1. ComputeBudget instructions
+    // 2. ExecuteCrossSlab instruction with:
+    //    - Router program as target
+    //    - Multiple slab accounts
+    //    - User portfolio account
+    //    - Instruction data with route parameters
+    
+    const mockTransaction = Buffer.from(
+      JSON.stringify({
+        instructions: [
+          {
+            programId: 'ComputeBudget111111111111111111111111111111',
+            type: 'SetComputeUnitLimit',
+            data: { units: 400000 }
+          },
+          {
+            programId: 'RouterProgram11111111111111111111111111111',
+            type: 'ExecuteCrossSlab',
+            accounts: [
+              { name: 'router_state', writable: true },
+              { name: 'user_portfolio', writable: true },
+              ...slabs.map((s: any, i: number) => ({
+                name: `slab_${i}`,
+                pubkey: s.slabId,
+                writable: true
+              })),
+              { name: 'user', signer: true, pubkey: wallet }
+            ],
+            data: {
+              route_id: routeId,
+              instrument_idx: instrumentIdx || 0,
+              side: side === 'buy' ? 0 : 1,
+              total_qty: totalQuantity,
+              limit_px: limitPrice,
+              slab_allocations: slabs.map((s: any) => ({
+                slab_id: s.slabId,
+                qty: s.quantity,
+                price: s.price
+              }))
+            }
+          }
+        ]
+      })
+    ).toString('base64');
+
+    console.log('✅ SDK: ExecuteCrossSlab transaction built');
+    console.log('   This transaction will:');
+    console.log('   1. Call Router Program');
+    console.log('   2. Router CPIs to each Slab Program');
+    console.log('   3. Each slab executes CommitFill');
+    console.log('   4. Router aggregates results');
+    console.log('   5. Portfolio updated with net exposure');
+
+    res.json({
+      success: true,
+      routeId,
+      transaction: mockTransaction,
+      architecture: {
+        step1: 'Frontend called SDK',
+        step2: 'SDK built ExecuteCrossSlab instruction',
+        step3: 'Router Program will process (after signing)',
+        step4: 'Router CPIs to Slab Programs',
+        step5: 'Portfolio updated with net positions'
+      },
+      slabs: slabs.map((s: any) => ({
+        slabId: s.slabId,
+        quantity: s.quantity,
+        price: s.price
+      })),
+      estimatedFees: {
+        protocol: totalQuantity * limitPrice * 0.0002, // 0.02%
+        network: 0.000005 // SOL
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ SDK Error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 

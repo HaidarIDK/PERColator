@@ -344,5 +344,158 @@ export class PercolatorClient {
     );
     return pda;
   }
+
+  /**
+   * CROSS-SLAB ROUTER: Execute multi-slab trade atomically
+   * 
+   * Architecture:
+   * 1. Frontend calls this SDK method
+   * 2. SDK builds ExecuteCrossSlab instruction
+   * 3. Router Program processes instruction
+   * 4. Router CPIs to multiple Slab Programs (CommitFill)
+   * 5. Router updates Portfolio with net exposure
+   */
+  async executeCrossSlabTrade(
+    user: Keypair,
+    slabStates: PublicKey[],
+    instrumentIndices: number[],
+    sides: Side[],
+    quantities: BN[],
+    limitPrices: BN[],
+    ttlMs: number = 120000
+  ): Promise<{
+    routeId: BN;
+    holdIds: BN[];
+    totalFilled: BN;
+    avgPrice: BN;
+    totalCost: BN;
+  }> {
+    if (slabStates.length === 0) {
+      throw new Error('At least one slab required');
+    }
+
+    if (
+      slabStates.length !== instrumentIndices.length ||
+      slabStates.length !== sides.length ||
+      slabStates.length !== quantities.length ||
+      slabStates.length !== limitPrices.length
+    ) {
+      throw new Error('All arrays must have same length');
+    }
+
+    // Generate route ID
+    const routeId = new BN(Date.now());
+    const commitmentHash = Buffer.alloc(32);
+
+    // PHASE 1: Multi-Reserve across all slabs
+    const holdIds: BN[] = [];
+    const reserveTx = new Transaction();
+
+    for (let i = 0; i < slabStates.length; i++) {
+      const ix = createReserveInstruction(
+        this.slabProgramId,
+        slabStates[i],
+        user.publicKey,
+        0, // account_idx (TODO: derive from portfolio)
+        instrumentIndices[i],
+        sides[i],
+        quantities[i],
+        limitPrices[i],
+        ttlMs,
+        commitmentHash,
+        routeId
+      );
+      reserveTx.add(ix);
+    }
+
+    await sendAndConfirmTransaction(this.connection, reserveTx, [user]);
+
+    // Parse hold IDs from transaction logs (mock for now)
+    for (let i = 0; i < slabStates.length; i++) {
+      holdIds.push(new BN(Math.floor(Math.random() * 1000000)));
+    }
+
+    // PHASE 2: Multi-Commit atomically
+    const commitTx = new Transaction();
+    
+    for (let i = 0; i < slabStates.length; i++) {
+      const ix = createCommitInstruction(
+        this.slabProgramId,
+        slabStates[i],
+        user.publicKey,
+        holdIds[i],
+        Date.now()
+      );
+      commitTx.add(ix);
+    }
+
+    await sendAndConfirmTransaction(this.connection, commitTx, [user]);
+
+    // Calculate totals (mock for now - should parse from logs)
+    let totalFilled = new BN(0);
+    let totalCost = new BN(0);
+    
+    for (let i = 0; i < quantities.length; i++) {
+      totalFilled = totalFilled.add(quantities[i]);
+      totalCost = totalCost.add(quantities[i].mul(limitPrices[i]));
+    }
+
+    const avgPrice = totalFilled.gtn(0) 
+      ? totalCost.div(totalFilled)
+      : new BN(0);
+
+    return {
+      routeId,
+      holdIds,
+      totalFilled,
+      avgPrice,
+      totalCost,
+    };
+  }
+
+  /**
+   * Get available slabs for cross-slab routing
+   */
+  async getAvailableSlabs(): Promise<Array<{
+    id: number;
+    name: string;
+    slabState: PublicKey;
+    liquidity: number;
+    vwap: number;
+    fee: number;
+    instruments: string[];
+  }>> {
+    // TODO: Fetch from on-chain registry
+    // For now, return mock data
+    return [
+      {
+        id: 1,
+        name: "Slab A",
+        slabState: new PublicKey('Slab1111111111111111111111111111111111111111'),
+        liquidity: 1500,
+        vwap: 3881.95,
+        fee: 0.02,
+        instruments: ['BTC/USDC', 'ETH/USDC', 'SOL/USDC'],
+      },
+      {
+        id: 2,
+        name: "Slab B",
+        slabState: new PublicKey('Slab2222222222222222222222222222222222222222'),
+        liquidity: 2300,
+        vwap: 3882.15,
+        fee: 0.015,
+        instruments: ['BTC/USDC', 'ETH/USDC'],
+      },
+      {
+        id: 3,
+        name: "Slab C",
+        slabState: new PublicKey('Slab3333333333333333333333333333333333333333'),
+        liquidity: 980,
+        vwap: 3881.75,
+        fee: 0.025,
+        instruments: ['ETH/USDC', 'SOL/USDC'],
+      },
+    ];
+  }
 }
 

@@ -4,7 +4,7 @@ import fs from 'fs';
 
 let connection: Connection;
 let provider: AnchorProvider;
-let slabProgram: Program;
+let slabProgram: Program | null = null;
 let wallet: Wallet;
 
 export async function initializeSolana() {

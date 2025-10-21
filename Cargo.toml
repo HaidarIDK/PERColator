@@ -10,12 +10,13 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/yourusername/percolator"
+repository = "https://github.com/HaidarIDK/PERColator"
 
 [workspace.dependencies]
 pinocchio = "0.9.2"
 pinocchio-log = "0.5.1"
 pinocchio-pubkey = "0.3.0"
+pinocchio-system = "0.3.0"
 proptest = "1.4"
 solana-program = "2.1"
 solana-program-test = "2.1"

@@ -15,8 +15,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"
 pinocchio = { workspace = true }
 pinocchio-log = { workspace = true }
 pinocchio-pubkey = { workspace = true }
+pinocchio-system = { workspace = true }
 percolator-common = { path = "../common" }
 
 [features]
-default = []
+default = ["bpf-entrypoint"]
 bpf-entrypoint = []
+no-entrypoint = []

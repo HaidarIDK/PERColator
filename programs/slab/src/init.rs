@@ -5,7 +5,7 @@ use percolator_common::*;
 
 /// Initialize a new SlabState account
 ///
-/// This should be called after allocating a 10MB account for the slab.
+/// This should be called after allocating a ~70KB account for the slab.
 /// Sets up all headers, pools, and initial state.
 ///
 /// # Arguments
@@ -77,7 +77,8 @@ pub const fn get_slab_account_size() -> usize {
 /// Calculate minimum rent-exempt balance for slab account
 ///
 /// On Solana, accounts must maintain a minimum balance to be rent-exempt.
-/// This function calculates that amount for a 10MB slab account.
+/// This function calculates that amount for a ~70KB slab account.
+/// (~0.5 SOL rent vs ~73 SOL for 10MB - saves ~72.5 SOL! 🎉)
 ///
 /// Formula: lamports = (account_size + 128) * lamports_per_byte_year * 2
 /// where lamports_per_byte_year is typically ~3,480 lamports
@@ -145,9 +146,25 @@ mod tests {
     #[test]
     fn test_get_slab_account_size() {
         let size = get_slab_account_size();
-        // Should be ~7MB (actual size based on struct layout)
-        assert!(size > 7_000_000);
-        assert!(size < 8_000_000);
+        
+        // Size calculation (ULTRA-CHEAP MODE):
+        // - Accounts: 50 * 64 bytes = 3.2 KB
+        // - Orders: 300 * 100 bytes = 30 KB
+        // - Positions: 100 * 80 bytes = 8 KB
+        // - Reservations: 50 * 64 bytes = 3.2 KB
+        // - Slices: 100 * 32 bytes = 3.2 KB
+        // - Trades: 50 * 64 bytes = 3.2 KB
+        // - Aggressor: 25 * 40 bytes = 1 KB
+        // - Instruments: 32 * ~100 bytes = 3.2 KB
+        // - Header/misc: ~2 KB
+        // Total: ~55-60 KB
+        //
+        // Rent cost: ~0.5 SOL (vs 73 SOL for 10MB!)
+        // SAVINGS: 72.5 SOL per market! 🚀
+        
+        // Should be ~50-80 KB (ULTRA-cheap production size)
+        assert!(size > 40_000, "Size too small: {} bytes", size);
+        assert!(size < 100_000, "Size too large: {} bytes", size);
     }
 
     #[test]
@@ -155,8 +172,8 @@ mod tests {
         let rent = calculate_slab_rent();
         // Should be positive
         assert!(rent > 0);
-        // Slab is ~7MB, so rent should be substantial
-        // On Solana, large accounts have high rent requirements
+        // Slab is ~70KB, so rent should be ~0.5 SOL
+        // (INCREDIBLE: 72.5 SOL saved vs 10MB! Same as Serum size!)
     }
 
     #[test]

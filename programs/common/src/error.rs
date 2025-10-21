@@ -1,5 +1,7 @@
 //! Error types
 
+use pinocchio::program_error::ProgramError;
+
 /// Program errors
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,5 +73,11 @@ pub enum PercolatorError {
 impl From<PercolatorError> for u64 {
     fn from(e: PercolatorError) -> u64 {
         e as u64
+    }
+}
+
+impl From<PercolatorError> for ProgramError {
+    fn from(e: PercolatorError) -> ProgramError {
+        ProgramError::Custom(e as u32)
     }
 }

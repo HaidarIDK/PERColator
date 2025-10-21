@@ -5,8 +5,76 @@ import { getConnection } from '../services/solana';
 export const faucetRouter = Router();
 
 /**
+ * POST /api/faucet/airdrop
+ * Airdrop devnet SOL to user wallet (simplified endpoint)
+ */
+faucetRouter.post('/airdrop', async (req, res) => {
+  try {
+    const { wallet, amount = 2 } = req.body;
+    
+    if (!wallet) {
+      return res.status(400).json({ error: 'wallet address required' });
+    }
+
+    const userPubkey = new PublicKey(wallet);
+    const connection = getConnection();
+    
+    try {
+      // Request airdrop from Solana devnet
+      const amountLamports = amount * LAMPORTS_PER_SOL;
+      console.log(`💰 Requesting ${amount} SOL airdrop for ${wallet}...`);
+      
+      const signature = await connection.requestAirdrop(userPubkey, amountLamports);
+      console.log(`⏳ Airdrop signature: ${signature}`);
+      
+      // Wait for confirmation
+      await connection.confirmTransaction(signature, 'confirmed');
+      console.log(`✅ Airdrop confirmed!`);
+
+      // Get updated balance
+      const balance = await connection.getBalance(userPubkey);
+      const balanceSOL = balance / LAMPORTS_PER_SOL;
+
+      res.json({
+        success: true,
+        wallet,
+        amount,
+        signature,
+        balance_after: balanceSOL,
+        message: `Airdropped ${amount} SOL to ${wallet}`,
+        explorer_url: `https://explorer.solana.com/tx/${signature}?cluster=devnet`
+      });
+    } catch (airdropError: any) {
+      console.error('Airdrop error:', airdropError);
+      
+      // If airdrop fails (rate limit, RPC not available, etc)
+      if (airdropError.message?.includes('airdrop') || airdropError.message?.includes('rate')) {
+        return res.status(429).json({
+          success: false,
+          error: 'Airdrop rate limit exceeded. Please wait 1 minute and try again.',
+          hint: 'You can also use https://faucet.solana.com for manual airdrops'
+        });
+      }
+      
+      // RPC not available
+      return res.status(503).json({
+        success: false,
+        error: 'Solana RPC not available. Cannot process airdrop.',
+        hint: 'Use https://faucet.solana.com to get devnet SOL manually'
+      });
+    }
+
+  } catch (error: any) {
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
+  }
+});
+
+/**
  * POST /api/faucet/airdrop-sol
- * Airdrop devnet SOL to user wallet
+ * Airdrop devnet SOL to user wallet (original endpoint)
  */
 faucetRouter.post('/airdrop-sol', async (req, res) => {
   try {

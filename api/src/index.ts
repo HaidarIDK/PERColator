@@ -2,12 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { marketDataRouter } from './routes/marketData';
+import { dashboardRouter } from './routes/dashboard';
 import { tradingRouter } from './routes/trading';
 import { userRouter } from './routes/user';
 import { healthRouter } from './routes/health';
 import { routerRouter } from './routes/router';
 import { claimsRouter } from './routes/claims';
 import { faucetRouter } from './routes/faucet';
+import { monitorRouter } from './routes/monitor';
 import { initializeSolana } from './services/solana';
 import { startWebSocketServer } from './services/websocket';
 
@@ -41,6 +43,7 @@ app.get('/', (req, res) => {
       router: '/api/router/*',
       claims: '/api/claims/*',
       faucet: '/api/faucet/*',
+      monitor: '/api/monitor/*',
       websocket: 'ws://localhost:3000/ws'
     },
     docs: 'See api/README.md for full API documentation'
@@ -49,12 +52,14 @@ app.get('/', (req, res) => {
 
 // Routes
 app.use('/api/health', healthRouter);
-app.use('/api/market', marketDataRouter);
+app.use('/api/market', dashboardRouter); // Dashboard API with real-time data
+app.use('/api/slab', marketDataRouter); // Original Solana slab data
 app.use('/api/trade', tradingRouter);
 app.use('/api/user', userRouter);
 app.use('/api/router', routerRouter);
 app.use('/api/claims', claimsRouter);
 app.use('/api/faucet', faucetRouter);
+app.use('/api/monitor', monitorRouter);
 
 // 404 handler for unknown routes
 app.use((req, res) => {
@@ -83,7 +88,7 @@ async function start() {
     console.log('✅ Solana connection initialized');
 
     // Start HTTP server
-    const server = app.listen(PORT, HOST as any, () => {
+    const server = app.listen(Number(PORT), () => {
       console.log(`🚀 Percolator API server running on http://${HOST}:${PORT}`);
       console.log(`📊 Network: ${process.env.SOLANA_NETWORK}`);
       console.log(`🔗 RPC: ${process.env.SOLANA_RPC_URL}`);

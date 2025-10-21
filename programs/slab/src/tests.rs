@@ -238,5 +238,5 @@ mod header_tests {
 }
 
 // NOTE: Order book operation tests are deferred to integration tests with surfpool
-// Testing with the full 10MB SlabState is complex in unit tests due to stack limitations
+// Testing with the ~70KB SlabState (ULTRA-CHEAP mode: ~0.5 SOL rent!)
 // Integration tests will provide better coverage of book operations in a realistic environment

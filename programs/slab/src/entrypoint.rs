@@ -13,12 +13,99 @@ use crate::instructions::{
     process_reserve,
     process_commit,
     process_cancel,
+    process_liquidation,
 };
 use crate::matching::funding::{update_funding, update_all_funding};
-use crate::state::{SlabState, SlabHeader, Instrument};
+use crate::state::{SlabState, SlabHeader};
 use percolator_common::*;
 
 entrypoint!(process_instruction);
+
+// ========== Helper Functions ==========
+
+/// Validate account owner
+fn validate_owner(account: &AccountInfo, expected_owner: &Pubkey) -> ProgramResult {
+    if account.owner() != expected_owner {
+        msg!("Error: Account has invalid owner");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+    Ok(())
+}
+
+/// Validate account is writable
+fn validate_writable(account: &AccountInfo) -> ProgramResult {
+    if !account.is_writable() {
+        msg!("Error: Account is not writable");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+    Ok(())
+}
+
+/// Validate account is signer
+fn validate_signer(account: &AccountInfo) -> ProgramResult {
+    if !account.is_signer() {
+        msg!("Error: Account is not a signer");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+    Ok(())
+}
+
+/// Read N bytes from data
+fn read_bytes<const N: usize>(data: &[u8], offset: &mut usize) -> Result<[u8; N], PercolatorError> {
+    if data.len() < *offset + N {
+        return Err(PercolatorError::InvalidInstruction);
+    }
+    let mut bytes = [0u8; N];
+    bytes.copy_from_slice(&data[*offset..*offset + N]);
+    *offset += N;
+    Ok(bytes)
+}
+
+/// Read u16 from data
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, PercolatorError> {
+    if data.len() < *offset + 2 {
+        return Err(PercolatorError::InvalidInstruction);
+    }
+    let value = u16::from_le_bytes([data[*offset], data[*offset + 1]]);
+    *offset += 2;
+    Ok(value)
+}
+
+/// Read i64 from data
+fn read_i64(data: &[u8], offset: &mut usize) -> Result<i64, PercolatorError> {
+    if data.len() < *offset + 8 {
+        return Err(PercolatorError::InvalidInstruction);
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[*offset..*offset + 8]);
+    *offset += 8;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+/// Read u64 from data
+fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, PercolatorError> {
+    if data.len() < *offset + 8 {
+        return Err(PercolatorError::InvalidInstruction);
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[*offset..*offset + 8]);
+    *offset += 8;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Borrow account data as mutable type T
+unsafe fn borrow_account_data_mut<T>(account: &AccountInfo) -> Result<&mut T, PercolatorError> {
+    let data_len = account.data_len();
+    if data_len < core::mem::size_of::<T>() {
+        msg!("Error: Account data too small");
+        return Err(PercolatorError::InvalidAccount);
+    }
+    // Get raw pointer to account data
+    let data_ptr = account.data_ptr() as *mut T;
+    Ok(&mut *data_ptr)
+}
+
+// ========== End Helper Functions ==========
 
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -43,7 +130,7 @@ pub fn process_instruction(
         6 => SlabInstruction::UpdateFunding,
         7 => SlabInstruction::Liquidate,
         _ => {
-            msg!("Error: Unknown instruction discriminator: {}", discriminator);
+            msg!("Error: Unknown instruction discriminator");
             return Err(PercolatorError::InvalidInstruction.into());
         }
     };
@@ -118,7 +205,7 @@ fn handle_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
     // Parse instruction data
     // Total size: 4 + 2 + 1 + 8 + 8 + 8 + 32 + 8 = 71 bytes
     if data.len() < 71 {
-        msg!("Error: Invalid Reserve instruction data length: {}", data.len());
+        msg!("Error: Invalid Reserve instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -137,7 +224,7 @@ fn handle_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
         0 => Side::Buy,
         1 => Side::Sell,
         _ => {
-            msg!("Error: Invalid side value: {}", side_byte);
+            msg!("Error: Invalid side value");
             return Err(PercolatorError::InvalidInstruction.into());
         }
     };
@@ -155,8 +242,7 @@ fn handle_reserve(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) ->
         route_id,
     )?;
 
-    msg!("Reserve successful: hold_id={}, vwap={}, worst_px={}, max_charge={}, filled_qty={}",
-        result.hold_id, result.vwap_px, result.worst_px, result.max_charge, result.filled_qty);
+    msg!("Reserve successful");
 
     Ok(())
 }
@@ -184,7 +270,7 @@ fn handle_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
 
     // Parse instruction data (16 bytes total)
     if data.len() < 16 {
-        msg!("Error: Invalid Commit instruction data length: {}", data.len());
+        msg!("Error: Invalid Commit instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -195,8 +281,7 @@ fn handle_commit(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
     // Call instruction handler
     let result = process_commit(slab, hold_id, current_ts)?;
 
-    msg!("Commit successful: executed {} fills, total_notional={}", 
-        result.fills_count, result.total_notional);
+    msg!("Commit successful");
 
     Ok(())
 }
@@ -223,7 +308,7 @@ fn handle_cancel(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
 
     // Parse instruction data (8 bytes total)
     if data.len() < 8 {
-        msg!("Error: Invalid Cancel instruction data length: {}", data.len());
+        msg!("Error: Invalid Cancel instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -232,8 +317,8 @@ fn handle_cancel(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> 
 
     // Call instruction handler
     process_cancel(slab, hold_id)?;
-
-    msg!("Cancel successful: hold_id={}", hold_id);
+    
+    msg!("Cancel successful");
 
     Ok(())
 }
@@ -261,7 +346,7 @@ fn handle_batch_open(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
 
     // Parse instruction data (10 bytes total)
     if data.len() < 10 {
-        msg!("Error: Invalid BatchOpen instruction data length: {}", data.len());
+        msg!("Error: Invalid BatchOpen instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -272,9 +357,7 @@ fn handle_batch_open(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
     // Call batch_open logic
     crate::instructions::process_batch_open(slab, instrument_idx, current_ts)?;
 
-    msg!("BatchOpen successful: instrument_idx={}, new_epoch={}", 
-        instrument_idx, 
-        slab.get_instrument(instrument_idx).map(|i| i.epoch).unwrap_or(0));
+    msg!("BatchOpen successful");
 
     Ok(())
 }
@@ -310,7 +393,7 @@ fn handle_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
 
     // Parse instruction data (32 + 32 + 32 + 2 + 2 + 2 + 2 + 8 + 2 = 114 bytes minimum)
     if data.len() < 114 {
-        msg!("Error: Invalid Initialize instruction data length: {}", data.len());
+        msg!("Error: Invalid Initialize instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -338,12 +421,12 @@ fn handle_initialize(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8])
         authority,
         oracle,
         router,
-        imr,
-        mmr,
-        maker_fee,
-        taker_fee,
+        imr as u64,
+        mmr as u64,
+        maker_fee as i64,
+        taker_fee as u64,
         batch_ms,
-        freeze_levels,
+        freeze_levels as u8,
     );
 
     // Initialize other fields
@@ -382,14 +465,14 @@ fn handle_add_instrument(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
     let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
 
     // Verify authority
-    if authority_account.key() != &slab.header.authority {
+    if authority_account.key() != &slab.header.lp_owner {
         msg!("Error: Invalid authority");
         return Err(PercolatorError::Unauthorized.into());
     }
 
     // Parse instruction data (8 + 8 + 8 + 8 + 8 = 40 bytes)
     if data.len() < 40 {
-        msg!("Error: Invalid AddInstrument instruction data length: {}", data.len());
+        msg!("Error: Invalid AddInstrument instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -428,8 +511,7 @@ fn handle_add_instrument(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
     };
     slab.instrument_count += 1;
 
-    msg!("Instrument added: symbol={:?}, index={}", 
-        core::str::from_utf8(&symbol).unwrap_or("INVALID"), idx);
+    msg!("Instrument added");
 
     Ok(())
 }
@@ -457,7 +539,7 @@ fn handle_update_funding(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 
     // Parse instruction data (1 + 2 + 8 = 11 bytes)
     if data.len() < 11 {
-        msg!("Error: Invalid UpdateFunding instruction data length: {}", data.len());
+        msg!("Error: Invalid UpdateFunding instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -468,10 +550,10 @@ fn handle_update_funding(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 
     if update_all == 1 {
         update_all_funding(slab, current_ts)?;
-        msg!("Updated funding for all instruments at ts={}", current_ts);
+        msg!("Updated funding for all instruments");
     } else {
         update_funding(slab, instrument_idx, current_ts)?;
-        msg!("Updated funding for instrument {} at ts={}", instrument_idx, current_ts);
+        msg!("Updated funding for instrument");
     }
 
     Ok(())
@@ -502,7 +584,7 @@ fn handle_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
 
     // Parse instruction data (4 + 16 + 2 + 2 = 24 bytes)
     if data.len() < 24 {
-        msg!("Error: Invalid Liquidate instruction data length: {}", data.len());
+        msg!("Error: Invalid Liquidate instruction data length");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -521,8 +603,7 @@ fn handle_liquidate(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) 
         price_band_bps,
     )?;
 
-    msg!("Liquidation executed: closed_qty={}, fee={}, remaining_deficit={}",
-        result.closed_qty, result.liquidation_fee, result.remaining_deficit);
+    msg!("Liquidation executed");
 
     Ok(())
 }
