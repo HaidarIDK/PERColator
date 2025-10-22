@@ -174,7 +174,7 @@ export class WebSocketServer {
 
     // Subscribe to Hyperliquid if not already subscribed
     if (!this.hyperliquidSubscriptions.has(subscriptionId)) {
-      console.log(`📊 Subscribing to Hyperliquid: ${symbol} ${interval}`);
+      console.log(`Subscribing to Hyperliquid: ${symbol} ${interval}`);
       const hyperliquidSubId = hyperliquidWS.subscribeToCandles(symbol, interval);
       this.hyperliquidSubscriptions.set(subscriptionId, hyperliquidSubId);
       
@@ -203,7 +203,7 @@ export class WebSocketServer {
       }
     });
 
-    console.log(`✅ Client subscribed to ${symbol} ${interval}`);
+    console.log(`Client subscribed to ${symbol} ${interval}`);
   }
 
   /**
@@ -232,7 +232,7 @@ export class WebSocketServer {
     // Remove subscription from client
     this.clients.get(ws)?.delete(subscriptionId);
 
-    console.log(`✅ Client unsubscribed from ${symbol} ${interval}`);
+    console.log(`Client unsubscribed from ${symbol} ${interval}`);
   }
 
   /**
@@ -298,7 +298,7 @@ export class WebSocketServer {
     });
 
     if (sentCount > 0) {
-      console.log(`📡 Broadcasted ${candle.symbol} ${candle.timeframe} candle to ${sentCount} clients`);
+      console.log(`Broadcasted ${candle.symbol} ${candle.timeframe} candle to ${sentCount} clients`);
     }
   }
 
