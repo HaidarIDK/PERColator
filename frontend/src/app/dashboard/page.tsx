@@ -148,7 +148,7 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
           timeVisible: true,
           secondsVisible: false,
         },
-        width: 1090,
+        width: chartContainerRef.current?.clientWidth || 1090,
         height: chartContainerRef.current?.clientHeight || 725,
       });
 
@@ -459,8 +459,8 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
         </div>
       )}
       
-      <div className="relative">
-        <div ref={chartContainerRef} style={{ height: "150%", width: "100%"}} />
+      <div className="relative w-full h-full">
+        <div ref={chartContainerRef} style={{ height: "100%", width: "100%"}} />
         
         {/* Loading Overlay */}
         {dataLoadingState === 'loading' && (
@@ -501,7 +501,6 @@ const TradingViewChartComponent = ({
   tradingMode: "simple" | "advanced";
   onTradingModeChange: (mode: "simple" | "advanced") => void;
 }) => {
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const [chartData, setChartData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [ohlcData, setOhlcData] = useState({ open: 0, high: 0, low: 0, close: 0, change: 0 })
@@ -749,17 +748,9 @@ const TradingViewChartComponent = ({
     onTimeframeChange(timeframe)
   }
 
-  const toggleFullscreen = () => {
-    setIsFullscreen(!isFullscreen)
-  }
 
   return (
-    <div className={cn(
-      "bg-black/20 rounded-2xl border border-[#181825] overflow-hidden transition-all duration-300",
-      isFullscreen 
-        ? "fixed inset-0 z-50 rounded-none" 
-        : "w-full h-full"
-    )}>
+    <div className="bg-black/20 rounded-2xl border border-[#181825] overflow-hidden transition-all duration-300 w-full h-full">
       <div className="h-12 flex items-center justify-between px-4 border-b border-[#181825]">
         <div className="flex items-center space-x-4">
           <div className="flex items-center space-x-2">
@@ -874,30 +865,10 @@ const TradingViewChartComponent = ({
           </div>
         </div>
         
-        <div className="flex items-center space-x-2 min-h-100">
-          <button
-            onClick={toggleFullscreen}
-            className="p-2 text-gray-400 hover:text-white transition-colors"
-            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-          >
-            {isFullscreen ? (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-              </svg>
-            )}
-          </button>
-        </div>
       </div>
       
       {/* Lightweight Charts */}
-      <div className={cn(
-        "transition-all duration-300",
-        isFullscreen ? "h-[calc(100vh-48px)]" : "h-[calc(100vh-200px)]"
-      )}>
+      <div className="transition-all duration-300 h-[calc(100vh-200px)]">
         <LightweightChartMemo coinId={selectedCoin} timeframe={selectedTimeframe}/>
       </div>
     </div>
