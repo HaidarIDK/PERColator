@@ -353,7 +353,7 @@ class PercolatorAPIClient {
     return res.json();
   }
 
-  async getChartData(symbol: string, timeframe: string = '15m', limit: number = 100, from?: number, to?: number): Promise<CandlestickData[]> {
+  async getChartData(symbol: string, timeframe: string = '15m', limit: number = 10000, from?: number, to?: number): Promise<CandlestickData[]> {
     // Map timeframe to your API format
     const apiSymbol = symbol === 'SOL' ? 'SOL-PERP' : 
                      symbol === 'ETH' ? 'ETH-PERP' : 
@@ -365,9 +365,10 @@ class PercolatorAPIClient {
       limit: limit.toString()
     });
     
-    if (from !== undefined) {
-      params.append('from', from.toString());
-    }
+    // Default start date for historical data: 2025-10-01
+    const defaultFromMs = new Date('2025-10-01T00:00:00Z').getTime();
+    const effectiveFrom = from === undefined ? defaultFromMs : from;
+    params.append('from', effectiveFrom.toString());
     
     if (to !== undefined) {
       params.append('to', to.toString());

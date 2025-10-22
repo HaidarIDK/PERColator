@@ -166,12 +166,10 @@ async function fetchHyperliquidCandles(coin: string, interval: string, limit: nu
     let startTime: number;
     let endTime: number;
     
-    // If from and to are provided, use them directly
     if (from !== undefined && to !== undefined) {
       startTime = from;
       endTime = to;
     } else {
-      // Fallback to limit-based calculation
       const intervalMs = parseInt(interval.replace(/[^\d]/g, '')) * 60 * 1000; // Convert to milliseconds
       startTime = now - (limit * intervalMs);
       endTime = now;
@@ -428,7 +426,7 @@ dashboardRouter.get('/:symbol/orderbook', (req, res) => {
 
 dashboardRouter.get('/:symbol/candles', async (req, res) => {
   const { symbol } = req.params;
-  const { timeframe = '15', limit = '100', from, to } = req.query;
+  const { timeframe = '1d', limit = '10000', from, to } = req.query;
   
   const limitNum = Math.min(parseInt(limit as string), 500);
   

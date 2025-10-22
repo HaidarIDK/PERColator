@@ -48,7 +48,7 @@ import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickSeries, Time,
 import axios from "axios"
 
 // Lightweight Charts Component
-function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin" | "solana", timeframe: "1" | "5" | "15" | "60" | "240" | "D" }) {
+function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin" | "solana", timeframe: "15" | "60" | "240" | "D" }) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<any> | null>(null);
@@ -73,47 +73,36 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
   };
 
   // Function to get server interval from timeframe
-  const getServerIntervalFromTimeframe = (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => {
+  const getServerIntervalFromTimeframe = (timeframe: "15" | "60" | "240" | "D") => {
     switch(timeframe) {
-      case "1": return "1m";
-      case "5": return "5m";
       case "15": return "15m";
       case "60": return "1h";
       case "240": return "4h";
       case "D": return "1d";
-      default: return "1m";
+      default: return "15m";
     }
   };
 
   // Helper function to calculate chunk size based on timeframe
   const getChunkSizeMs = (timeframe: string): number => {
     const chunkSizes: Record<string, number> = {
-      "1": 7 * 24 * 60 * 60 * 1000,    // 1m: 1 week chunks
-      "5": 7 * 24 * 60 * 60 * 1000,    // 5m: 1 week chunks  
       "15": 14 * 24 * 60 * 60 * 1000,  // 15m: 2 week chunks
       "60": 30 * 24 * 60 * 60 * 1000,  // 1h: 1 month chunks
       "240": 90 * 24 * 60 * 60 * 1000, // 4h: 3 month chunks
       "D": 365 * 24 * 60 * 60 * 1000,  // 1d: 1 year chunks
     };
-    return chunkSizes[timeframe] || 7 * 24 * 60 * 60 * 1000; // Default to 1 week
+    return chunkSizes[timeframe] || 14 * 24 * 60 * 60 * 1000; // Default to 2 weeks
   };
 
-  // Helper function to generate chunk key
   const getChunkKey = (startTime: number, endTime: number): string => {
     return `${startTime}-${endTime}`;
   };
 
-  // Helper function to check if we need to load more data
-  const shouldLoadMoreData = (visibleRange: IRange<Time> | null, oldestTimestamp: number | null): boolean => {
-    if (!visibleRange || !oldestTimestamp) return false;
-    
-    const currentOldestTime = visibleRange.from as number;
-    const buffer = 2 * 60 * 60; // 2 hour buffer
-    
-    return currentOldestTime <= oldestTimestamp + buffer && !isLoadingMore;
+  const shouldLoadMoreData = (_visibleRange: IRange<Time> | null, _oldestTimestamp: number | null): boolean => {
+    // Chunked lazy-loading disabled; always return false
+    return false;
   };
 
-  // Function to get base price for mock data
   const getBasePrice = (coinId: "ethereum" | "bitcoin" | "solana") => {
     switch(coinId) {
       case "ethereum": return 3882;
@@ -136,7 +125,6 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
     const timeoutId = setTimeout(async () => {
       if (!chartContainerRef.current) return;
   
-      // Create chart
       const chart = createChart(chartContainerRef.current, {
         layout: {
           background: { type: ColorType.Solid, color: "transparent" },
@@ -160,20 +148,20 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
           timeVisible: true,
           secondsVisible: false,
         },
-        width: chartContainerRef.current.clientWidth,
-        height: chartContainerRef.current.clientHeight,
+        width: 1090,
+        height: chartContainerRef.current?.clientHeight || 725,
       });
 
 
   
       // Add candlestick series
       const candlestickSeries = chart.addSeries(CandlestickSeries, {
-        upColor: "#4fff00",
-        borderUpColor: "#4fff00",
-        wickUpColor: "#4fff00",
-        downColor: "#ff4976",
-        borderDownColor: "#ff4976",
-        wickDownColor: "#ff4976",
+        upColor: "#22c55e", // green-500 - matches order book buy color
+        borderUpColor: "#22c55e",
+        wickUpColor: "#22c55e",
+        downColor: "#ef4444", // red-500 - matches order book sell color
+        borderDownColor: "#ef4444",
+        wickDownColor: "#ef4444",
       });
 
       chartRef.current = chart;
@@ -185,75 +173,30 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
         height: chartContainerRef.current.clientHeight,
       });
 
-      const loadMoreHistoricalData = async (endTime: number) => {
-        if (isLoadingMore) return;
-        
-        try {
-          setIsLoadingMore(true);
-          setDataLoadingState('loading');
-          
-          const chunkSizeMs = getChunkSizeMs(timeframe);
-          const startTime = endTime - chunkSizeMs;
-          const chunkKey = getChunkKey(startTime, endTime);
-          
-          // Check if we've already loaded this chunk
-          if (loadedChunks.has(chunkKey)) {
-            console.log("📦 Chunk already loaded:", chunkKey);
-            return;
-          }
-          
-          console.log(`📦 Loading historical chunk: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
-          
-          // Convert timestamps to milliseconds for API
-          const data = await apiClient.getChartData(symbol, timeframe, 1000, startTime, endTime);
-          
-          if (data && data.length > 0) {
-            const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
-              time: Math.floor(candle.time) as Time, // API now returns time in seconds
-              open: candle.open,
-              high: candle.high,
-              low: candle.low,
-              close: candle.close,
-            }));
-                        
-            const currentData = candlestickSeries.data();
-            const newData = [...chartData, ...currentData];
-            
-            candlestickSeries.setData(newData);
-            
-            // Mark chunk as loaded
-            setLoadedChunks(prev => new Set([...prev, chunkKey]));
-            
-            if (chartData.length > 0) {
-              const oldestCandle = chartData[0];
-              setOldestTimestamp(oldestCandle.time as number);
-            }
-            
-            console.log(`✅ Loaded ${chartData.length} candles for chunk ${chunkKey}`);
-          }
-        } catch (error) {
-          console.error("❌ Failed to load more historical data:", error);
-          setDataLoadingState('error');
-        } finally {
-          setIsLoadingMore(false);
-        }
-      };
+      // Chunked historical loading removed
+      const loadMoreHistoricalData = async (_endTime: number) => { return; };
 
       const loadInitialData = async () => {
         try {
           setDataLoadingState('loading');
           const symbol = getServerSymbolFromCoinId(coinId);
-          const interval = getServerIntervalFromTimeframe(timeframe);
+          // Map UI timeframe to API param expected by backend candles endpoint
+          const apiTimeframeMap: Record<string, string> = {
+            "15": "15",
+            "60": "60",
+            "240": "240",
+            "D": "1440",
+          };
+          const apiTimeframe = apiTimeframeMap[timeframe] || "15";
           
-          // Load initial chunk - get the most recent data
+          // Load full history beginning from Oct 1, 2025 UTC to now
           const now = Date.now();
-          const chunkSizeMs = getChunkSizeMs(timeframe);
-          const startTime = now - chunkSizeMs;
+          const startTime = new Date('2025-10-01T00:00:00Z').getTime();
           
-          console.log(`📊 Loading initial data for ${symbol} ${interval}`);
-          console.log(`📦 Initial chunk: ${new Date(startTime).toISOString()} to ${new Date(now).toISOString()}`);
+          console.log(`📊 Loading full history for ${symbol} ${apiTimeframe}`);
+          console.log(`🗓️ Range: ${new Date(startTime).toISOString()} → ${new Date(now).toISOString()}`);
           
-          const data = await apiClient.getChartData(symbol, interval, 1000, startTime, now);
+          const data = await apiClient.getChartData(symbol, apiTimeframe, 10000, startTime, now);
           
           if (data && data.length > 0) {
             const chartData: CandlestickData<Time>[] = data.map((candle: any) => ({
@@ -266,15 +209,10 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
             
             candlestickSeries.setData(chartData);
             
-            // Mark initial chunk as loaded
-            const chunkKey = getChunkKey(startTime, now);
-            setLoadedChunks(prev => new Set([...prev, chunkKey]));
-            
-            // Track oldest timestamp for lazy loading
+            // Track oldest and current price
             if (chartData.length > 0) {
               const oldestCandle = chartData[0];
               setOldestTimestamp(oldestCandle.time as number);
-              
               const lastCandle = chartData[chartData.length - 1];
               setCurrentPrice(lastCandle.close);
             }
@@ -295,14 +233,12 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       
       const subscribeToTimeframe = (currentTimeframe: string) => {
         const intervalMap: Record<string, string> = {
-          "1": "1m",
-          "5": "5m",
           "15": "15m",
           "60": "1h",
           "240": "4h",
           "D": "1d",
         };
-        const interval = intervalMap[currentTimeframe] || "1m";
+        const interval = intervalMap[currentTimeframe] || "15m";
   
         ws.send(
           JSON.stringify({
@@ -321,14 +257,12 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
         
         // Store initial subscription details
         const intervalMap: Record<string, string> = {
-          "1": "1m",
-          "5": "5m",
           "15": "15m",
           "60": "1h",
           "240": "4h",
           "D": "1d",
         };
-        const interval = intervalMap[timeframe] || "1m";
+        const interval = intervalMap[timeframe] || "15m";
         currentSubscriptionRef.current = { 
           symbol: symbol.toUpperCase(), 
           interval: interval 
@@ -345,13 +279,12 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
             
             const currentSymbol = getServerSymbolFromCoinId(coinId);
             const intervalMap: Record<string, string> = {
-              "1": "1m",
-              "5": "5m", 
               "15": "15m",
               "60": "1h",
               "240": "4h",
+              "D": "1d",
             };
-            const currentInterval = intervalMap[timeframe] || "1d";
+            const currentInterval = intervalMap[timeframe] || "15m";
                         
             if (candleData.symbol === currentSymbol && candleData.timeframe === currentInterval) {
               const timestamp = Math.floor(candleData.timestamp / 1000);
@@ -433,29 +366,24 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
     };
   }, [coinId, timeframe]);
 
-  // Reset loaded chunks when coin or timeframe changes
   useEffect(() => {
     setLoadedChunks(new Set());
     setDataLoadingState('idle');
   }, [coinId, timeframe]);
 
-  // Store WebSocket reference and current subscription details
   const wsRef = useRef<WebSocket | null>(null);
   const currentSubscriptionRef = useRef<{symbol: string, interval: string} | null>(null);
   
-  // Effect to handle timeframe changes - unsubscribe from old topic and subscribe to new one
   useEffect(() => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     
     const intervalMap: Record<string, string> = {
-      "1": "1m",
-      "5": "5m", 
       "15": "15m",
       "60": "1h",
       "240": "4h",
       "D": "1d",
     };
-    const interval = intervalMap[timeframe] || "1m";
+    const interval = intervalMap[timeframe] || "15m";
     const symbol = getServerSymbolFromCoinId(coinId).toUpperCase();
     
     // Unsubscribe from previous topic if it exists
@@ -532,7 +460,7 @@ function LightweightChart({ coinId, timeframe }: { coinId: "ethereum" | "bitcoin
       )}
       
       <div className="relative">
-        <div ref={chartContainerRef} style={{ height: "100%", width: "100%", minHeight: "400px" }} />
+        <div ref={chartContainerRef} style={{ height: "150%", width: "100%"}} />
         
         {/* Loading Overlay */}
         {dataLoadingState === 'loading' && (
@@ -561,13 +489,17 @@ const TradingViewChartComponent = ({
   selectedCoin,
   onCoinChange,
   selectedTimeframe,
-  onTimeframeChange
+  onTimeframeChange,
+  tradingMode,
+  onTradingModeChange
 }: { 
   symbol?: string;
   selectedCoin: "ethereum" | "bitcoin" | "solana";
   onCoinChange: (coin: "ethereum" | "bitcoin" | "solana") => void;
-  selectedTimeframe: "1" | "5" | "15" | "60" | "240" | "D";
-  onTimeframeChange: (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => void;
+  selectedTimeframe: "15" | "60" | "240" | "D";
+  onTimeframeChange: (timeframe: "15" | "60" | "240" | "D") => void;
+  tradingMode: "simple" | "advanced";
+  onTradingModeChange: (mode: "simple" | "advanced") => void;
 }) => {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [chartData, setChartData] = useState<any[]>([])
@@ -575,7 +507,6 @@ const TradingViewChartComponent = ({
   const [ohlcData, setOhlcData] = useState({ open: 0, high: 0, low: 0, close: 0, change: 0 })
   const wsCleanupRef = useRef<(() => void) | null>(null)
 
-  // Function to get base price for mock data
   const getBasePrice = (coinId: "ethereum" | "bitcoin" | "solana") => {
     switch(coinId) {
       case "ethereum": return 3882;
@@ -673,10 +604,7 @@ const TradingViewChartComponent = ({
   // Fetch real chart data from backend
   useEffect(() => {
     const fetchChartData = async () => {
-      // Convert timeframe format for API
       const timeframeMap: Record<string, string> = {
-        "1": "1m",
-        "5": "5m", 
         "15": "15m",
         "60": "1h",
         "240": "4h",
@@ -686,7 +614,9 @@ const TradingViewChartComponent = ({
       
       try {
         setLoading(true)
-        const response = await apiClient.getChartData(symbol, apiTimeframe, 100)
+        const now = Date.now();
+        const startTime = new Date('2025-10-01T00:00:00Z').getTime();
+        const response = await apiClient.getChartData(symbol, apiTimeframe, 10000, startTime, now)
         
         // Handle API response format - convert object to array
         let data;
@@ -815,7 +745,7 @@ const TradingViewChartComponent = ({
     }
   }, [symbol, selectedTimeframe])
 
-  const handleTimeframeChange = (timeframe: "1" | "5" | "15" | "60" | "240" | "D") => {
+  const handleTimeframeChange = (timeframe: "15" | "60" | "240" | "D") => {
     onTimeframeChange(timeframe)
   }
 
@@ -899,7 +829,7 @@ const TradingViewChartComponent = ({
 
           {/* Timeframe Buttons */}
           <div className="flex items-center space-x-1">
-            {(["1", "5", "15", "60", "240", "D"] as const).map((tf) => (
+            {(["15", "60", "240", "D"] as const).map((tf) => (
               <button
                 key={tf}
                 onClick={() => onTimeframeChange(tf)}
@@ -914,9 +844,37 @@ const TradingViewChartComponent = ({
               </button>
             ))}
           </div>
+
+          {/* Trading Mode Toggle */}
+          <div className="flex items-center space-x-1 ml-4">
+            <button
+              onClick={() => onTradingModeChange("simple")}
+              className={cn(
+                "px-3 py-1 text-xs font-medium rounded-lg transition-all duration-300 flex items-center gap-1",
+                tradingMode === "simple"
+                  ? "bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/10 text-[#B8B8FF] border border-[#B8B8FF]/30"
+                  : "bg-black/20 backdrop-blur-sm border border-[#181825] text-gray-400 hover:text-white hover:border-[#B8B8FF]/30 hover:bg-gradient-to-r hover:from-[#B8B8FF]/10 hover:to-transparent"
+              )}
+            >
+              <BarChart3 className="w-3 h-3" />
+              Simple
+            </button>
+            <button
+              onClick={() => onTradingModeChange("advanced")}
+              className={cn(
+                "px-3 py-1 text-xs font-medium rounded-lg transition-all duration-300 flex items-center gap-1",
+                tradingMode === "advanced"
+                  ? "bg-gradient-to-r from-purple-500/20 to-pink-500/10 text-purple-300 border border-purple-500/30"
+                  : "bg-black/20 backdrop-blur-sm border border-[#181825] text-gray-400 hover:text-white hover:border-purple-500/30 hover:bg-gradient-to-r hover:from-purple-500/10 hover:to-transparent"
+              )}
+            >
+              <Zap className="w-3 h-3" />
+              Router
+            </button>
+          </div>
         </div>
         
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 min-h-100">
           <button
             onClick={toggleFullscreen}
             className="p-2 text-gray-400 hover:text-white transition-colors"
@@ -938,15 +896,14 @@ const TradingViewChartComponent = ({
       {/* Lightweight Charts */}
       <div className={cn(
         "transition-all duration-300",
-        isFullscreen ? "h-[calc(100vh-48px)]" : "h-[calc(100%-48px)]"
+        isFullscreen ? "h-[calc(100vh-48px)]" : "h-[calc(100vh-200px)]"
       )}>
-        <LightweightChartMemo coinId={selectedCoin} timeframe={selectedTimeframe} />
+        <LightweightChartMemo coinId={selectedCoin} timeframe={selectedTimeframe}/>
       </div>
     </div>
   )
 }
 
-// Order Book Component
 const OrderBook = ({ symbol }: { symbol: string }) => {
   const [orderbook, setOrderbook] = useState<Orderbook | null>(null)
   const [loading, setLoading] = useState(true)
@@ -955,7 +912,6 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
   const [wsConnected, setWsConnected] = useState(false)
 
   useEffect(() => {
-    // Fetch initial orderbook
     const fetchOrderbook = async () => {
       try {
         const data = await apiClient.getOrderbook(symbol)
@@ -969,27 +925,9 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
 
     fetchOrderbook()
 
-    const cleanup = apiClient.connectWebSocket((message: any) => {
-      setWsConnected(true); // Mark as connected when we receive any message
-      if (message.type === 'orderbook' && message.symbol === symbol) {
-        setOrderbook(message.data)
-      }
-      if (message.type === 'trade' && message.symbol === symbol) {
-        setRecentTrades(prev => [message.data, ...prev].slice(0, 20))
-      }
-    })
-    
-    return () => {
-      if (cleanup) cleanup();
-    };
-
-    apiClient.subscribeToOrderbook(symbol)
-
-    // Refresh every 5 seconds as fallback
     const interval = setInterval(fetchOrderbook, 5000)
 
     return () => {
-      cleanup()
       clearInterval(interval)
     }
   }, [symbol])
@@ -1026,14 +964,14 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
           {loading && <span className="text-xs text-gray-500 ml-2">Loading...</span>}
         </div>
         
-        {/* WebSocket Connection Status */}
+        {/* API Status */}
         <div className="flex items-center space-x-2">
           <div className={cn(
             "w-2 h-2 rounded-full",
-            wsConnected ? "bg-green-400" : "bg-red-400"
+            !loading ? "bg-green-400" : "bg-yellow-400"
           )}></div>
           <span className="text-xs text-gray-400">
-            {wsConnected ? "Live" : "Offline"}
+            {loading ? "Loading..." : "Live"}
           </span>
         </div>
       </div>
@@ -1047,7 +985,6 @@ const OrderBook = ({ symbol }: { symbol: string }) => {
               <span>Total</span>
             </div>
             
-            {/* Asks (reverse order for display) */}
             <div className="space-y-1 mb-4">
               {asks.length > 0 ? (
                 asks.reverse().map((ask, index) => (
@@ -2010,28 +1947,38 @@ Margin calculation on NET exposure:
       
       <div className="p-3 space-y-3">
         {/* Buy/Sell Toggle */}
-        <div className="flex bg-[#0a0a0f] rounded-lg p-1">
+        <div className="flex bg-[#0a0a0f] rounded-lg p-1 border border-[#181825] relative overflow-hidden">
           <button
             onClick={() => setTradeSide("buy")}
             className={cn(
-              "flex-1 py-2 rounded-md text-sm font-bold transition-all",
-              tradeSide === "buy"
-                ? "bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 text-[#B8B8FF] border border-[#B8B8FF]/40"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-2 rounded-md text-sm font-bold transition-all duration-300",
+              tradeSide === "buy" ? "text-[#B8B8FF]" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            📈 BUY
+            {tradeSide === "buy" && (
+              <motion.span
+                layoutId="cross-slab-side"
+                className="absolute inset-0 rounded-md bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 border border-[#B8B8FF]/40"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">BUY</span>
           </button>
           <button
             onClick={() => setTradeSide("sell")}
             className={cn(
-              "flex-1 py-2 rounded-md text-sm font-bold transition-all",
-              tradeSide === "sell"
-                ? "bg-gradient-to-r from-orange-500/30 to-yellow-500/20 text-orange-300 border border-orange-500/40"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-2 rounded-md text-sm font-bold transition-all duration-300",
+              tradeSide === "sell" ? "text-red-300" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            📉 SELL
+            {tradeSide === "sell" && (
+              <motion.span
+                layoutId="cross-slab-side"
+                className="absolute inset-0 rounded-md bg-gradient-to-r from-red-500/30 to-red-400/20 border border-red-500/40"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">SELL</span>
           </button>
         </div>
 
@@ -2044,7 +1991,7 @@ Margin calculation on NET exposure:
             type="number"
             value={quantity}
             onChange={(e) => setQuantity(e.target.value)}
-            className="w-full bg-[#181825] border-2 border-[#181825] focus:border-purple-500/50 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-colors"
+            className="w-full bg-[#181825] border border-[#181825] focus:border-[#B8B8FF]/50 focus:ring-[#B8B8FF]/20 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-all duration-300 hover:border-[#181825]/80"
             placeholder="Enter total amount..."
             step="0.1"
           />
@@ -2059,7 +2006,7 @@ Margin calculation on NET exposure:
             type="number"
             value={limitPrice}
             onChange={(e) => setLimitPrice(e.target.value)}
-            className="w-full bg-[#181825] border-2 border-[#181825] focus:border-purple-500/50 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-colors"
+            className="w-full bg-[#181825] border border-[#181825] focus:border-[#B8B8FF]/50 focus:ring-[#B8B8FF]/20 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-all duration-300 hover:border-[#181825]/80"
             placeholder={tradeSide === "buy" ? "Max price willing to pay..." : "Min price willing to accept..."}
           />
         </div>
@@ -2160,16 +2107,16 @@ Margin calculation on NET exposure:
           onClick={handleExecuteCrossSlab}
           disabled={!connected || submitting || !executionPlan || executionPlan.unfilled > 0}
           className={cn(
-            "w-full py-4 rounded-xl font-bold text-base transition-all shadow-xl",
+            "w-full py-4 rounded-xl font-bold text-base transition-all duration-300 shadow-xl",
             tradeSide === "buy"
-              ? "bg-gradient-to-r from-purple-500/40 to-pink-600/30 hover:from-purple-500/50 hover:to-pink-600/40 border-2 border-purple-500/60 text-purple-200"
-              : "bg-gradient-to-r from-green-500/40 to-emerald-600/30 hover:from-green-500/50 hover:to-emerald-600/40 border-2 border-green-500/60 text-green-200",
+              ? "bg-gradient-to-r from-[#B8B8FF]/40 to-[#B8B8FF]/30 hover:from-[#B8B8FF]/50 hover:to-[#B8B8FF]/40 border border-[#B8B8FF]/60 text-[#B8B8FF] hover:shadow-[#B8B8FF]/30"
+              : "bg-gradient-to-r from-red-500/40 to-red-400/30 hover:from-red-500/50 hover:to-red-400/40 border border-red-500/60 text-red-300 hover:shadow-red-500/30",
             (!connected || submitting || !executionPlan || executionPlan.unfilled > 0) && "opacity-50 cursor-not-allowed"
           )}
         >
           {submitting ? (
             <span className="flex items-center justify-center gap-2">
-              <span className="animate-spin">⚡</span>
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
               <span>Executing Across Slabs...</span>
             </span>
           ) : !connected ? (
@@ -2648,49 +2595,58 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
       
       <div className="p-3 space-y-3">
         {/* Simple Buy/Sell Tabs */}
-        <div className="flex bg-[#0a0a0f] rounded-lg p-1">
+        <div className="flex bg-[#0a0a0f] rounded-lg p-1 border border-[#181825] relative overflow-hidden">
           <button
             onClick={() => setTradeSide("buy")}
             className={cn(
-              "flex-1 py-3 px-4 rounded-lg text-sm font-bold transition-all",
-              tradeSide === "buy"
-                ? "bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 text-[#B8B8FF] border-2 border-[#B8B8FF]/50 shadow-lg shadow-[#B8B8FF]/20"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-2 rounded-md text-sm font-bold transition-all duration-300",
+              tradeSide === "buy" ? "text-[#B8B8FF]" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            <div className="flex flex-col items-center gap-1">
-              <span className="text-lg">📈</span>
-              <span>BUY</span>
-            </div>
+            {tradeSide === "buy" && (
+              <motion.span
+                layoutId="cross-slab-side"
+                className="absolute inset-0 rounded-md bg-gradient-to-r from-[#B8B8FF]/30 to-[#B8B8FF]/20 border border-[#B8B8FF]/40"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">BUY</span>
           </button>
           <button
             onClick={() => setTradeSide("sell")}
             className={cn(
-              "flex-1 py-3 px-4 rounded-lg text-sm font-bold transition-all",
-              tradeSide === "sell"
-                ? "bg-gradient-to-r from-orange-500/30 to-yellow-500/20 text-orange-300 border-2 border-orange-500/50 shadow-lg shadow-orange-500/20"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-2 rounded-md text-sm font-bold transition-all duration-300",
+              tradeSide === "sell" ? "text-red-300" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            <div className="flex flex-col items-center gap-1">
-              <span className="text-lg">📉</span>
-              <span>SELL</span>
-            </div>
+            {tradeSide === "sell" && (
+              <motion.span
+                layoutId="cross-slab-side"
+                className="absolute inset-0 rounded-md bg-gradient-to-r from-red-500/30 to-red-400/20 border border-red-500/40"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">SELL</span>
           </button>
         </div>
 
-        {/* Order Type - Simpler */}
-        <div className="flex bg-[#181825] rounded-lg p-0.5">
+        {/* Order Type - Animated */}
+        <div className="flex bg-[#181825] rounded-lg p-0.5 border border-[#181825] relative overflow-hidden">
           <button
             onClick={() => setOrderType("Limit")}
             className={cn(
-              "flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-colors",
-              orderType === "Limit"
-                ? "bg-[#B8B8FF]/20 text-[#B8B8FF]"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-300",
+              orderType === "Limit" ? "text-[#B8B8FF]" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            Limit
+            {orderType === "Limit" && (
+              <motion.span
+                layoutId="orderform-type"
+                className="absolute inset-0 rounded-md bg-[#B8B8FF]/20 border border-[#B8B8FF]/30"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">Limit</span>
           </button>
           <button
             onClick={() => {
@@ -2700,13 +2656,18 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
               }
             }}
             className={cn(
-              "flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-colors",
-              orderType === "Market"
-                ? "bg-[#B8B8FF]/20 text-[#B8B8FF]"
-                : "text-gray-500 hover:text-gray-300"
+              "relative flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all duration-300",
+              orderType === "Market" ? "text-[#B8B8FF]" : "text-gray-500 hover:text-gray-300"
             )}
           >
-            Market
+            {orderType === "Market" && (
+              <motion.span
+                layoutId="orderform-type"
+                className="absolute inset-0 rounded-md bg-[#B8B8FF]/20 border border-[#B8B8FF]/30"
+                transition={{ type: "spring", stiffness: 400, damping: 35 }}
+              />
+            )}
+            <span className="relative">Market</span>
           </button>
         </div>
 
@@ -2748,22 +2709,47 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
               type="number"
               value={price}
               onChange={(e) => setPrice(e.target.value)}
-              className="w-full bg-[#181825] border-2 border-[#181825] focus:border-[#B8B8FF]/50 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-colors"
+              className="w-full bg-[#181825] border border-[#181825] focus:border-[#B8B8FF]/50 focus:ring-[#B8B8FF]/20 rounded-xl px-4 py-3 pr-24 text-white text-base font-medium focus:outline-none transition-all duration-300 hover:border-[#181825]/80"
               placeholder={orderType === "Market" ? "Market Price" : "Enter price..."}
               disabled={orderType === "Market"}
             />
             {orderType === "Limit" && (
-              <button
-                onClick={() => {
-                  if (realPrice > 0) {
-                    setPrice(realPrice.toFixed(4));
-                  }
-                }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-lg text-[#B8B8FF] text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                disabled={!realPrice}
-              >
-                Use Mid {realPrice > 0 ? `(${realPrice.toFixed(2)})` : ''}
-              </button>
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                {/* Use Mid Button */}
+                <button
+                  onClick={() => {
+                    if (realPrice > 0) {
+                      setPrice(realPrice.toFixed(4));
+                    }
+                  }}
+                  className="px-2 py-1 bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-lg text-[#B8B8FF] text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!realPrice}
+                >
+                  Mid {realPrice > 0 ? realPrice.toFixed(2) : ''}
+                </button>
+                
+                {/* Increment/Decrement Buttons */}
+                <div className="flex flex-col">
+                  <button
+                    onClick={() => {
+                      const currentPrice = parseFloat(price) || 0;
+                      setPrice((currentPrice + 0.01).toFixed(2));
+                    }}
+                    className="w-6 h-3 flex items-center justify-center bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-t text-[#B8B8FF] text-xs font-bold transition-colors"
+                  >
+                    +
+                  </button>
+                  <button
+                    onClick={() => {
+                      const currentPrice = parseFloat(price) || 0;
+                      setPrice((currentPrice - 0.01).toFixed(2));
+                    }}
+                    className="w-6 h-3 flex items-center justify-center bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-b text-[#B8B8FF] text-xs font-bold transition-colors"
+                  >
+                    -
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -2778,13 +2764,13 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
               type="number"
               value={quantity}
               onChange={(e) => setQuantity(e.target.value)}
-              className="w-full bg-[#181825] border-2 border-[#181825] focus:border-[#B8B8FF]/50 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-colors"
+              className="w-full bg-[#181825] border border-[#181825] focus:border-[#B8B8FF]/50 focus:ring-[#B8B8FF]/20 rounded-xl px-4 py-3 text-white text-base font-medium focus:outline-none transition-all duration-300 hover:border-[#181825]/80"
               placeholder="Enter amount..."
               step="0.1"
             />
             <button
               onClick={() => setQuantity("1.0")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-gradient-to-r from-purple-500/20 to-blue-500/20 hover:from-purple-500/30 hover:to-blue-500/30 border border-purple-500/30 rounded-lg text-purple-400 text-xs font-bold transition-all"
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/10 hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/20 border border-[#B8B8FF]/30 rounded-lg text-[#B8B8FF] text-xs font-semibold transition-all duration-300 hover:border-[#B8B8FF]/50 hover:shadow-[0_0_15px_rgba(184,184,255,0.2)] disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={!connected}
             >
               1.0
@@ -2801,16 +2787,16 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
         {/* Simple Order Summary */}
         {quantity && price && (
           <div className={cn(
-            "rounded-xl p-3 border-2",
+            "rounded-xl p-3 border border-[#181825] transition-all duration-300",
             tradeSide === "buy" 
-              ? "bg-green-500/5 border-green-500/30" 
-              : "bg-red-500/5 border-red-500/30"
+              ? "bg-gradient-to-r from-[#B8B8FF]/10 to-[#B8B8FF]/5" 
+              : "bg-gradient-to-r from-red-500/10 to-red-400/5"
           )}>
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-gray-400">Order Summary</span>
               <span className={cn(
                 "text-xs font-bold",
-                tradeSide === "buy" ? "text-green-400" : "text-red-400"
+                tradeSide === "buy" ? "text-[#B8B8FF]" : "text-red-400"
               )}>
                 {tradeSide.toUpperCase()} {orderType.toUpperCase()}
               </span>
@@ -2824,8 +2810,8 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
                 <span className="text-gray-400">Price:</span>
                 <span className="text-white font-medium">{parseFloat(price).toFixed(2)} {getQuoteCurrency()}</span>
               </div>
-              <div className="flex justify-between text-base font-bold pt-1.5 border-t border-gray-700">
-                <span className={tradeSide === "buy" ? "text-green-400" : "text-red-400"}>Total:</span>
+              <div className="flex justify-between text-base font-bold pt-1.5 border-t border-[#181825]">
+                <span className={tradeSide === "buy" ? "text-[#B8B8FF]" : "text-red-400"}>Total:</span>
                 <span className="text-white">
                   {(parseFloat(quantity) * parseFloat(price)).toFixed(2)} {getQuoteCurrency()}
                 </span>
@@ -2840,16 +2826,16 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
           onClick={handleSubmitTrade}
           disabled={!connected || submitting || !quantity || !price}
           className={cn(
-            "w-full py-4 rounded-xl font-bold text-base transition-all shadow-xl transform active:scale-95",
+            "w-full py-4 rounded-xl font-bold text-base transition-all duration-300 shadow-xl transform active:scale-95",
             tradeSide === "buy"
-              ? "bg-gradient-to-r from-green-500/40 to-emerald-600/30 hover:from-green-500/50 hover:to-emerald-600/40 border-2 border-green-500/60 text-green-300 hover:shadow-green-500/30"
-              : "bg-gradient-to-r from-red-500/40 to-rose-600/30 hover:from-red-500/50 hover:to-rose-600/40 border-2 border-red-500/60 text-red-300 hover:shadow-red-500/30",
+              ? "bg-gradient-to-r from-[#B8B8FF]/40 to-[#B8B8FF]/30 hover:from-[#B8B8FF]/50 hover:to-[#B8B8FF]/40 border border-[#B8B8FF]/60 text-[#B8B8FF] hover:shadow-[#B8B8FF]/30"
+              : "bg-gradient-to-r from-red-500/40 to-red-400/30 hover:from-red-500/50 hover:to-red-400/40 border border-red-500/60 text-red-300 hover:shadow-red-500/30",
             (!connected || submitting || !quantity || !price) && "opacity-50 cursor-not-allowed hover:shadow-none"
           )}
         >
           {submitting ? (
             <span className="flex items-center justify-center gap-2">
-              <span className="animate-spin">⏳</span>
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
               <span>Processing...</span>
             </span>
           ) : !connected ? (
@@ -2859,7 +2845,6 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
             </span>
           ) : (
             <span className="flex items-center justify-center gap-2">
-              <span className="text-xl">{tradeSide === "buy" ? "📈" : "📉"}</span>
               <span>
                 {tradeSide === "buy" ? "BUY" : "SELL"}
               </span>
@@ -2871,50 +2856,6 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
         {connected && quantity && price && (
           <div className="text-xs text-center text-gray-400">
             Estimated cost: {(parseFloat(quantity) * parseFloat(price)).toFixed(2)} SOL + ~0.00001 SOL fee
-          </div>
-        )}
-
-        {/* Test Button - Simple SOL Transfer */}
-        {connected && (
-          <div className="space-y-2 pt-2 border-t border-[#181825]/50">
-            <button
-              onClick={async () => {
-                if (!publicKey || !signTransaction) return;
-                setSubmitting(true);
-                try {
-                  showModal(
-                    '✅ Integration Status',
-                    `✅ Wallet connected: ${publicKey.toBase58().slice(0,8)}...\n` +
-                    `✅ Sign function available: Yes\n` +
-                    `✅ Backend API: Running\n` +
-                    `✅ Devnet blockhash: Working\n` +
-                    `✅ Programs DEPLOYED to devnet! 🚀\n\n` +
-                    `📦 Deployed Program IDs:\n\n` +
-                    `Slab Program:\n` +
-                    `6EF2acRfPejnxXYd9apKc2wb3p2NLG8rKgWbCfp5G7Uz\n\n` +
-                    `Router Program:\n` +
-                    `9CQWTSDobkHqWzvx4nufdke4C8GKuoaqiNBBLEYFoHoG\n\n` +
-                    `🔍 View on Solana Explorer:\n` +
-                    `https://explorer.solana.com/address/6EF2acRfPejnxXYd9apKc2wb3p2NLG8rKgWbCfp5G7Uz?cluster=devnet\n\n` +
-                    `🎯 Ready to trade on-chain!\n` +
-                    `Click "🔒 Reserve Liquidity" to start.`,
-                    'success'
-                  );
-                } catch (error: any) {
-                  console.error(error);
-                } finally {
-                  setSubmitting(false);
-                }
-              }}
-              disabled={submitting}
-              className="w-full py-2 rounded-lg font-medium text-xs bg-green-500/20 border border-green-500/30 text-green-400 hover:bg-green-500/30 transition-colors"
-            >
-              ✅ Check Integration Status
-            </button>
-            
-            <div className="text-xs text-center text-green-500">
-              🚀 Programs deployed! Ready for on-chain trading.
-            </div>
           </div>
         )}
 
@@ -2931,30 +2872,6 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
           <div className="flex justify-between text-gray-400">
             <span>Estimated Total:</span>
             <span className="text-white">{quantity} USDC</span>
-          </div>
-        </div>
-
-        {/* Advanced Options */}
-        <div className="space-y-2 pt-3 border-t border-[#181825]">
-          <div className="text-xs text-gray-400 mb-2">Trade Settings</div>
-          
-          <div className="space-y-1">
-            <div className="flex space-x-1">
-              <button className="flex-1 py-1 px-2 bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 rounded text-[#B8B8FF] text-xs">Post Only</button>
-              <button className="flex-1 py-1 px-2 bg-[#181825] border border-[#181825] rounded text-gray-400 text-xs">IOC</button>
-              <button className="flex-1 py-1 px-2 bg-[#181825] border border-[#181825] rounded text-gray-400 text-xs">FOK</button>
-            </div>
-          </div>
-          
-          <div className="space-y-1">
-            <div className="flex items-center space-x-2">
-              <input type="checkbox" defaultChecked className="w-3 h-3 text-[#B8B8FF] bg-[#181825] border-[#181825] rounded focus:ring-[#B8B8FF]/50" />
-              <span className="text-xs text-gray-400">Transaction Confirmation</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <input type="checkbox" className="w-3 h-3 text-[#B8B8FF] bg-[#181825] border-[#181825] rounded focus:ring-[#B8B8FF]/50" />
-              <span className="text-xs text-gray-400">Auto-Rebalance Slice</span>
-            </div>
           </div>
         </div>
       </div>
@@ -3165,10 +3082,156 @@ const OrderForm = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "s
   )
 }
 
+// Status Footer Component
+const StatusFooter = () => {
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [apiStatus, setApiStatus] = useState<'operational' | 'degraded' | 'down'>('operational');
+  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+
+  // WebSocket status monitoring
+  useEffect(() => {
+    const checkWsStatus = () => {
+      // Simulate WebSocket status check
+      const ws = new WebSocket('ws://localhost:3000/ws');
+      
+      ws.onopen = () => {
+        setWsStatus('connected');
+        ws.close();
+      };
+      
+      ws.onerror = () => {
+        setWsStatus('disconnected');
+      };
+      
+      ws.onclose = () => {
+        if (wsStatus === 'connecting') {
+          setWsStatus('disconnected');
+        }
+      };
+    };
+
+    checkWsStatus();
+    const interval = setInterval(checkWsStatus, 10000); // Check every 10 seconds
+    
+    return () => clearInterval(interval);
+  }, [wsStatus]);
+
+  // API status monitoring
+  useEffect(() => {
+    const checkApiStatus = async () => {
+      try {
+        const response = await fetch(`${apiClient.baseUrl}/api/health`);
+        if (response.ok) {
+          setApiStatus('operational');
+        } else {
+          setApiStatus('degraded');
+        }
+      } catch {
+        setApiStatus('down');
+      }
+    };
+
+    checkApiStatus();
+    const interval = setInterval(checkApiStatus, 15000); // Check every 15 seconds
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'connected':
+      case 'operational':
+        return 'text-green-400';
+      case 'connecting':
+      case 'degraded':
+        return 'text-yellow-400';
+      case 'disconnected':
+      case 'down':
+        return 'text-red-400';
+      default:
+        return 'text-gray-400';
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'connected':
+      case 'operational':
+        return <div className="w-2 h-2 bg-green-400 rounded-full"></div>;
+      case 'connecting':
+      case 'degraded':
+        return <div className="w-2 h-2 bg-yellow-400 rounded-full"></div>;
+      case 'disconnected':
+      case 'down':
+        return <div className="w-2 h-2 bg-red-400 rounded-full"></div>;
+      default:
+        return <div className="w-2 h-2 bg-gray-400 rounded-full"></div>;
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="mt-4 bg-black/20 backdrop-blur-md border border-[#181825] rounded-xl p-3"
+    >
+      <div className="flex items-center justify-between">
+        {/* Left side - Status indicators */}
+        <div className="flex items-center space-x-6">
+          {/* WebSocket Status */}
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-gray-400">WebSocket:</span>
+            <div className="flex items-center space-x-1">
+              {getStatusIcon(wsStatus)}
+              <span className={`text-xs font-medium ${getStatusColor(wsStatus)}`}>
+                {wsStatus}
+              </span>
+            </div>
+          </div>
+
+          {/* API Status */}
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-gray-400">API:</span>
+            <div className="flex items-center space-x-1">
+              {getStatusIcon(apiStatus)}
+              <span className={`text-xs font-medium ${getStatusColor(apiStatus)}`}>
+                {apiStatus}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Right side - Last update and version */}
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-gray-400">Last update:</span>
+            <span className="text-xs text-gray-300">
+              {lastUpdate.toLocaleTimeString()}
+            </span>
+          </div>
+          
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-gray-400">Version:</span>
+            <span className="text-xs text-[#B8B8FF] font-medium">v1.0.0</span>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-gray-400">Network:</span>
+            <span className="text-xs text-amber-400 font-medium">Devnet</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom row - Additional info */}
+      
+    </motion.div>
+  );
+};
+
 export default function TradingDashboard() {
   // Default to ETH chart
   const [selectedCoin, setSelectedCoin] = useState<"ethereum" | "bitcoin" | "solana">("ethereum")
-  const [selectedTimeframe, setSelectedTimeframe] = useState<"1" | "5" | "15" | "60" | "240" | "D">("15")
+  const [selectedTimeframe, setSelectedTimeframe] = useState<"15" | "60" | "240" | "D">("15")
   const wallet = useWallet();
   const { publicKey, connected } = wallet;
   const [faucetLoading, setFaucetLoading] = useState(false);
@@ -3297,7 +3360,7 @@ export default function TradingDashboard() {
               >
                 {faucetLoading ? (
                   <>
-                    <span className="animate-spin">⏳</span>
+                    <div className="animate-spin rounded-full h-3 w-3 border-b border-current"></div>
                     <span>...</span>
                   </>
                 ) : showFaucetSuccess ? (
@@ -3335,36 +3398,28 @@ export default function TradingDashboard() {
           </div>
         </div>
         
-        {/* Trading Mode Toggle */}
-        <div className="flex items-center justify-center gap-2">
-          <button
-            onClick={() => setTradingMode("simple")}
-            className={cn(
-              "px-4 py-2 rounded-lg text-sm font-medium transition-all",
-              tradingMode === "simple"
-                ? "bg-blue-500/20 border-2 border-blue-500/50 text-blue-300"
-                : "bg-[#181825] border border-[#181825] text-gray-400 hover:text-white"
-            )}
-          >
-            Simple Trading
-          </button>
-          <button
-            onClick={() => setTradingMode("advanced")}
-            className={cn(
-              "px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2",
-              tradingMode === "advanced"
-                ? "bg-purple-500/20 border-2 border-purple-500/50 text-purple-300"
-                : "bg-[#181825] border border-[#181825] text-gray-400 hover:text-white"
-            )}
-          >
-            <Zap className="w-4 h-4" />
-            Cross-Slab Router
-          </button>
-        </div>
 
         {/* Main Trading Interface */}
-        <div className="grid grid-cols-12 gap-4 h-[calc(100vh-180px)]">
-          {/* Left Sidebar - Order Form */}
+        <div className="grid grid-cols-12 gap-4 min-h-[calc(100vh-180px)]">
+          {/* Center - Chart (like the screenshot) */}
+          <div className="col-span-7">
+            <TradingViewChartComponent 
+              symbol={selectedSymbol} 
+              selectedCoin={selectedCoin}
+              onCoinChange={setSelectedCoin}
+              selectedTimeframe={selectedTimeframe}
+              onTimeframeChange={setSelectedTimeframe}
+              tradingMode={tradingMode}
+              onTradingModeChange={setTradingMode}
+            />
+          </div>
+
+          {/* Next to chart - Order Book only */}
+          <div className="col-span-2">
+            <OrderBook symbol={selectedSymbol} />
+          </div>
+
+          {/* Rightmost - Order Form (wider) */}
           <div className="col-span-3">
             {tradingMode === "simple" ? (
               <OrderForm selectedCoin={selectedCoin} />
@@ -3372,23 +3427,10 @@ export default function TradingDashboard() {
               <CrossSlabTrader selectedCoin={selectedCoin} />
             )}
           </div>
-
-          <div className="col-span-6">
-            <TradingViewChartComponent 
-              symbol={selectedSymbol} 
-              selectedCoin={selectedCoin}
-              onCoinChange={setSelectedCoin}
-              selectedTimeframe={selectedTimeframe}
-              onTimeframeChange={setSelectedTimeframe}
-            />
-          </div>
-
-          {/* Right Sidebar - Order Book & Past Trades */}
-          <div className="col-span-3 space-y-4">
-            <OrderBook symbol={selectedSymbol} />
-            <PastTrades symbol={selectedSymbol} />
-          </div>
         </div>
+
+        {/* Status Footer */}
+        <StatusFooter />
       </main>
     </div>
   )
