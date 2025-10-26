@@ -4,10 +4,7 @@ use crate::state::{Portfolio, SlabRegistry};
 use percolator_common::*;
 use pinocchio::{
     account_info::AccountInfo,
-    instruction::{AccountMeta, Instruction},
     msg,
-    program::invoke,
-    pubkey::Pubkey,
     ProgramResult,
 };
 
@@ -34,7 +31,7 @@ pub fn process_withdraw(
     portfolio_account: &AccountInfo,
     portfolio: &mut Portfolio,
     user_account: &AccountInfo,
-    system_program: &AccountInfo,
+    _system_program: &AccountInfo,
     registry: &SlabRegistry,
     amount: u64,
 ) -> ProgramResult {
@@ -77,35 +74,13 @@ pub fn process_withdraw(
         return Err(PercolatorError::InsufficientFunds.into());
     }
 
-    // Transfer SOL from portfolio to user using CPI to System Program
-    // Build System Program transfer instruction
-    // System transfer instruction: discriminator=2u32, data=amount as u64
-    let mut instruction_data = [0u8; 12];
-    instruction_data[0..4].copy_from_slice(&2u32.to_le_bytes()); // Transfer discriminator
-    instruction_data[4..12].copy_from_slice(&amount.to_le_bytes()); // Amount
-
-    let transfer_instruction = Instruction {
-        program_id: system_program.key(),
-        accounts: &[
-            AccountMeta {
-                pubkey: portfolio_account.key(),
-                is_signer: false,
-                is_writable: true,
-            },
-            AccountMeta {
-                pubkey: user_account.key(),
-                is_signer: false,
-                is_writable: true,
-            },
-        ],
-        data: &instruction_data,
-    };
-
-    // Invoke the System Program transfer
-    invoke(
-        &transfer_instruction,
-        &[portfolio_account, user_account, system_program],
-    )?;
+    // Transfer SOL from portfolio to user
+    // Since the router program owns the portfolio account, we can directly manipulate lamports
+    // without requiring a System Program CPI (which would need the portfolio to be a signer)
+    unsafe {
+        *portfolio_account.borrow_mut_lamports_unchecked() -= amount;
+        *user_account.borrow_mut_lamports_unchecked() += amount;
+    }
 
     // Update portfolio state
     // Reduce principal and equity

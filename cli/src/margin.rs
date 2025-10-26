@@ -254,8 +254,14 @@ pub async fn withdraw_collateral(
 
     println!("{} {}", "Portfolio Address:".bright_cyan(), portfolio_address);
 
-    // Derive registry account address
-    let (registry_address, _bump) = derive_registry_pda(&config.router_program_id);
+    // Derive registry account address (must match the address used in init command)
+    // The registry is created with create_with_seed, NOT as a PDA
+    let registry_seed = "registry";
+    let registry_address = Pubkey::create_with_seed(
+        &payer.pubkey(),
+        registry_seed,
+        &config.router_program_id,
+    )?;
     println!("{} {}", "Registry Address:".bright_cyan(), registry_address);
 
     // Check portfolio exists
