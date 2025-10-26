@@ -14,6 +14,14 @@ members = [
     "crates/amm_model",
     "crates/proofs/kani",
 ]
+# Only build programs by default for cargo build-sbf
+default-members = [
+    "programs/router",
+    "programs/slab",
+    "programs/amm",
+    "programs/oracle",
+    "programs/common",
+]
 
 [workspace.package]
 version = "0.1.0"
