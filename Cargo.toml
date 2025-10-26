@@ -9,6 +9,7 @@ members = [
     "tests/integration",
     "tests/e2e",
     "keeper",
+    "cli",
     "crates/amm_model",
     "crates/model_safety",
     "crates/proofs/kani",
@@ -22,7 +23,7 @@ repository = "https://github.com/yourusername/percolator"
 
 [workspace.dependencies]
 arrayvec = { version = "0.7", default-features = false }
-pinocchio = "0.7.0"
+pinocchio = "0.9.2"
 pinocchio-log = { version = "0.5.0", default-features = false }
 pinocchio-pubkey = "0.1.0"
 proptest = "1.4"
