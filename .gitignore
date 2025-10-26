@@ -62,5 +62,7 @@ desktop.ini
 # Local configuration
 .env
 .env.local
+.percolator/
 tests/e2e/test-ledger/
+test-ledger/
 target/

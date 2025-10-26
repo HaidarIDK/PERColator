@@ -53,10 +53,13 @@ pub async fn initialize_exchange(
     println!("{} {}", "Authority PDA:".bright_cyan(), authority_pda);
     println!("{} {}", "Bump:".bright_cyan(), bump);
 
-    // Get account size from router program
-    // SlabRegistry::LEN from percolator-router crate
-    let registry_size = percolator_router::state::SlabRegistry::LEN;
-    println!("{} {} bytes", "Registry Size:".bright_cyan(), registry_size);
+    // Get account size for BPF build (native build has different alignment)
+    // NOTE: pinocchio types have different sizes in BPF vs native builds due to alignment.
+    // The native SlabRegistry::LEN is 45776, but BPF expects 43688 (2088 byte difference).
+    // We hardcode the BPF size here to match what the deployed program expects.
+    const REGISTRY_SIZE_BPF: usize = 43688;
+    let registry_size = REGISTRY_SIZE_BPF;
+    println!("{} {} bytes (BPF build)", "Registry Size:".bright_cyan(), registry_size);
 
     // Calculate rent for registry account
     let rent = rpc_client.get_minimum_balance_for_rent_exemption(registry_size)?;
@@ -163,8 +166,9 @@ pub async fn query_registry_status(
         );
     }
 
-    // Verify size
-    let expected_size = percolator_router::state::SlabRegistry::LEN;
+    // Verify size (use BPF size, not native size)
+    const REGISTRY_SIZE_BPF: usize = 43688;
+    let expected_size = REGISTRY_SIZE_BPF;
     if account.data.len() != expected_size {
         println!("\n{} Account size mismatch: expected {} bytes, got {} bytes",
             "Warning:".yellow(),
