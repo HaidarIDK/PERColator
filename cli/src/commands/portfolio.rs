@@ -5,6 +5,7 @@ use clap::Subcommand;
 use console::style;
 use indicatif::ProgressBar;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signer::Signer;
 use std::str::FromStr;
 
 #[derive(Subcommand)]

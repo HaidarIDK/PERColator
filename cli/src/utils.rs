@@ -5,6 +5,7 @@ use console::style;
 use indicatif::ProgressBar;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
+use solana_sdk::signer::Signer;
 
 /// Check SOL balance
 pub async fn check_balance(config: &Config) -> Result<()> {

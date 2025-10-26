@@ -2,7 +2,7 @@
 
 use crate::error::CliError;
 use crate::Result;
-use solana_sdk::signature::{Keypair, Signer};
+use solana_sdk::signature::Keypair;
 use std::fs;
 
 /// Load wallet keypair from file
@@ -13,7 +13,7 @@ pub fn load_wallet(path: &str) -> Result<Keypair> {
     let secret_key: Vec<u8> = serde_json::from_str(&secret_key_bytes)
         .map_err(|e| CliError::Wallet(format!("Failed to parse wallet file: {}", e)))?;
 
-    Keypair::from_bytes(&secret_key)
+    Keypair::try_from(&secret_key[..])
         .map_err(|e| CliError::Wallet(format!("Invalid keypair: {}", e)))
 }
 

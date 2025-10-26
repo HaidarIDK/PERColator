@@ -34,9 +34,6 @@ pub enum CliError {
     #[error("Serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("Anchor error: {0}")]
-    Anchor(#[from] anchor_client::ClientError),
-
     #[error("{0}")]
     Custom(String),
 }
