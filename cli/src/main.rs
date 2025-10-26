@@ -19,6 +19,7 @@ mod liquidation;
 mod insurance;
 mod crisis;
 mod keeper;
+mod tests;
 
 use config::NetworkConfig;
 
@@ -641,17 +642,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Test { quick, crisis: test_crisis, liquidations, all } => {
             println!("{}", "Running test suite...".bright_green().bold());
+
             if all || quick {
-                println!("\n{}", "=== Smoke Tests ===".bright_yellow());
-                // Run smoke tests
+                tests::run_smoke_tests(&config).await?;
             }
             if all || test_crisis {
-                println!("\n{}", "=== Crisis Haircut Tests ===".bright_yellow());
-                // Run crisis tests
+                tests::run_crisis_tests(&config).await?;
             }
             if all || liquidations {
-                println!("\n{}", "=== Liquidation Tests ===".bright_yellow());
-                // Run liquidation tests
+                tests::run_liquidation_tests(&config).await?;
             }
         }
         Commands::Status { exchange, detailed } => {
