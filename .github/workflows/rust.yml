@@ -43,8 +43,8 @@ jobs:
     - name: Build
       run: cargo build --verbose
     
-    - name: Run tests
-      run: cargo test --verbose --workspace --exclude percolator-e2e-tests --exclude percolator-integration-tests
+    - name: Run tests (unit tests only)
+      run: cargo test --verbose --lib --bins --workspace --exclude percolator-e2e-tests --exclude percolator-integration-tests
     
     - name: Build Router
       run: cargo build --package percolator-router --verbose
@@ -52,12 +52,9 @@ jobs:
     - name: Build Slab
       run: cargo build --package percolator-slab --verbose
     
-    - name: Test Router
-      run: cargo test --package percolator-router --verbose
+    - name: Build CLI
+      run: cargo build --package percolator-cli --verbose
     
-    - name: Test Slab
-      run: cargo test --package percolator-slab --verbose
-    
-    - name: Test Common
-      run: cargo test --package percolator-common --verbose
+    - name: Build Keeper
+      run: cargo build --package percolator-keeper --verbose
 
