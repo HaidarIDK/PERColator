@@ -8,6 +8,7 @@ pub mod execute_cross_slab;
 pub mod liquidate_user;
 pub mod burn_lp_shares;
 pub mod cancel_lp_orders;
+pub mod register_slab;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
@@ -17,6 +18,7 @@ pub use execute_cross_slab::*;
 pub use liquidate_user::*;
 pub use burn_lp_shares::*;
 pub use cancel_lp_orders::*;
+pub use register_slab::*;
 
 /// Instruction discriminator (v0 minimal)
 #[repr(u8)]
@@ -38,6 +40,8 @@ pub enum RouterInstruction {
     BurnLpShares = 6,
     /// Cancel Slab LP orders (ONLY way to reduce Slab LP exposure)
     CancelLpOrders = 7,
+    /// Register a slab in the registry (governance only)
+    RegisterSlab = 8,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

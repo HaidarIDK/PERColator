@@ -203,6 +203,42 @@ enum MatcherCommands {
         /// Matcher address
         matcher: String,
     },
+
+    /// Register a slab in the router registry
+    RegisterSlab {
+        /// Registry address
+        registry: String,
+
+        /// Slab program address
+        slab_id: String,
+
+        /// Oracle address
+        oracle_id: String,
+
+        /// Initial margin ratio in basis points (e.g., 500 = 5%)
+        #[arg(long, default_value = "500")]
+        imr_bps: u64,
+
+        /// Maintenance margin ratio in basis points
+        #[arg(long, default_value = "300")]
+        mmr_bps: u64,
+
+        /// Maker fee cap in basis points
+        #[arg(long, default_value = "10")]
+        maker_fee_bps: u64,
+
+        /// Taker fee cap in basis points
+        #[arg(long, default_value = "20")]
+        taker_fee_bps: u64,
+
+        /// Latency SLA in milliseconds
+        #[arg(long, default_value = "100")]
+        latency_sla_ms: u64,
+
+        /// Maximum position exposure
+        #[arg(long, default_value = "1000000000000")]
+        max_exposure: u128,
+    },
 }
 
 #[derive(Subcommand)]
@@ -476,6 +512,30 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MatcherCommands::Info { matcher } => {
                     matcher::show_matcher_info(&config, matcher).await?;
+                }
+                MatcherCommands::RegisterSlab {
+                    registry,
+                    slab_id,
+                    oracle_id,
+                    imr_bps,
+                    mmr_bps,
+                    maker_fee_bps,
+                    taker_fee_bps,
+                    latency_sla_ms,
+                    max_exposure
+                } => {
+                    matcher::register_slab(
+                        &config,
+                        registry,
+                        slab_id,
+                        oracle_id,
+                        imr_bps,
+                        mmr_bps,
+                        maker_fee_bps,
+                        taker_fee_bps,
+                        latency_sla_ms,
+                        max_exposure
+                    ).await?;
                 }
             }
         }

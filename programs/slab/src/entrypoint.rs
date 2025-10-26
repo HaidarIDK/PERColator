@@ -8,9 +8,9 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, Side};
-use crate::state::SlabState;
-use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut, InstructionReader};
+use crate::instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, Side};
+use crate::state::{SlabState, Side as OrderSide};
+use percolator_common::{PercolatorError, validate_owner, validate_writable, validate_signer, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
 
@@ -30,13 +30,15 @@ pub fn process_instruction(
     let instruction = match discriminator {
         0 => SlabInstruction::Initialize,
         1 => SlabInstruction::CommitFill,
+        2 => SlabInstruction::PlaceOrder,
+        3 => SlabInstruction::CancelOrder,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
         }
     };
 
-    // Dispatch to instruction handler (v0 minimal)
+    // Dispatch to instruction handler
     match instruction {
         SlabInstruction::Initialize => {
             msg!("Instruction: Initialize");
@@ -45,6 +47,14 @@ pub fn process_instruction(
         SlabInstruction::CommitFill => {
             msg!("Instruction: CommitFill");
             process_commit_fill_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::PlaceOrder => {
+            msg!("Instruction: PlaceOrder");
+            process_place_order_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::CancelOrder => {
+            msg!("Instruction: CancelOrder");
+            process_cancel_order_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -165,5 +175,97 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
     )?;
 
     msg!("CommitFill processed successfully");
+    Ok(())
+}
+
+/// Process place_order instruction (v1)
+///
+/// Expected accounts:
+/// 0. `[writable]` Slab state account
+/// 1. `[signer]` Order owner
+///
+/// Expected data layout (17 bytes):
+/// - side: u8 (1 byte) - 0 = Buy, 1 = Sell
+/// - price: i64 (8 bytes) - limit price (1e6 scale)
+/// - qty: i64 (8 bytes) - order quantity (1e6 scale)
+fn process_place_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: PlaceOrder instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let slab_account = &accounts[0];
+    let owner_account = &accounts[1];
+
+    // Validate accounts
+    validate_owner(slab_account, program_id)?;
+    validate_writable(slab_account)?;
+    validate_signer(owner_account)?;
+
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
+
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let side_byte = reader.read_u8()?;
+    let price = reader.read_i64()?;
+    let qty = reader.read_i64()?;
+
+    // Convert side byte to Side enum
+    let side = match side_byte {
+        0 => OrderSide::Buy,
+        1 => OrderSide::Sell,
+        _ => {
+            msg!("Error: Invalid side");
+            return Err(PercolatorError::InvalidSide.into());
+        }
+    };
+
+    // Call the place_order logic
+    let _order_id = process_place_order(
+        slab,
+        owner_account.key(),
+        side,
+        price,
+        qty,
+    )?;
+
+    msg!("PlaceOrder processed successfully");
+    Ok(())
+}
+
+/// Process cancel_order instruction (v1)
+///
+/// Expected accounts:
+/// 0. `[writable]` Slab state account
+/// 1. `[signer]` Order owner
+///
+/// Expected data layout (8 bytes):
+/// - order_id: u64 (8 bytes) - ID of the order to cancel
+fn process_cancel_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: CancelOrder instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let slab_account = &accounts[0];
+    let owner_account = &accounts[1];
+
+    // Validate accounts
+    validate_owner(slab_account, program_id)?;
+    validate_writable(slab_account)?;
+    validate_signer(owner_account)?;
+
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
+
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let order_id = reader.read_u64()?;
+
+    // Call the cancel_order logic
+    process_cancel_order(slab, owner_account.key(), order_id)?;
+
+    msg!("CancelOrder processed successfully");
     Ok(())
 }

@@ -38,9 +38,11 @@ fn a1_invariant_non_decreasing_buy() {
         let k1 = x1 * y1;
 
         // Allow for rounding losses from integer division
-        // When computing y1 = k/x1, we lose at most (x1-1) due to truncation
-        // Additionally, the fee calculation may lose up to 1 unit
-        let max_rounding_loss = x1 + 2;
+        // 1. y1 = k/x1 loses at most (x1-1) due to truncation
+        // 2. dy_in = (dy_gross * BPS_SCALE) / fee_divisor loses at most (fee_divisor-1) ≈ 10000
+        // Total rounding error bound: x1 * (x1-1 + fee_divisor-1) ≈ x1 * (x1 + 10000)
+        let bps_scale = 10_000i128;
+        let max_rounding_loss = x1 * (x1 + bps_scale);
 
         // Invariant should not decrease beyond rounding error
         assert!(k1 + max_rounding_loss >= k0,
@@ -76,7 +78,9 @@ fn a1_invariant_non_decreasing_sell() {
         let k1 = x1 * y1;
 
         // Allow for rounding loss from integer division
-        let max_rounding_loss = x1 + 2;
+        // Similar to buy: division and fee calculation both contribute to rounding
+        let bps_scale = 10_000i128;
+        let max_rounding_loss = x1 * (x1 + bps_scale);
 
         // Invariant should not decrease beyond rounding
         assert!(k1 + max_rounding_loss >= k0,

@@ -1,23 +1,6 @@
-//! Slab state - v0 minimal single-account orderbook
+//! Slab state - v1 orderbook implementation
 
-use super::{SlabHeader, QuoteCache};
-
-/// Book area - simplified price-time orderbook
-/// In v0, this is a stub placeholder for future book implementation
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct BookArea {
-    /// Placeholder data for book (3KB)
-    pub data: [u8; 3072],
-}
-
-impl BookArea {
-    pub fn new() -> Self {
-        Self {
-            data: [0; 3072],
-        }
-    }
-}
+use super::{BookArea, SlabHeader, QuoteCache};
 
 /// Main slab state - v0 minimal structure (~4KB)
 /// Layout: Header (256B) + QuoteCache (256B) + BookArea (3KB)

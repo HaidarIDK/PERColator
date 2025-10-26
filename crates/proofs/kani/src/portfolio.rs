@@ -104,7 +104,7 @@ mod kani_proofs {
         let bucket_count: u16 = kani::any();
         kani::assume(bucket_count <= 8);
 
-        for i in 0..bucket_count {
+        for _ in 0..bucket_count {
             let bucket_mm: u128 = kani::any();
             kani::assume(bucket_mm < u128::MAX / 16);
 

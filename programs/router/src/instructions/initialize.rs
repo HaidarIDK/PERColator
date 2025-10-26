@@ -60,12 +60,14 @@ pub fn process_initialize_registry(
         return Err(PercolatorError::InvalidAccount);
     }
 
-    // SECURITY: Verify account size
+    // SECURITY: Verify account size (minimum required size)
+    // Accept accounts that are at least as large as SlabRegistry::LEN to handle
+    // differences between native Rust and BPF compilation alignment
     let data = registry_account.try_borrow_data()
         .map_err(|_| PercolatorError::InvalidAccount)?;
 
-    if data.len() != SlabRegistry::LEN {
-        msg!("Error: Registry account has incorrect size");
+    if data.len() < SlabRegistry::LEN {
+        msg!("Error: Registry account too small");
         return Err(PercolatorError::InvalidAccount);
     }
 

@@ -20,4 +20,4 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub use state::*;
 pub use instructions::SlabInstruction;
 
-pinocchio_pubkey::declare_id!("SLabZ6PsDLh2X6HzEoqxFDMqCVcJXDKCNEYuPzUvGPk");
+pinocchio_pubkey::declare_id!("8HkaHrEmhP7R9UCUhHPibQTCjBFPgNVb4HEuvPzN28ox");

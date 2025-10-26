@@ -1,5 +1,7 @@
+pub mod orderbook;
 pub mod slab;
 
+pub use orderbook::*;
 pub use slab::*;
 
 // Re-export from common
