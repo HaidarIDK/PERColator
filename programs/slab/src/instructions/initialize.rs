@@ -34,11 +34,13 @@ pub fn process_initialize_slab(
     // In production, we would verify the account is a valid PDA
 
     // Verify account size (~4KB for v0)
+    // Accept accounts that are at least as large as SlabState::LEN to handle
+    // differences between native Rust and BPF compilation alignment
     let data = slab_account.try_borrow_data()
         .map_err(|_| PercolatorError::InvalidAccount)?;
 
-    if data.len() != SlabState::LEN {
-        msg!("Error: Slab account has incorrect size");
+    if data.len() < SlabState::LEN {
+        msg!("Error: Slab account too small");
         return Err(PercolatorError::InvalidAccount);
     }
 
