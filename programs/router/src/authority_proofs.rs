@@ -1,128 +1,65 @@
-//! Kani Proofs for LP Adapter Authority Model
+//! Kani Proofs for LP Adapter Authority Model (Router Production Code)
 //!
-//! These proofs verify the seat-scoping and router-only-access properties
-//! at the function level, complementing the on-chain PDA/signer enforcement.
+//! These proofs verify production Router code, specifically the operator delegation
+//! logic in RouterLpSeat. Matcher-side authority (PDA verification, seat-scoping)
+//! is enforced by on-chain checks in the matcher program, not verified here.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use pinocchio::pubkey::Pubkey;
 
-// Minimal stand-ins for proof models
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SeatRow {
-    pub seat_id: Pubkey,
-}
+// ═══════════════════════════════════════════════════════════════════════════════
+// DESIGN MODELS (for documentation, not verified by Kani)
+// ═══════════════════════════════════════════════════════════════════════════════
+// These models document the intended matcher-side behavior but are not production
+// Router code. The matcher program implements these properties via on-chain checks.
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct VenueObject {
-    pub id: u128,
-    pub seat_id: Pubkey,
-}
+#[allow(dead_code)]
+mod design_models {
+    use super::*;
 
-pub struct MatcherState {
-    pub seats: [Option<SeatRow>; 8],
-}
-
-impl MatcherState {
-    fn new() -> Self {
-        Self { seats: [None; 8] }
+    // Model types representing matcher-side concepts
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct SeatRow {
+        pub seat_id: Pubkey,
     }
 
-    fn add_seat(&mut self, seat: SeatRow) {
-        for slot in &mut self.seats {
-            if slot.is_none() {
-                *slot = Some(seat);
-                return;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct VenueObject {
+        pub id: u128,
+        pub seat_id: Pubkey,
+    }
+
+    pub struct MatcherState {
+        pub seats: [Option<SeatRow>; 8],
+    }
+
+    impl MatcherState {
+        pub fn new() -> Self {
+            Self { seats: [None; 8] }
+        }
+
+        pub fn add_seat(&mut self, seat: SeatRow) {
+            for slot in &mut self.seats {
+                if slot.is_none() {
+                    *slot = Some(seat);
+                    return;
+                }
             }
+        }
+
+        pub fn find_seat(&self, seat_id: Pubkey) -> Option<&SeatRow> {
+            self.seats.iter().filter_map(|s| s.as_ref()).find(|r| r.seat_id == seat_id)
         }
     }
 
-    fn find_seat(&self, seat_id: Pubkey) -> Option<&SeatRow> {
-        self.seats.iter().filter_map(|s| s.as_ref()).find(|r| r.seat_id == seat_id)
+    pub fn owns_object(row: &SeatRow, obj: &VenueObject) -> bool {
+        row.seat_id == obj.seat_id
     }
-}
 
-fn owns_object(row: &SeatRow, obj: &VenueObject) -> bool {
-    row.seat_id == obj.seat_id
-}
-
-// Model PDA derivation equality (we just compare keys here)
-fn is_valid_router_pda(pda: Pubkey, expected: Pubkey) -> bool {
-    pda == expected
-}
-
-// ── Proof 1: Seat ownership is necessary to cancel/modify ──────────────────────
-#[cfg(kani)]
-#[kani::proof]
-fn proof_scope_required_for_modify() {
-    let seat = Pubkey::from(kani::any::<[u8; 32]>());
-    let other = Pubkey::from(kani::any::<[u8; 32]>());
-    kani::assume(seat != other);
-
-    let mut st = MatcherState::new();
-    st.add_seat(SeatRow { seat_id: seat });
-    let row = st.find_seat(seat).unwrap();
-
-    let obj_owned = VenueObject {
-        id: 1,
-        seat_id: seat,
-    };
-    let obj_foreign = VenueObject {
-        id: 2,
-        seat_id: other,
-    };
-
-    // Proof: Only owned objects can be modified
-    assert!(owns_object(row, &obj_owned));
-    assert!(!owns_object(row, &obj_foreign));
-}
-
-// ── Proof 2: Only router PDA can act (model) ───────────────────────────────────
-#[cfg(kani)]
-#[kani::proof]
-fn proof_only_router_pda_may_call() {
-    let expected_router_pda = Pubkey::from(kani::any::<[u8; 32]>());
-    let caller_pda = Pubkey::from(kani::any::<[u8; 32]>());
-
-    // The matcher must accept iff caller==expected
-    let allowed = is_valid_router_pda(caller_pda, expected_router_pda);
-
-    if caller_pda == expected_router_pda {
-        assert!(allowed);
-    } else {
-        assert!(!allowed);
+    pub fn is_valid_router_pda(pda: Pubkey, expected: Pubkey) -> bool {
+        pda == expected
     }
-}
-
-// ── Proof 3: Cancel-all is seat-local (cannot affect other seats) ──────────────
-#[cfg(kani)]
-#[kani::proof]
-fn proof_cancel_all_is_seat_local() {
-    let s1 = Pubkey::from(kani::any::<[u8; 32]>());
-    let s2 = Pubkey::from(kani::any::<[u8; 32]>());
-    kani::assume(s1 != s2);
-
-    let row1 = SeatRow { seat_id: s1 };
-    let row2 = SeatRow { seat_id: s2 };
-
-    // Model: cancel_all transforms only objects tagged with seat s1
-    let objs = [
-        VenueObject {
-            id: 1,
-            seat_id: s1,
-        },
-        VenueObject {
-            id: 2,
-            seat_id: s2,
-        },
-    ];
-
-    // "Cancelled" predicate for seat s1 objects
-    let cancelled1 = owns_object(&row1, &objs[0]); // true
-    let cancelled2 = owns_object(&row1, &objs[1]); // false
-
-    assert!(cancelled1);
-    assert!(!cancelled2); // proves other-seat objects are untouched
 }
 
 // ── Proof 4: Operator delegation works correctly ───────────────────────────────
@@ -176,6 +113,7 @@ fn proof_operator_delegation_correct() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::design_models::*;
 
     #[test]
     fn test_seat_ownership_model() {
