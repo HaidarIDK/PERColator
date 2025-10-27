@@ -442,6 +442,9 @@ mod tests {
                 slope_per_step: 1000,
             },
             position_size: 0,
+            fee_index_user: 0,
+            fee_accrued: 0,
+            vested_pos_snapshot: 0,
         };
 
         apply_account_to_portfolio(&mut portfolio, &account);
