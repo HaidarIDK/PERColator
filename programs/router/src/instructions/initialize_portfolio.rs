@@ -50,12 +50,14 @@ pub fn process_initialize_portfolio(
         return Err(PercolatorError::InvalidAccountOwner);
     }
 
-    // SECURITY: Verify account size
+    // SECURITY: Verify account size (minimum required size)
+    // Accept accounts that are at least as large as Portfolio::LEN to handle
+    // differences between native Rust and BPF compilation alignment
     let data = portfolio_account.try_borrow_data()
         .map_err(|_| PercolatorError::InvalidAccount)?;
 
-    if data.len() != Portfolio::LEN {
-        msg!("Error: Portfolio account has incorrect size");
+    if data.len() < Portfolio::LEN {
+        msg!("Error: Portfolio account too small");
         return Err(PercolatorError::InvalidAccount);
     }
 
