@@ -150,13 +150,37 @@ enum Commands {
         #[arg(long)]
         quick: bool,
 
-        /// Run crisis haircut tests
+        /// Run margin system tests
         #[arg(long)]
-        crisis: bool,
+        margin: bool,
+
+        /// Run order management tests
+        #[arg(long)]
+        orders: bool,
+
+        /// Run trade matching tests
+        #[arg(long)]
+        matching: bool,
 
         /// Run liquidation tests
         #[arg(long)]
         liquidations: bool,
+
+        /// Run multi-slab routing tests
+        #[arg(long)]
+        routing: bool,
+
+        /// Run capital efficiency tests
+        #[arg(long)]
+        capital_efficiency: bool,
+
+        /// Run crisis haircut tests
+        #[arg(long)]
+        crisis: bool,
+
+        /// Run LP insolvency tests
+        #[arg(long)]
+        lp_insolvency: bool,
 
         /// Run all tests
         #[arg(long)]
@@ -670,17 +694,46 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Test { quick, crisis: test_crisis, liquidations, all } => {
+        Commands::Test {
+            quick,
+            margin,
+            orders,
+            matching,
+            liquidations,
+            routing,
+            capital_efficiency,
+            crisis: test_crisis,
+            lp_insolvency,
+            all,
+        } => {
             println!("{}", "Running test suite...".bright_green().bold());
 
             if all || quick {
                 tests::run_smoke_tests(&config).await?;
             }
-            if all || test_crisis {
-                tests::run_crisis_tests(&config).await?;
+            if all || margin {
+                tests::run_margin_tests(&config).await?;
+            }
+            if all || orders {
+                tests::run_order_tests(&config).await?;
+            }
+            if all || matching {
+                tests::run_trade_matching_tests(&config).await?;
             }
             if all || liquidations {
                 tests::run_liquidation_tests(&config).await?;
+            }
+            if all || routing {
+                tests::run_routing_tests(&config).await?;
+            }
+            if all || capital_efficiency {
+                tests::run_capital_efficiency_tests(&config).await?;
+            }
+            if all || test_crisis {
+                tests::run_crisis_tests(&config).await?;
+            }
+            if all || lp_insolvency {
+                tests::run_lp_insolvency_tests(&config).await?;
             }
         }
         Commands::Status { exchange, detailed } => {

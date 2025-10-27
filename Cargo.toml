@@ -12,6 +12,7 @@ members = [
     "cli",
     "crates/model_safety",
     "crates/amm_model",
+    "crates/adapter_core",
     "crates/proofs/kani",
 ]
 # Only build programs by default for cargo build-sbf

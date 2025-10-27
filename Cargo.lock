@@ -13,6 +13,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-core"
+version = "0.1.0"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3226,6 +3230,7 @@ dependencies = [
 name = "percolator-router"
 version = "0.1.0"
 dependencies = [
+ "adapter-core",
  "arrayvec",
  "model_safety",
  "percolator-common",
