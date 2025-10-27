@@ -5,6 +5,7 @@ use colored::Colorize;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
+    signature::Keypair,
     signer::Signer,
     transaction::Transaction,
 };
@@ -95,20 +96,111 @@ pub async fn register_slab(
 }
 
 pub async fn create_matcher(
-    _config: &NetworkConfig,
+    config: &NetworkConfig,
     exchange: String,
     symbol: String,
     tick_size: u64,
     lot_size: u64,
 ) -> Result<()> {
-    println!("{}", "=== Create Matcher ===".bright_green().bold());
+    println!("{}", "=== Create Matcher (Slab) ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
     println!("{} {}", "Exchange:".bright_cyan(), exchange);
     println!("{} {}", "Symbol:".bright_cyan(), symbol);
     println!("{} {}", "Tick Size:".bright_cyan(), tick_size);
     println!("{} {}", "Lot Size:".bright_cyan(), lot_size);
 
-    println!("\n{}", "Matcher creation not yet implemented".yellow());
-    println!("{}", "Use 'percolator matcher register-slab' to register an existing slab".dimmed());
+    // Get RPC client and payer
+    let rpc_client = client::create_rpc_client(config);
+    let payer = &config.keypair;
+
+    println!("\n{} {}", "Payer:".bright_cyan(), payer.pubkey());
+    println!("{} {}", "Slab Program:".bright_cyan(), config.slab_program_id);
+
+    // Generate new keypair for the slab account
+    let slab_keypair = Keypair::new();
+    let slab_pubkey = slab_keypair.pubkey();
+
+    println!("{} {}", "Slab Address:".bright_cyan(), slab_pubkey);
+
+    // Calculate rent for ~4KB account
+    const SLAB_SIZE: usize = 4096;
+    let rent = rpc_client
+        .get_minimum_balance_for_rent_exemption(SLAB_SIZE)
+        .context("Failed to get rent exemption amount")?;
+
+    println!("{} {} lamports", "Rent Required:".bright_cyan(), rent);
+
+    // Build CreateAccount instruction to allocate the slab account
+    let create_account_ix = solana_sdk::system_instruction::create_account(
+        &payer.pubkey(),
+        &slab_pubkey,
+        rent,
+        SLAB_SIZE as u64,
+        &config.slab_program_id,
+    );
+
+    // Build initialization instruction data
+    // Format: [discriminator(1), lp_owner(32), router_id(32), instrument(32),
+    //          mark_px(8), taker_fee_bps(8), contract_size(8), bump(1)]
+    let mut instruction_data = Vec::with_capacity(122);
+    instruction_data.push(0u8); // Initialize discriminator
+
+    // lp_owner: Use payer as the LP owner
+    instruction_data.extend_from_slice(&payer.pubkey().to_bytes());
+
+    // router_id: Use router program ID
+    instruction_data.extend_from_slice(&config.router_program_id.to_bytes());
+
+    // instrument: Use a dummy instrument ID (system program for now)
+    let instrument = solana_sdk::system_program::id();
+    instruction_data.extend_from_slice(&instrument.to_bytes());
+
+    // mark_px: Use tick_size * 100 as initial mark price (e.g., $1.00 if tick_size=1)
+    let mark_px = (tick_size as i64) * 100;
+    instruction_data.extend_from_slice(&mark_px.to_le_bytes());
+
+    // taker_fee_bps: Default to 20 bps (0.2%)
+    let taker_fee_bps = 20i64;
+    instruction_data.extend_from_slice(&taker_fee_bps.to_le_bytes());
+
+    // contract_size: Use lot_size as contract size
+    let contract_size = lot_size as i64;
+    instruction_data.extend_from_slice(&contract_size.to_le_bytes());
+
+    // bump: Not using PDA, so 0
+    instruction_data.push(0u8);
+
+    // Build Initialize instruction
+    let initialize_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),      // Slab account (writable)
+            AccountMeta::new(payer.pubkey(), true),    // Payer (signer, writable for fees)
+        ],
+        data: instruction_data,
+    };
+
+    // Send transaction with both instructions
+    println!("\n{}", "Creating slab account and initializing...".bright_green());
+
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[create_account_ix, initialize_ix],
+        Some(&payer.pubkey()),
+        &[payer, &slab_keypair], // Both payer and slab must sign
+        recent_blockhash,
+    );
+
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to create and initialize slab")?;
+
+    println!("\n{} {}", "Success!".bright_green().bold(), "✓".bright_green());
+    println!("{} {}", "Transaction:".bright_cyan(), signature);
+    println!("{} {}", "Slab Address:".bright_cyan(), slab_pubkey);
+    println!("\n{}", "Next step: Register this slab with the router using:".dimmed());
+    println!("  {}", format!("percolator matcher register-slab --slab-id {}", slab_pubkey).dimmed());
+
     Ok(())
 }
 
