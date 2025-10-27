@@ -56,3 +56,6 @@ pub mod portfolio;
 
 #[cfg(kani)]
 pub mod liq_planner;
+
+#[cfg(kani)]
+pub mod fee_distribution;

@@ -14,6 +14,9 @@ fn i1_concrete_single_user() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -21,11 +24,14 @@ fn i1_concrete_single_user() {
 
     let state = State {
         vault: 1500,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let before = state.clone();
@@ -45,6 +51,9 @@ fn i3_concrete_unauthorized() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -52,11 +61,14 @@ fn i3_concrete_unauthorized() {
 
     let state = State {
         vault: 1500,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: false,  // NOT authorized
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let before = state.clone();
@@ -85,6 +97,9 @@ fn i6_concrete_matcher() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -92,11 +107,14 @@ fn i6_concrete_matcher() {
 
     let state = State {
         vault: 1500,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let before = state.clone();
@@ -115,6 +133,9 @@ fn deposit_concrete() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -122,11 +143,14 @@ fn deposit_concrete() {
 
     let state = State {
         vault: 1000,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let before_principal = state.users[0].principal;
@@ -149,6 +173,9 @@ fn withdrawal_concrete() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -156,11 +183,14 @@ fn withdrawal_concrete() {
 
     let state = State {
         vault: 1000,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let before_principal = state.users[0].principal;
@@ -185,6 +215,9 @@ fn i1_bounded_deficit() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -192,11 +225,14 @@ fn i1_bounded_deficit() {
 
     let state = State {
         vault: 1500,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     // Bounded symbolic deficit (0-255)
@@ -218,6 +254,9 @@ fn deposit_bounded_amount() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = arrayvec::ArrayVec::<Account, 6>::new();
@@ -225,11 +264,14 @@ fn deposit_bounded_amount() {
 
     let state = State {
         vault: 1000,
-        insurance_fund: 0,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     // Bounded symbolic amount (0-255)

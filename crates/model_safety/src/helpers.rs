@@ -3,22 +3,18 @@
 use crate::state::*;
 use crate::math::*;
 
-/// I2: Conservation - vault balance equals sum of principals + insurance - fees
+/// I2: Conservation - vault balance equals sum of principals + positive PnL - fees
 pub fn conservation_ok(s: &State) -> bool {
     let sum_principal = s.users.iter().fold(0u128, |acc, u| add_u128(acc, u.principal));
 
-    // vault should equal: principals + insurance - fees
-    // But we also need to account for PnL in the vault
-    // Simplified model: vault == sum(principal) + insurance - fees + sum(positive_pnl)
+    // vault should equal: principals + sum(positive_pnl) - fees
+    // (No insurance fund - fees distributed to position holders instead)
     let sum_pos_pnl = s.users.iter().fold(0u128, |acc, u| {
         let pos_pnl = clamp_pos_i128(u.pnl_ledger);
         add_u128(acc, pos_pnl)
     });
 
-    let expected_vault = add_u128(
-        add_u128(sum_principal, s.insurance_fund),
-        sum_pos_pnl
-    );
+    let expected_vault = add_u128(sum_principal, sum_pos_pnl);
     let expected_vault = sub_u128(expected_vault, s.fees_outstanding);
 
     s.vault == expected_vault

@@ -17,6 +17,9 @@ pub fn make_1user_state(principal: u128, pnl: i128, slope: u128) -> State {
             slope_per_step: slope,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -29,7 +32,6 @@ pub fn make_1user_state(principal: u128, pnl: i128, slope: u128) -> State {
 
     State {
         vault,
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params {
@@ -38,6 +40,10 @@ pub fn make_1user_state(principal: u128, pnl: i128, slope: u128) -> State {
             maintenance_margin_bps: 50_000,
         },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }
 
@@ -54,6 +60,9 @@ pub fn make_2user_winner_loser(
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let user2 = Account {
@@ -62,6 +71,9 @@ pub fn make_2user_winner_loser(
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -79,11 +91,14 @@ pub fn make_2user_winner_loser(
 
     State {
         vault,
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1_000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }
 

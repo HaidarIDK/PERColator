@@ -27,6 +27,9 @@ pub fn any_account() -> Account {
             slope_per_step: ((slope_raw as u128) % 20).max(1), // Reduced from 100 to 20
         },
         position_size: (position_raw as u128) % MAX_VAL,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     }
 }
 
@@ -61,7 +64,6 @@ pub fn any_state_bounded() -> State {
 
     State {
         vault: (vault_raw as u128) % (MAX_VAL * 3), // Reduced from 5 to 3
-        insurance_fund: (insurance_raw as u128) % MAX_VAL,
         fees_outstanding: (fees_raw as u128) % MAX_VAL,
         users,
         params: Params {
@@ -71,5 +73,9 @@ pub fn any_state_bounded() -> State {
             maintenance_margin_bps: ((margin_bps_raw as u64) % 50_000 + 50_000),
         },
         authorized_router: true, // Start authorized
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }

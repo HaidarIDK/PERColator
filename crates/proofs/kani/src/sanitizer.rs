@@ -71,12 +71,6 @@ impl Sanitize for State {
             self.vault
         };
 
-        self.insurance_fund = if self.insurance_fund > MAX_INSURANCE {
-            self.insurance_fund % MAX_INSURANCE
-        } else {
-            self.insurance_fund
-        };
-
         self.fees_outstanding = if self.fees_outstanding > MAX_FEES {
             self.fees_outstanding % MAX_FEES
         } else {

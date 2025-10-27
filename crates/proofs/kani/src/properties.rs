@@ -41,6 +41,9 @@ fn i5_warmup_determinism() {
             slope_per_step: slope,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     // Arbitrary time delta
@@ -91,6 +94,9 @@ fn i5_warmup_monotonicity() {
             slope_per_step: slope,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     // Two time points with t2 > t1
@@ -138,6 +144,9 @@ fn i5_warmup_bounded_by_pnl() {
             slope_per_step: slope,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let steps: u32 = kani::any();
@@ -178,6 +187,9 @@ fn i7_user_isolation() {
             slope_per_step: 10,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let acc2 = Account {
@@ -189,6 +201,9 @@ fn i7_user_isolation() {
             slope_per_step: 20,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -197,7 +212,6 @@ fn i7_user_isolation() {
 
     let state = State {
         vault: 3200, // 1000 + 500 + 2000 (negative PnL doesn't affect vault)
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params {
@@ -206,6 +220,10 @@ fn i7_user_isolation() {
             maintenance_margin_bps: 50_000,
         },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let user2_before = state.users[1].clone();
@@ -261,6 +279,9 @@ fn i8_equity_consistency() {
             slope_per_step: 10,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     // Calculate collateral (used in liquidation checks)
@@ -302,19 +323,20 @@ fn i9_single_user_conservation() {
             slope_per_step: 10,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
     users.push(account);
 
-    let insurance = 100u128;
     let fees = 50u128;
-    // vault = principal + pnl + insurance - fees
-    let vault = principal + (pnl as u128) + insurance - fees;
+    // vault = principal + pnl - fees
+    let vault = principal + (pnl as u128) - fees;
 
     let state = State {
         vault,
-        insurance_fund: insurance,
         fees_outstanding: fees,
         users,
         params: Params {
@@ -323,6 +345,10 @@ fn i9_single_user_conservation() {
             maintenance_margin_bps: 50_000,
         },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     // Verify initial conservation

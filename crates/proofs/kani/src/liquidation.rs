@@ -64,7 +64,6 @@ fn l2_noop_when_none_liquidatable() {
     // At fixpoint, no changes should occur
     // Note: We check key balance fields that liquidation would modify
     kani::assert(after.vault == s.vault, "L2: vault unchanged at fixpoint");
-    kani::assert(after.insurance_fund == s.insurance_fund, "L2: insurance unchanged at fixpoint");
 
     for i in 0..s.users.len() {
         kani::assert(
@@ -321,7 +320,6 @@ fn l11_atomic_progress_or_noop() {
 
     // Check if state changed in any meaningful way
     let mut state_changed = after.vault != s.vault;
-    state_changed |= after.insurance_fund != s.insurance_fund;
 
     for i in 0..s.users.len() {
         state_changed |= after.users[i].position_size != s.users[i].position_size;

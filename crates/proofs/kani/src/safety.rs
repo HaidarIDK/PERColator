@@ -32,7 +32,7 @@ fn i2_conservation_holds_across_short_adversary_sequences() {
         let pos = if u.pnl_ledger > 0 { u.pnl_ledger as u128 } else { 0 };
         acc.saturating_add(pos)
     });
-    s.vault = sum_principal.saturating_add(s.insurance_fund).saturating_add(sum_pos_pnl).saturating_sub(s.fees_outstanding);
+    s.vault = sum_principal.saturating_add(sum_pos_pnl).saturating_sub(s.fees_outstanding);
 
     assume(conservation_ok(&s));
 

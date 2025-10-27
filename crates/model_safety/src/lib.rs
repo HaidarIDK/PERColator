@@ -17,8 +17,10 @@ pub mod transitions;
 pub mod lp_bucket;
 pub mod adaptive_warmup;
 pub mod crisis;
+pub mod fee_distribution;
 
 // Re-export commonly used types
 pub use state::*;
 pub use helpers::*;
 pub use transitions::*;
+pub use fee_distribution::*;

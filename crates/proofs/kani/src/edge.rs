@@ -28,6 +28,9 @@ pub fn make_1user_with_reserved(
             slope_per_step: slope,
         },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -39,7 +42,6 @@ pub fn make_1user_with_reserved(
 
     State {
         vault,
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params {
@@ -48,6 +50,10 @@ pub fn make_1user_with_reserved(
             maintenance_margin_bps: 50_000,
         },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }
 
@@ -65,6 +71,9 @@ pub fn make_3user_state(
             reserved_pnl: 0,
             warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
             position_size: 0,
+            fee_index_user: 0,
+            fee_accrued: 0,
+            vested_pos_snapshot: 0,
         });
     }
 
@@ -77,11 +86,14 @@ pub fn make_3user_state(
 
     State {
         vault,
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1_000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }
 
@@ -156,6 +168,9 @@ fn edge_socialization_all_losers() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
     let user2 = Account {
         principal: 1000,
@@ -163,6 +178,9 @@ fn edge_socialization_all_losers() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -171,11 +189,14 @@ fn edge_socialization_all_losers() {
 
     let state = State {
         vault: 2000, // Only principals, no positive PnL
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1_000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     let deficit: u8 = kani::any();
@@ -343,6 +364,9 @@ fn edge_total_wipeout_socialization() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
     let user2 = Account {
         principal: 1000,
@@ -350,6 +374,9 @@ fn edge_total_wipeout_socialization() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -358,11 +385,14 @@ fn edge_total_wipeout_socialization() {
 
     let state = State {
         vault: 2500, // 2000 principal + 500 positive PnL
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1_000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     // Deficit much larger than available PnL (500)
@@ -411,6 +441,9 @@ fn edge_exact_deficit_balance() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
     let user2 = Account {
         principal: 1000,
@@ -418,6 +451,9 @@ fn edge_exact_deficit_balance() {
         reserved_pnl: 0,
         warmup_state: Warmup { started_at_slot: 0, slope_per_step: 10 },
         position_size: 0,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     };
 
     let mut users = ArrayVec::new();
@@ -426,11 +462,14 @@ fn edge_exact_deficit_balance() {
 
     let state = State {
         vault: 2500,
-        insurance_fund: 100,
         fees_outstanding: 0,
         users,
         params: Params { max_users: 6, withdraw_cap_per_step: 1_000, maintenance_margin_bps: 50_000 },
         authorized_router: true,
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     };
 
     // Deficit exactly equals total positive PnL

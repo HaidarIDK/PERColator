@@ -280,26 +280,16 @@ pub fn liquidate_account(mut s: State, uid: usize, prices: &Prices) -> State {
     // Close position
     user.position_size = 0;
 
-    // If user has negative PnL, realize the loss
+    // If user has negative PnL, accumulate the loss for socialization
+    // Losses are offset by fees (loss-first property) via fee_distribution
     if user.pnl_ledger < 0 {
         let loss = clamp_pos_i128(sub_i128(0, user.pnl_ledger));
 
-        // Try to cover from insurance fund first
-        if s.insurance_fund >= loss {
-            s.insurance_fund = sub_u128(s.insurance_fund, loss);
-            // Set PnL to 0 (loss covered)
-            user.pnl_ledger = 0;
-        } else {
-            // Insurance fund depleted, socialize remaining loss
-            let covered = s.insurance_fund;
-            s.insurance_fund = 0;
+        // Accumulate loss for later offset by fees
+        s.loss_accum = add_u128(s.loss_accum, loss);
 
-            // Partially reduce this user's negative PnL by covered amount
-            user.pnl_ledger = add_i128(user.pnl_ledger, u128_to_i128(covered));
-
-            // Note: remaining loss would be socialized, but we leave PnL negative for now
-            // In a full model, we'd call socialize_losses here
-        }
+        // Set user's PnL to 0 (loss socialized)
+        user.pnl_ledger = 0;
     }
 
     s
@@ -313,3 +303,27 @@ pub fn liquidate_one_unauthorized(mut s: State, prices: &Prices) -> State {
 
 // Re-export helpers for use in transitions
 use crate::helpers::sum_effective_winners;
+
+// ============================================================================
+// Fee Distribution Integration Notes
+// ============================================================================
+//
+// The fee distribution system (fee_distribution.rs) provides two main functions:
+//
+// 1. `on_fees(&mut State, fees: u128)` - Process incoming fees
+//    - Offsets loss_accum first (loss-first property)
+//    - Distributes remainder to winners via fee_index
+//    - Call this when the system receives trading fees
+//
+// 2. `on_touch(&mut State, &mut Account)` - Update account fee accrual
+//    - Accrues fees based on (fee_index - fee_index_user) * vested_pnl
+//    - Reconciles sum_vested_pos_pnl lazily
+//    - Call this whenever an account's vested PnL might change:
+//      * After deposits (principal changes)
+//      * After trades (pnl_ledger changes)
+//      * After withdrawals
+//      * After loss socialization
+//
+// Integration will be done in the production router program.
+// The fee distribution module is complete and formally verified (see fee_distribution.rs)
+// ============================================================================
