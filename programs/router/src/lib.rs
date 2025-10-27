@@ -6,6 +6,7 @@ pub mod pda;
 pub mod liquidation;
 pub mod chooser;
 pub mod lp_adapter_serde;
+pub mod authority_proofs;
 
 // Always expose entrypoint for testing, but only register as entrypoint when feature enabled
 pub mod entrypoint;

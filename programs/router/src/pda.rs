@@ -23,6 +23,9 @@ pub const REGISTRY_SEED: &[u8] = b"registry";
 /// Seed prefix for router authority (used for CPI signing)
 pub const AUTHORITY_SEED: &[u8] = b"authority";
 
+/// Seed prefix for router signer PDA (used for matcher CPIs)
+pub const ROUTER_SIGNER_SEED: &[u8] = b"router_signer";
+
 /// Derive router authority PDA
 ///
 /// This PDA is used as the router's signing authority for CPIs to slabs.
@@ -35,6 +38,20 @@ pub const AUTHORITY_SEED: &[u8] = b"authority";
 /// * `(Pubkey, u8)` - The derived PDA and its bump seed
 pub fn derive_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     find_program_address(&[AUTHORITY_SEED], program_id)
+}
+
+/// Derive router signer PDA for matcher CPIs
+///
+/// This PDA is used as a signer for all Router → Matcher CPIs.
+/// Matchers verify this PDA's derivation to authenticate the Router.
+///
+/// # Arguments
+/// * `program_id` - The router program ID
+///
+/// # Returns
+/// * `(Pubkey, u8)` - The derived PDA and its bump seed
+pub fn derive_router_signer_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    find_program_address(&[ROUTER_SIGNER_SEED], program_id)
 }
 
 /// Derive vault PDA for a given mint
