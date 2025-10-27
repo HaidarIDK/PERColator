@@ -8,7 +8,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_register_slab, process_router_reserve, process_router_release, process_router_liquidity};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_register_slab, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
 use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
@@ -40,6 +40,7 @@ pub fn process_instruction(
         9 => RouterInstruction::RouterReserve,
         10 => RouterInstruction::RouterRelease,
         11 => RouterInstruction::RouterLiquidity,
+        12 => RouterInstruction::RouterSeatInit,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -95,6 +96,10 @@ pub fn process_instruction(
         RouterInstruction::RouterLiquidity => {
             msg!("Instruction: RouterLiquidity");
             process_router_liquidity_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::RouterSeatInit => {
+            msg!("Instruction: RouterSeatInit");
+            process_router_seat_init_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -834,5 +839,54 @@ fn process_router_liquidity_inner(program_id: &Pubkey, accounts: &[AccountInfo],
     )?;
 
     msg!("RouterLiquidity processed successfully");
+    Ok(())
+}
+
+/// Process router_seat_init instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` LP seat account (PDA to be initialized)
+/// 1. `[writable]` Portfolio account
+/// 2. `[signer]` Signer (portfolio owner)
+///
+/// Expected data layout (36 bytes):
+/// - matcher_state: Pubkey (32 bytes)
+/// - context_id: u32 (4 bytes)
+fn process_router_seat_init_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 3 {
+        msg!("Error: RouterSeatInit instruction requires at least 3 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let seat_account = &accounts[0];
+    let portfolio_account = &accounts[1];
+    let signer = &accounts[2];
+
+    // Validate accounts
+    validate_writable(seat_account)?;
+    validate_writable(portfolio_account)?;
+
+    // Parse instruction data
+    if data.len() < 36 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let matcher_state_bytes = reader.read_bytes::<32>()?;
+    let matcher_state = Pubkey::from(matcher_state_bytes);
+    let context_id = reader.read_u32()?;
+
+    // Call the instruction handler
+    process_router_seat_init(
+        program_id,
+        seat_account,
+        portfolio_account,
+        &matcher_state,
+        signer,
+        context_id,
+    )?;
+
+    msg!("RouterSeatInit processed successfully");
     Ok(())
 }
