@@ -438,3 +438,10 @@ mod tests {
         assert!(!Capability::is_enabled(caps, Capability::SupportsHybrid));
     }
 }
+
+// ============================================================================
+// Kani Formal Verification Proofs
+// ============================================================================
+
+#[cfg(kani)]
+pub mod kani_proofs;

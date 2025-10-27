@@ -1,13 +1,11 @@
 //! Kani formal verification proofs for adapter-core invariants
 //!
-//! Run with: cargo kani --tests -p adapter-core
+//! Run with: cargo kani -p adapter-core
 //!
 //! These proofs explore the complete state space of bounded inputs to verify
 //! critical safety properties.
 
-#![cfg(kani)]
-
-use adapter_core::*;
+use crate::*;
 
 // ============================================================================
 // Proof 1: Shares Monotonicity & Overflow Safety
