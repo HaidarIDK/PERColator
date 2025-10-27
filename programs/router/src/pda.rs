@@ -151,6 +151,39 @@ pub fn derive_registry_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     find_program_address(&[REGISTRY_SEED], program_id)
 }
 
+/// Derive LP seat PDA for adapter pattern
+///
+/// LP seat tracks liquidity provision for a specific (router × matcher × portfolio × context).
+/// Seats provide isolation between different LPs on the same matcher.
+///
+/// # Arguments
+/// * `router_id` - The router program ID (for cross-program authentication)
+/// * `matcher_state` - The matcher state account
+/// * `portfolio` - The portfolio account providing liquidity
+/// * `context_id` - Context ID to allow multiple seats per portfolio × matcher
+/// * `program_id` - The router program ID (used for derivation)
+///
+/// # Returns
+/// * `(Pubkey, u8)` - The derived PDA and its bump seed
+pub fn derive_lp_seat_pda(
+    router_id: &Pubkey,
+    matcher_state: &Pubkey,
+    portfolio: &Pubkey,
+    context_id: u32,
+    program_id: &Pubkey,
+) -> (Pubkey, u8) {
+    find_program_address(
+        &[
+            b"lp_seat",
+            router_id.as_ref(),
+            matcher_state.as_ref(),
+            portfolio.as_ref(),
+            &context_id.to_le_bytes(),
+        ],
+        program_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "solana")]
@@ -227,5 +260,26 @@ mod tests {
         // Same program ID should produce same output
         assert_eq!(pda1, pda2);
         assert_eq!(bump1, bump2);
+    }
+
+    #[test]
+    #[cfg(target_os = "solana")]
+    fn test_lp_seat_pda_derivation() {
+        let program_id = Pubkey::default();
+        let router_id = Pubkey::default();
+        let matcher_state = Pubkey::default();
+        let portfolio = Pubkey::default();
+        let context_id = 0u32;
+
+        let (pda1, bump1) = derive_lp_seat_pda(&router_id, &matcher_state, &portfolio, context_id, &program_id);
+        let (pda2, bump2) = derive_lp_seat_pda(&router_id, &matcher_state, &portfolio, context_id, &program_id);
+
+        // Same inputs should produce same output
+        assert_eq!(pda1, pda2);
+        assert_eq!(bump1, bump2);
+
+        // Different context_id should produce different PDA
+        let (pda3, _) = derive_lp_seat_pda(&router_id, &matcher_state, &portfolio, 1u32, &program_id);
+        assert_ne!(pda1, pda3);
     }
 }
