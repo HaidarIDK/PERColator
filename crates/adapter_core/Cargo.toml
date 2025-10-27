@@ -1,0 +1,15 @@
+[package]
+name = "adapter-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# No dependencies for pure ABI types (no_std + alloc)
+
+[features]
+default = []
