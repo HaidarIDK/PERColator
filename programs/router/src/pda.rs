@@ -184,6 +184,29 @@ pub fn derive_lp_seat_pda(
     )
 }
 
+/// Derive venue PnL PDA for LP adapter pattern
+///
+/// Venue PnL tracks aggregate PnL metrics across all LP seats for a given venue (matcher).
+/// This provides venue-level accounting for fee credits, venue fees, and realized PnL.
+///
+/// # Arguments
+/// * `router_id` - The router program ID (for cross-program authentication)
+/// * `matcher_state` - The matcher state account
+/// * `program_id` - The router program ID (used for derivation)
+///
+/// # Returns
+/// * `(Pubkey, u8)` - The derived PDA and its bump seed
+pub fn derive_venue_pnl_pda(
+    router_id: &Pubkey,
+    matcher_state: &Pubkey,
+    program_id: &Pubkey,
+) -> (Pubkey, u8) {
+    find_program_address(
+        &[b"venue_pnl", router_id.as_ref(), matcher_state.as_ref()],
+        program_id,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "solana")]
