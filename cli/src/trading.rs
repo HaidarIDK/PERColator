@@ -412,3 +412,169 @@ pub async fn show_order_book(config: &NetworkConfig, slab: String, depth: usize)
 
     Ok(())
 }
+
+/// Place a resting order directly on the slab (maker flow)
+///
+/// This places an order that rests in the orderbook until filled or cancelled.
+/// Unlike `place_limit_order` which uses ExecuteCrossSlab (fill-or-kill), this
+/// uses the slab program's PlaceOrder instruction.
+pub async fn place_slab_order(
+    config: &NetworkConfig,
+    slab: String,
+    side: String,
+    price: f64,
+    size: u64,
+) -> Result<()> {
+    println!("{}", "=== Place Slab Order (Resting) ===".bright_green().bold());
+    println!("{} {}", "Slab:".bright_cyan(), slab);
+    println!("{} {}", "Side:".bright_cyan(), side.to_uppercase());
+    println!("{} {}", "Price:".bright_cyan(), price);
+    println!("{} {}", "Size:".bright_cyan(), size);
+
+    // Parse side
+    let side_byte: u8 = match side.to_lowercase().as_str() {
+        "buy" | "b" => 0,
+        "sell" | "s" => 1,
+        _ => return Err(anyhow!("Invalid side: must be 'buy' or 'sell'")),
+    };
+
+    // Parse slab pubkey
+    let slab_pubkey = Pubkey::from_str(&slab).context("Invalid slab pubkey")?;
+
+    // Convert price and size to fixed-point (1e6 scale)
+    let price_fixed = (price * 1_000_000.0) as i64;
+    let qty_fixed = size as i64;
+
+    // Validation
+    if price_fixed <= 0 {
+        return Err(anyhow!("Price must be positive"));
+    }
+    if qty_fixed <= 0 {
+        return Err(anyhow!("Size must be positive"));
+    }
+
+    println!("\n{}", "Building PlaceOrder instruction...".dimmed());
+    println!("{} {} (1e6 scale)", "Price (fixed):".bright_cyan(), price_fixed);
+    println!("{} {} (1e6 scale)", "Qty (fixed):".bright_cyan(), qty_fixed);
+
+    // Build instruction data: discriminator (1) + side (1) + price (8) + qty (8) = 18 bytes
+    let mut instruction_data = Vec::with_capacity(18);
+    instruction_data.push(2u8); // PlaceOrder discriminator
+    instruction_data.push(side_byte);
+    instruction_data.extend_from_slice(&price_fixed.to_le_bytes());
+    instruction_data.extend_from_slice(&qty_fixed.to_le_bytes());
+
+    // Build account list
+    // 0. [writable] Slab account
+    // 1. [signer] Order owner
+    let user_pubkey = config.pubkey();
+    let accounts = vec![
+        AccountMeta::new(slab_pubkey, false),
+        AccountMeta::new_readonly(user_pubkey, true),
+    ];
+
+    let place_order_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts,
+        data: instruction_data,
+    };
+
+    // Build and send transaction
+    let rpc_client = client::create_rpc_client(config);
+    println!("{}", "Sending transaction...".dimmed());
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[place_order_ix],
+        Some(&user_pubkey),
+        &[&config.keypair],
+        recent_blockhash,
+    );
+
+    match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(signature) => {
+            println!("\n{} Order placed on slab!", "✓".green().bold());
+            println!("{} {}", "Transaction:".bright_cyan(), signature);
+            println!("\n{} {:.6} @ {:.2}",
+                if side_byte == 0 { "BUY".green() } else { "SELL".red() },
+                qty_fixed as f64 / 1_000_000.0,
+                price_fixed as f64 / 1_000_000.0
+            );
+            println!("\n{}", "Note: Order is now resting in the orderbook".dimmed());
+        }
+        Err(e) => {
+            println!("\n{} Order failed: {}", "✗".red().bold(), e);
+            println!("\n{}", "Common causes:".bright_yellow());
+            println!("  {} Slab account not initialized", "•".dimmed());
+            println!("  {} Orderbook full (MAX_ORDERS reached)", "•".dimmed());
+            println!("  {} Invalid price or quantity", "•".dimmed());
+            return Err(anyhow!("Order transaction failed: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+/// Cancel a resting order on the slab by order ID
+pub async fn cancel_slab_order(
+    config: &NetworkConfig,
+    slab: String,
+    order_id: u64,
+) -> Result<()> {
+    println!("{}", "=== Cancel Slab Order ===".bright_green().bold());
+    println!("{} {}", "Slab:".bright_cyan(), slab);
+    println!("{} {}", "Order ID:".bright_cyan(), order_id);
+
+    // Parse slab pubkey
+    let slab_pubkey = Pubkey::from_str(&slab).context("Invalid slab pubkey")?;
+
+    println!("\n{}", "Building CancelOrder instruction...".dimmed());
+
+    // Build instruction data: discriminator (1) + order_id (8) = 9 bytes
+    let mut instruction_data = Vec::with_capacity(9);
+    instruction_data.push(3u8); // CancelOrder discriminator
+    instruction_data.extend_from_slice(&order_id.to_le_bytes());
+
+    // Build account list
+    // 0. [writable] Slab account
+    // 1. [signer] Order owner
+    let user_pubkey = config.pubkey();
+    let accounts = vec![
+        AccountMeta::new(slab_pubkey, false),
+        AccountMeta::new_readonly(user_pubkey, true),
+    ];
+
+    let cancel_order_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts,
+        data: instruction_data,
+    };
+
+    // Build and send transaction
+    let rpc_client = client::create_rpc_client(config);
+    println!("{}", "Sending transaction...".dimmed());
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[cancel_order_ix],
+        Some(&user_pubkey),
+        &[&config.keypair],
+        recent_blockhash,
+    );
+
+    match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(signature) => {
+            println!("\n{} Order cancelled!", "✓".green().bold());
+            println!("{} {}", "Transaction:".bright_cyan(), signature);
+            println!("{} {}", "Cancelled Order ID:".bright_cyan(), order_id);
+        }
+        Err(e) => {
+            println!("\n{} Cancellation failed: {}", "✗".red().bold(), e);
+            println!("\n{}", "Common causes:".bright_yellow());
+            println!("  {} Order ID not found", "•".dimmed());
+            println!("  {} Not the order owner", "•".dimmed());
+            println!("  {} Order already filled or cancelled", "•".dimmed());
+            return Err(anyhow!("Cancel transaction failed: {}", e));
+        }
+    }
+
+    Ok(())
+}

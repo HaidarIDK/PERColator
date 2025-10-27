@@ -274,7 +274,7 @@ enum LiquidityCommands {
 
 #[derive(Subcommand)]
 enum TradeCommands {
-    /// Place a limit order
+    /// Place a limit order (router cross-slab, fill-or-kill)
     Limit {
         /// Matcher address
         matcher: String,
@@ -305,10 +305,34 @@ enum TradeCommands {
         size: u64,
     },
 
-    /// Cancel an order
+    /// Cancel an order (receipt-based)
     Cancel {
         /// Order ID
         order_id: String,
+    },
+
+    /// Place a resting order directly on slab (maker flow)
+    SlabOrder {
+        /// Slab address
+        slab: String,
+
+        /// Buy or sell
+        side: String,
+
+        /// Order price
+        price: f64,
+
+        /// Order size
+        size: u64,
+    },
+
+    /// Cancel a slab order by order ID
+    SlabCancel {
+        /// Slab address
+        slab: String,
+
+        /// Order ID
+        order_id: u64,
     },
 
     /// List open orders
@@ -563,6 +587,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TradeCommands::Cancel { order_id } => {
                     trading::cancel_order(&config, order_id).await?;
+                }
+                TradeCommands::SlabOrder { slab, side, price, size } => {
+                    trading::place_slab_order(&config, slab, side, price, size).await?;
+                }
+                TradeCommands::SlabCancel { slab, order_id } => {
+                    trading::cancel_slab_order(&config, slab, order_id).await?;
                 }
                 TradeCommands::Orders { user } => {
                     trading::list_orders(&config, user).await?;
