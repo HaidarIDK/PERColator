@@ -1043,10 +1043,10 @@ const OrderBook = ({ symbol, walletAddress }: { symbol: string; walletAddress?: 
         <div className="flex-1 p-4 overflow-y-auto border-b border-[#181825]">
           {activeTab === 'orderbook' ? (
           <>
-            <div className="grid grid-cols-3 gap-2 text-xs text-gray-400 mb-2">
-              <span>Price (USDC)</span>
-              <span>Qty</span>
-              <span>Total</span>
+            <div className="grid grid-cols-3 gap-1 sm:gap-2 text-[10px] sm:text-xs text-gray-400 mb-2">
+              <span className="truncate">Price (USDC)</span>
+              <span className="truncate">Qty</span>
+              <span className="truncate text-right">Total</span>
             </div>
             
             <div className="space-y-1 mb-4">
@@ -1055,14 +1055,14 @@ const OrderBook = ({ symbol, walletAddress }: { symbol: string; walletAddress?: 
                   const total = (ask.price || 0) * (ask.quantity || 0);
                   const maxTotal = Math.max(...asks.map(a => ((a.price || 0) * (a.quantity || 0))), 1);
                   return (
-                    <div key={index} className="grid grid-cols-3 gap-2 text-sm relative">
+                    <div key={index} className="grid grid-cols-3 gap-1 sm:gap-2 text-xs sm:text-sm relative">
                       <div 
                         className="absolute inset-0 bg-red-500/5 origin-left" 
                         style={{ width: `${(total / maxTotal) * 100}%` }}
                       />
-                      <span className="text-red-400 relative z-10">{(ask.price || 0).toFixed(2)}</span>
-                      <span className="text-white relative z-10">{(ask.quantity || 0).toFixed(4)}</span>
-                      <span className="text-gray-400 relative z-10">{total.toFixed(4)}</span>
+                      <span className="text-red-400 relative z-10 truncate">{(ask.price || 0).toFixed(2)}</span>
+                      <span className="text-white relative z-10 truncate">{(ask.quantity || 0).toFixed(4)}</span>
+                      <span className="text-gray-400 relative z-10 text-right truncate">{total.toFixed(4)}</span>
                     </div>
                   );
                 })
@@ -1084,14 +1084,14 @@ const OrderBook = ({ symbol, walletAddress }: { symbol: string; walletAddress?: 
                   const total = (bid.price || 0) * (bid.quantity || 0);
                   const maxTotal = Math.max(...bids.map(b => ((b.price || 0) * (b.quantity || 0))), 1);
                   return (
-                    <div key={index} className="grid grid-cols-3 gap-2 text-sm relative">
+                    <div key={index} className="grid grid-cols-3 gap-1 sm:gap-2 text-xs sm:text-sm relative">
                       <div 
                         className="absolute inset-0 bg-green-500/5 origin-left" 
                         style={{ width: `${(total / maxTotal) * 100}%` }}
                       />
-                      <span className="text-green-400 relative z-10">{(bid.price || 0).toFixed(2)}</span>
-                      <span className="text-white relative z-10">{(bid.quantity || 0).toFixed(4)}</span>
-                      <span className="text-gray-400 relative z-10">{total.toFixed(4)}</span>
+                      <span className="text-green-400 relative z-10 truncate">{(bid.price || 0).toFixed(2)}</span>
+                      <span className="text-white relative z-10 truncate">{(bid.quantity || 0).toFixed(4)}</span>
+                      <span className="text-gray-400 relative z-10 text-right truncate">{total.toFixed(4)}</span>
                     </div>
                   );
                 })
@@ -1322,16 +1322,16 @@ const PastTrades = ({ symbol }: { symbol: string }) => {
           </div>
         ) : pastTrades.length > 0 ? (
           <>
-            <div className="grid grid-cols-4 gap-2 text-xs text-gray-400 mb-2">
-              <span>Side</span>
-              <span>Price</span>
-              <span>Qty</span>
-              <span>Time</span>
+            <div className="grid grid-cols-4 gap-1 sm:gap-2 text-[10px] sm:text-xs text-gray-400 mb-2">
+              <span className="truncate">Side</span>
+              <span className="truncate">Price</span>
+              <span className="truncate">Qty</span>
+              <span className="truncate">Time</span>
             </div>
             
             <div className="space-y-1 max-h-[300px] overflow-y-auto">
               {pastTrades.map((trade, index) => (
-                <div key={trade.id} className="grid grid-cols-4 gap-2 text-sm py-1 hover:bg-[#181825]/50 rounded px-1">
+                <div key={trade.id} className="grid grid-cols-4 gap-1 sm:gap-2 text-xs sm:text-sm py-1 hover:bg-[#181825]/50 rounded px-1">
                   <span className={cn(
                     "text-xs font-medium",
                     trade.side === 'buy' ? "text-green-400" : "text-red-400"
@@ -3596,36 +3596,36 @@ export default function TradingDashboard() {
 
       {/* Testnet Notice Banner */}
       <div className="relative z-20 bg-gradient-to-r from-yellow-900/30 to-orange-900/30 border-b border-yellow-700/50">
-        <div className="max-w-[1600px] mx-auto px-6 py-3">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-center gap-3 text-sm flex-wrap">
-              <span className="text-yellow-400 font-bold">⚠️ DEVNET TESTNET ONLY</span>
-              <span className="text-zinc-300">•</span>
-              <span className="text-zinc-300">
+        <div className="max-w-[1600px] mx-auto px-3 sm:px-6 py-2 sm:py-3">
+          <div className="flex flex-col gap-1.5 sm:gap-2">
+            <div className="flex items-center justify-center gap-2 sm:gap-3 text-xs sm:text-sm flex-wrap">
+              <span className="text-yellow-400 font-bold text-xs sm:text-sm">⚠️ DEVNET TESTNET ONLY</span>
+              <span className="text-zinc-300 hidden sm:inline">•</span>
+              <span className="text-zinc-300 text-center text-xs sm:text-sm">
                 Make sure you're using <strong className="text-yellow-300">Devnet SOL</strong> (not real SOL!)
               </span>
-              <span className="text-zinc-300">•</span>
+              <span className="text-zinc-300 hidden sm:inline">•</span>
               <a 
                 href="https://faucet.solana.com" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300 underline font-semibold"
+                className="text-blue-400 hover:text-blue-300 underline font-semibold text-xs sm:text-sm"
               >
                 Get Free Testnet SOL →
               </a>
             </div>
-            <div className="flex items-center justify-center gap-2 text-xs text-zinc-400">
-              <span>📱 Phantom Setup:</span>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 text-[10px] sm:text-xs text-zinc-400 text-center">
+              <span className="font-semibold">📱 Phantom Setup:</span>
               <span className="text-zinc-500">Settings → Developer Settings → Enable Testnet Mode → Select "Solana Devnet"</span>
             </div>
           </div>
         </div>
       </div>
       
-      <main className="relative z-10 p-4 space-y-3">
+      <main className="relative z-10 p-2 sm:p-4 space-y-2 sm:space-y-3">
         
         {/* Top Header Bar - Wallet & Faucet */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           {/* Left - Faucet (smaller) */}
           {connected && (
             <motion.div
@@ -3660,21 +3660,21 @@ export default function TradingDashboard() {
             </motion.div>
           )}
           
-          <div className="flex items-center gap-3 ml-auto">
+          <div className="flex items-center gap-2 sm:gap-3 ml-auto flex-wrap">
             <Link href="/portfolio">
-              <button className="px-4 py-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/50 text-purple-400 text-sm font-bold transition-all flex items-center gap-2">
+              <button className="px-2 sm:px-4 py-1.5 sm:py-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/50 text-purple-400 text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5 sm:gap-2">
                 <Wallet className="w-4 h-4" />
-                Portfolio
+                <span className="hidden sm:inline">Portfolio</span>
               </button>
             </Link>
             <Link href="/monitor">
-              <button className="px-4 py-2 rounded-lg bg-orange-600/20 hover:bg-orange-600/30 border border-orange-500/50 text-orange-400 text-sm font-bold transition-all flex items-center gap-2">
+              <button className="px-2 sm:px-4 py-1.5 sm:py-2 rounded-lg bg-orange-600/20 hover:bg-orange-600/30 border border-orange-500/50 text-orange-400 text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5 sm:gap-2">
                 <Activity className="w-4 h-4" />
-                Monitor
+                <span className="hidden sm:inline">Monitor</span>
               </button>
             </Link>
-            <Link href="/v0">
-              <button className="px-4 py-2 rounded-lg bg-green-600/20 hover:bg-green-600/30 border border-green-500/50 text-green-400 text-sm font-bold transition-all">
+            <Link href="/v0" className="hidden md:inline-block">
+              <button className="px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg bg-green-600/20 hover:bg-green-600/30 border border-green-500/50 text-green-400 text-xs sm:text-sm font-bold transition-all">
                 v0 POC
               </button>
             </Link>
@@ -3701,9 +3701,9 @@ export default function TradingDashboard() {
         
 
         {/* Main Trading Interface */}
-        <div className="grid grid-cols-12 gap-4 min-h-[calc(100vh-180px)]">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[calc(100vh-180px)]">
           {/* Center - Chart */}
-          <div className="col-span-6">
+          <div className="lg:col-span-6 order-1">
             <TradingViewChartComponent 
               symbol={selectedSymbol} 
               selectedCoin={selectedCoin}
@@ -3717,12 +3717,12 @@ export default function TradingDashboard() {
           </div>
 
           {/* Order Book + Transactions (Wider) */}
-          <div className="col-span-3">
+          <div className="lg:col-span-3 order-3 lg:order-2">
             <OrderBook symbol={selectedSymbol} walletAddress={publicKey?.toBase58()} />
           </div>
 
           {/* Rightmost - Order Form */}
-          <div className="col-span-3">
+          <div className="lg:col-span-3 order-2 lg:order-3">
             {tradingMode === "simple" ? (
               <OrderForm selectedCoin={selectedCoin} chartCurrentPrice={chartCurrentPrice} />
             ) : (
