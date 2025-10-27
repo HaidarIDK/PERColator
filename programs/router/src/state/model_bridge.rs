@@ -22,7 +22,7 @@
 //! | Portfolio.pnl (i128) | Account.pnl_ledger (i128) | Direct mapping |
 //! | Portfolio.vested_pnl (i128) | Account.reserved_pnl (u128) | Convert via max(0, vested) as u128 |
 //! | Portfolio.last_slot (u64) | Warmup.started_at_slot (u64) | Direct mapping |
-//! | InsuranceState.vault_balance | State.insurance_fund (u128) | Direct mapping |
+//! | (Not mapped) | State.loss_accum/fee_index (u128) | Fee distribution state tracked separately |
 //!
 //! # Limitations
 //!
@@ -118,6 +118,9 @@ pub fn portfolio_to_account(portfolio: &Portfolio, registry: &SlabRegistry) -> m
             slope_per_step,
         },
         position_size: total_position_size,
+        fee_index_user: 0,
+        fee_accrued: 0,
+        vested_pos_snapshot: 0,
     }
 }
 
@@ -165,11 +168,14 @@ pub fn portfolios_to_state(
 
     model_safety::State {
         vault: total_vault_balance,
-        insurance_fund: registry.insurance_state.vault_balance,
         fees_outstanding: total_fees,
         users,
         params,
         authorized_router: true, // Production always authorized
+        loss_accum: 0,
+        fee_index: 0,
+        sum_vested_pos_pnl: 0,
+        fee_carry: 0,
     }
 }
 
@@ -240,12 +246,9 @@ pub fn apply_state_to_portfolios(
         apply_account_to_portfolio(portfolio, account);
     }
 
-    // Apply insurance fund changes
-    registry.insurance_state.vault_balance = state.insurance_fund;
-
-    // Note: We don't update total_vault_balance or fees here because those
-    // are derived from other accounts in production. Conservation should be
-    // verified separately via conservation_ok() checks.
+    // Note: Fee distribution state (loss_accum, fee_index, etc.) is maintained
+    // separately in production. These fields are not synced back from the model.
+    // Conservation should be verified separately via conservation_ok() checks.
 }
 
 /// Check conservation using verified helper
