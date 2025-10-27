@@ -30,7 +30,8 @@ import {
   Eye,
   EyeOff,
   LineChart,
-  AlertCircle
+  AlertCircle,
+  Home
 } from "lucide-react"
 import { FaBitcoin, FaEthereum } from "react-icons/fa"
 import { SiSolana } from "react-icons/si"
@@ -3626,39 +3627,47 @@ export default function TradingDashboard() {
         
         {/* Top Header Bar - Wallet & Faucet */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          {/* Left - Faucet (smaller) */}
-          {connected && (
-            <motion.div
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="flex items-center gap-2 bg-gradient-to-r from-amber-900/20 to-yellow-900/10 border border-amber-500/20 rounded-md px-2 py-1"
-            >
-              <DollarSign className="w-3 h-3 text-amber-400" />
-              <span className="text-[10px] text-amber-400 font-medium">Devnet</span>
-              <button
-                onClick={handleFaucetRequest}
-                disabled={faucetLoading}
-                className="px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 rounded text-amber-300 text-[10px] font-semibold hover:bg-amber-500/30 transition-all disabled:opacity-50 flex items-center gap-1"
-              >
-                {faucetLoading ? (
-                  <>
-                    <div className="animate-spin rounded-full h-3 w-3 border-b border-current"></div>
-                    <span>...</span>
-                  </>
-                ) : showFaucetSuccess ? (
-                  <>
-                    <span>✅</span>
-                    <span>+2 SOL</span>
-                  </>
-                ) : (
-                  <>
-                    <Zap className="w-2.5 h-2.5" />
-                    <span>+2 SOL</span>
-                  </>
-                )}
+          {/* Left - Home & Faucet */}
+          <div className="flex items-center gap-2">
+            <Link href="/">
+              <button className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 hover:border-[#B8B8FF]/50 text-[#B8B8FF] text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5">
+                <Home className="w-4 h-4" />
+                <span className="hidden sm:inline">Home</span>
               </button>
-            </motion.div>
-          )}
+            </Link>
+            {connected && (
+              <motion.div
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="flex items-center gap-2 bg-gradient-to-r from-amber-900/20 to-yellow-900/10 border border-amber-500/20 rounded-md px-2 py-1"
+              >
+                <DollarSign className="w-3 h-3 text-amber-400" />
+                <span className="text-[10px] text-amber-400 font-medium">Devnet</span>
+                <button
+                  onClick={handleFaucetRequest}
+                  disabled={faucetLoading}
+                  className="px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 rounded text-amber-300 text-[10px] font-semibold hover:bg-amber-500/30 transition-all disabled:opacity-50 flex items-center gap-1"
+                >
+                  {faucetLoading ? (
+                    <>
+                      <div className="animate-spin rounded-full h-3 w-3 border-b border-current"></div>
+                      <span>...</span>
+                    </>
+                  ) : showFaucetSuccess ? (
+                    <>
+                      <span>✅</span>
+                      <span>+2 SOL</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-2.5 h-2.5" />
+                      <span>+2 SOL</span>
+                    </>
+                  )}
+                </button>
+              </motion.div>
+            )}
+          </div>
           
           <div className="flex items-center gap-2 sm:gap-3 ml-auto flex-wrap">
             <Link href="/portfolio">
