@@ -1,11 +1,13 @@
 //! Program entrypoint
 
-use crate::instructions;
+use crate::{adapter, instructions};
+use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard};
 use percolator_common::{PercolatorError, Side};
 use pinocchio::{
     account_info::AccountInfo,
     entrypoint,
     msg,
+    program_error::ProgramError,
     pubkey::Pubkey,
     ProgramResult,
 };
@@ -69,6 +71,91 @@ pub fn process_instruction(
             let limit_px = i64::from_le_bytes(data[9..17].try_into().unwrap());
 
             instructions::process_commit_fill(accounts, side, qty, limit_px)
+        }
+        2 => {
+            // adapter_liquidity: intent_discriminator(1) + intent_data + risk_guard(8)
+            if data.is_empty() {
+                return Err(PercolatorError::InvalidInstruction.into());
+            }
+
+            let intent_disc = data[0];
+            let mut offset = 1;
+
+            // Parse intent based on discriminator
+            let intent = match intent_disc {
+                0 => {
+                    // AmmAdd: lower_px(16) + upper_px(16) + quote_notional(16) + curve_id(4) + fee_bps(2)
+                    if data.len() < 1 + 16 + 16 + 16 + 4 + 2 + 8 {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+
+                    let lower_px_q64 = u128::from_le_bytes(data[offset..offset+16].try_into().unwrap());
+                    offset += 16;
+                    let upper_px_q64 = u128::from_le_bytes(data[offset..offset+16].try_into().unwrap());
+                    offset += 16;
+                    let quote_notional_q64 = u128::from_le_bytes(data[offset..offset+16].try_into().unwrap());
+                    offset += 16;
+                    let curve_id = u32::from_le_bytes(data[offset..offset+4].try_into().unwrap());
+                    offset += 4;
+                    let fee_bps = u16::from_le_bytes(data[offset..offset+2].try_into().unwrap());
+                    offset += 2;
+
+                    LiquidityIntent::AmmAdd {
+                        lower_px_q64,
+                        upper_px_q64,
+                        quote_notional_q64,
+                        curve_id,
+                        fee_bps,
+                    }
+                }
+                1 => {
+                    // Remove: selector_disc(1) + shares(16)
+                    if data.len() < 1 + 1 + 16 + 8 {
+                        return Err(PercolatorError::InvalidInstruction.into());
+                    }
+
+                    let selector_disc = data[offset];
+                    offset += 1;
+
+                    let selector = match selector_disc {
+                        0 => {
+                            // AmmByShares
+                            let shares = u128::from_le_bytes(data[offset..offset+16].try_into().unwrap());
+                            offset += 16;
+                            RemoveSel::AmmByShares { shares }
+                        }
+                        _ => {
+                            msg!("Error: Unsupported remove selector");
+                            return Err(PercolatorError::InvalidInstruction.into());
+                        }
+                    };
+
+                    LiquidityIntent::Remove { selector }
+                }
+                _ => {
+                    msg!("Error: Unsupported liquidity intent");
+                    return Err(PercolatorError::InvalidInstruction.into());
+                }
+            };
+
+            // Parse RiskGuard (last 8 bytes)
+            let guard = RiskGuard {
+                max_slippage_bps: u16::from_le_bytes(data[offset..offset+2].try_into().unwrap()),
+                max_fee_bps: u16::from_le_bytes(data[offset+2..offset+4].try_into().unwrap()),
+                oracle_bound_bps: u16::from_le_bytes(data[offset+4..offset+6].try_into().unwrap()),
+                _padding: [0; 2],
+            };
+
+            // Call adapter
+            let result = adapter::process_adapter_liquidity(accounts, &intent, &guard)
+                .map_err(|e: PercolatorError| Into::<ProgramError>::into(e))?;
+
+            msg!("Adapter liquidity operation completed successfully");
+
+            // TODO: Return LiquidityResult to caller (requires result serialization)
+            let _ = result;
+
+            Ok(())
         }
         _ => {
             msg!("Error: Unknown instruction discriminator");
