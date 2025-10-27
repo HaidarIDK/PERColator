@@ -8,8 +8,8 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_register_slab};
-use crate::state::{Vault, Portfolio, SlabRegistry};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_register_slab, process_router_reserve, process_router_release, process_router_liquidity};
+use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
@@ -37,6 +37,9 @@ pub fn process_instruction(
         6 => RouterInstruction::BurnLpShares,
         7 => RouterInstruction::CancelLpOrders,
         8 => RouterInstruction::RegisterSlab,
+        9 => RouterInstruction::RouterReserve,
+        10 => RouterInstruction::RouterRelease,
+        11 => RouterInstruction::RouterLiquidity,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -80,6 +83,18 @@ pub fn process_instruction(
         RouterInstruction::RegisterSlab => {
             msg!("Instruction: RegisterSlab");
             process_register_slab_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::RouterReserve => {
+            msg!("Instruction: RouterReserve");
+            process_router_reserve_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::RouterRelease => {
+            msg!("Instruction: RouterRelease");
+            process_router_release_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::RouterLiquidity => {
+            msg!("Instruction: RouterLiquidity");
+            process_router_liquidity_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -650,5 +665,174 @@ fn process_register_slab_inner(_program_id: &Pubkey, accounts: &[AccountInfo], d
     )?;
 
     msg!("RegisterSlab processed successfully");
+    Ok(())
+}
+
+/// Process router_reserve instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Portfolio account
+/// 1. `[writable]` LP seat account
+///
+/// Expected data layout (32 bytes):
+/// - base_amount_q64: u128 (16 bytes)
+/// - quote_amount_q64: u128 (16 bytes)
+fn process_router_reserve_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: RouterReserve instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let portfolio_account = &accounts[0];
+    let seat_account = &accounts[1];
+
+    // Validate accounts
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_owner(seat_account, program_id)?;
+    validate_writable(seat_account)?;
+
+    // Borrow account data
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let seat = unsafe { borrow_account_data_mut::<RouterLpSeat>(seat_account)? };
+
+    // Parse instruction data
+    if data.len() < 32 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let base_amount_q64 = reader.read_u128()?;
+    let quote_amount_q64 = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_router_reserve(
+        portfolio_account,
+        portfolio,
+        seat_account,
+        seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )?;
+
+    msg!("RouterReserve processed successfully");
+    Ok(())
+}
+
+/// Process router_release instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Portfolio account
+/// 1. `[writable]` LP seat account
+///
+/// Expected data layout (32 bytes):
+/// - base_amount_q64: u128 (16 bytes)
+/// - quote_amount_q64: u128 (16 bytes)
+fn process_router_release_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: RouterRelease instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let portfolio_account = &accounts[0];
+    let seat_account = &accounts[1];
+
+    // Validate accounts
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_owner(seat_account, program_id)?;
+    validate_writable(seat_account)?;
+
+    // Borrow account data
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let seat = unsafe { borrow_account_data_mut::<RouterLpSeat>(seat_account)? };
+
+    // Parse instruction data
+    if data.len() < 32 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let base_amount_q64 = reader.read_u128()?;
+    let quote_amount_q64 = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_router_release(
+        portfolio_account,
+        portfolio,
+        seat_account,
+        seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )?;
+
+    msg!("RouterRelease processed successfully");
+    Ok(())
+}
+
+/// Process router_liquidity instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Portfolio account
+/// 1. `[writable]` LP seat account
+/// 2. `[writable]` Venue PnL account
+/// 3. `[]` Matcher program account
+///
+/// Expected data layout:
+/// - guard: RiskGuard (6 bytes: max_slippage_bps u16, max_fee_bps u16, oracle_bound_bps u16)
+/// - intent: LiquidityIntent (variable length, for now we'll use a placeholder)
+fn process_router_liquidity_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 4 {
+        msg!("Error: RouterLiquidity instruction requires at least 4 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let portfolio_account = &accounts[0];
+    let seat_account = &accounts[1];
+    let venue_pnl_account = &accounts[2];
+    let matcher_program = &accounts[3];
+
+    // Validate accounts
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_owner(seat_account, program_id)?;
+    validate_writable(seat_account)?;
+    validate_owner(venue_pnl_account, program_id)?;
+    validate_writable(venue_pnl_account)?;
+
+    // Borrow account data
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let seat = unsafe { borrow_account_data_mut::<RouterLpSeat>(seat_account)? };
+    let venue_pnl = unsafe { borrow_account_data_mut::<VenuePnl>(venue_pnl_account)? };
+
+    // Zero-copy deserialization using hand-rolled bindings
+    // Layout: [RiskGuard: 8 bytes][LiquidityIntent: variable]
+    if data.len() < 8 {
+        msg!("Error: Instruction data too short for RiskGuard");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    // Deserialize RiskGuard (8 bytes fixed size)
+    let guard = crate::lp_adapter_serde::deserialize_risk_guard(data)?;
+
+    // Deserialize LiquidityIntent (variable size)
+    let (intent, _bytes_read) = crate::lp_adapter_serde::deserialize_liquidity_intent(&data[8..])?;
+
+    // Call the instruction handler
+    process_router_liquidity(
+        portfolio_account,
+        portfolio,
+        seat_account,
+        seat,
+        venue_pnl_account,
+        venue_pnl,
+        matcher_program,
+        guard,
+        intent,
+    )?;
+
+    msg!("RouterLiquidity processed successfully");
     Ok(())
 }
