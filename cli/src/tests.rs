@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use crate::{client, config::NetworkConfig, exchange, margin, matcher};
+use crate::{client, config::NetworkConfig, exchange, margin, matcher, trading};
 
 /// Run smoke tests - basic functionality verification
 pub async fn run_smoke_tests(config: &NetworkConfig) -> Result<()> {
@@ -100,6 +100,20 @@ pub async fn run_smoke_tests(config: &NetworkConfig) -> Result<()> {
         }
         Err(e) => {
             println!("{} Slab registration: {}", "✗".bright_red(), e);
+            failed += 1;
+        }
+    }
+
+    thread::sleep(Duration::from_millis(500));
+
+    // Test 7: Slab order placement and cancellation
+    match test_slab_orders(config).await {
+        Ok(_) => {
+            println!("{} Slab order placement/cancellation", "✓".bright_green());
+            passed += 1;
+        }
+        Err(e) => {
+            println!("{} Slab order placement/cancellation: {}", "✗".bright_red(), e);
             failed += 1;
         }
     }
@@ -231,6 +245,92 @@ async fn test_slab_create(config: &NetworkConfig) -> Result<()> {
         tick_size,
         lot_size,
     ).await?;
+
+    Ok(())
+}
+
+/// Test slab order placement and cancellation
+async fn test_slab_orders(config: &NetworkConfig) -> Result<()> {
+    // Create a slab for testing
+    let rpc_client = client::create_rpc_client(config);
+    let payer = &config.keypair;
+
+    // Generate new keypair for the slab account
+    let slab_keypair = Keypair::new();
+    let slab_pubkey = slab_keypair.pubkey();
+
+    // Calculate rent for 4KB slab account
+    const SLAB_SIZE: usize = 4096;
+    let rent = rpc_client
+        .get_minimum_balance_for_rent_exemption(SLAB_SIZE)
+        .context("Failed to get rent exemption")?;
+
+    // Build CreateAccount instruction
+    let create_account_ix = solana_sdk::system_instruction::create_account(
+        &payer.pubkey(),
+        &slab_pubkey,
+        rent,
+        SLAB_SIZE as u64,
+        &config.slab_program_id,
+    );
+
+    // Build slab initialization data
+    let mut instruction_data = Vec::with_capacity(122);
+    instruction_data.push(0u8); // Initialize discriminator
+    instruction_data.extend_from_slice(&payer.pubkey().to_bytes()); // lp_owner
+    instruction_data.extend_from_slice(&config.router_program_id.to_bytes()); // router_id
+    instruction_data.extend_from_slice(&solana_sdk::system_program::id().to_bytes()); // instrument
+    instruction_data.extend_from_slice(&100000i64.to_le_bytes()); // mark_px = $100
+    instruction_data.extend_from_slice(&20i64.to_le_bytes()); // taker_fee_bps = 20
+    instruction_data.extend_from_slice(&1000i64.to_le_bytes()); // contract_size
+    instruction_data.push(0u8); // bump
+
+    // Build Initialize instruction
+    use solana_sdk::instruction::{AccountMeta, Instruction};
+    let initialize_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),
+            AccountMeta::new(payer.pubkey(), true),
+        ],
+        data: instruction_data,
+    };
+
+    // Send transaction to create and initialize slab
+    use solana_sdk::transaction::Transaction;
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[create_account_ix, initialize_ix],
+        Some(&payer.pubkey()),
+        &[payer, &slab_keypair],
+        recent_blockhash,
+    );
+
+    rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to create slab for order test")?;
+
+    // Small delay to ensure slab is ready
+    thread::sleep(Duration::from_millis(200));
+
+    // Place a resting buy order
+    trading::place_slab_order(
+        config,
+        slab_pubkey.to_string(),
+        "buy".to_string(),
+        100.0,  // $100 price
+        1000,   // 0.001 BTC
+    ).await.context("Failed to place slab order")?;
+
+    // Small delay
+    thread::sleep(Duration::from_millis(200));
+
+    // Cancel the order (order_id = 1 for first order)
+    trading::cancel_slab_order(
+        config,
+        slab_pubkey.to_string(),
+        1, // First order ID
+    ).await.context("Failed to cancel slab order")?;
 
     Ok(())
 }
