@@ -3122,6 +3122,7 @@ dependencies = [
 name = "percolator-amm"
 version = "0.1.0"
 dependencies = [
+ "adapter-core",
  "amm_model",
  "percolator-common",
  "pinocchio",

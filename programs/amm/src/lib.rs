@@ -8,6 +8,7 @@
 
 #![allow(clippy::arithmetic_side_effects)]
 
+pub mod adapter;
 pub mod entrypoint;
 pub mod instructions;
 pub mod math;
