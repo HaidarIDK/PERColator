@@ -791,8 +791,8 @@ const TradingViewChartComponent = ({
 
   return (
     <div className="bg-black/20 rounded-2xl border border-[#181825] overflow-hidden transition-all duration-300 w-full h-full">
-      <div className="h-12 flex items-center justify-between px-4 border-b border-[#181825]">
-        <div className="flex items-center space-x-4">
+      <div className="h-12 flex items-center justify-between px-4 border-b border-[#181825] overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+        <div className="flex items-center space-x-4 min-w-max">
           <div className="flex items-center space-x-2">
             <span className="text-white font-semibold text-sm">Price Charts</span>
             </div>
