@@ -19,6 +19,9 @@ pub mod adaptive_warmup;
 pub mod crisis;
 pub mod fee_distribution;
 
+#[cfg(test)]
+pub mod negative_tests;
+
 // Re-export commonly used types
 pub use state::*;
 pub use helpers::*;
