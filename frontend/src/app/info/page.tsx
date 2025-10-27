@@ -34,16 +34,16 @@ export default function InfoPage() {
       
       <FloatingNavbar />
       
-      <main className="relative z-10 pt-32 pb-20 px-4">
+      <main className="relative z-10 pt-32 pb-20 px-3 sm:px-4">
         <div className="max-w-6xl mx-auto">
           {/* Header */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.8 }}
-            className="text-center mb-16"
+            className="text-center mb-12 sm:mb-16"
           >
-            <h1 className="text-5xl md:text-7xl font-bold mb-6">
+            <h1 className="text-4xl sm:text-5xl md:text-7xl font-bold mb-4 sm:mb-6">
               <AuroraText
                 speed={0.8}
                 colors={["#B8B8FF", "#B8B8FF", "#B8B8FF", "#B8B8FF"]}
@@ -52,7 +52,7 @@ export default function InfoPage() {
                 Project Documentation
               </AuroraText>
             </h1>
-            <p className="text-xl text-gray-400 max-w-3xl mx-auto">
+            <p className="text-base sm:text-lg md:text-xl text-gray-400 max-w-3xl mx-auto px-2">
               Complete technical overview of PERColator - A sharded perpetual exchange protocol on Solana
             </p>
           </motion.div>
@@ -65,13 +65,13 @@ export default function InfoPage() {
             className="mb-12"
           >
             <a
-              href="https://github.com/HaidarIDK/percolator"
+              href="https://github.com/HaidarIDK/PERColator"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center justify-center gap-3 w-full max-w-md mx-auto px-6 py-4 rounded-xl bg-[#B8B8FF]/10 border border-[#B8B8FF]/30 text-white hover:bg-[#B8B8FF]/20 hover:border-[#B8B8FF]/50 transition-all duration-300 backdrop-blur-sm group"
             >
               <Github className="w-6 h-6 group-hover:rotate-12 transition-transform" />
-              <span className="text-lg font-semibold">View on GitHub</span>
+              <span className="text-base sm:text-lg font-semibold">View on GitHub</span>
               <ExternalLink className="w-5 h-5 group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
             </a>
           </motion.div>
@@ -83,33 +83,59 @@ export default function InfoPage() {
             delay={0.4}
           >
             <p className="text-gray-300 mb-4">
-              PERColator consists of two main on-chain Solana programs:
+              PERColator consists of four specialized on-chain Solana programs:
             </p>
             
-            <div className="space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <Card
                 title="Router Program"
-                programId="RoutR1VdCpHqj89WEMJhb6TkGT9cPfr1rVjhM3e2YQr"
+                programId="RoutqcxkpVH8jJ2cULG9u6WbdRskQwXkJe8CqZehcyr"
                 description="Global coordinator managing collateral, portfolio margin, and cross-slab routing"
                 features={[
-                  "Vault - Collateral custody per asset",
-                  "Escrow - Per-user pledges with anti-replay nonces",
-                  "Cap - Time-limited debit authorization tokens (2min TTL)",
-                  "Portfolio - Cross-margin tracking across slabs",
-                  "SlabRegistry - Governance-controlled registry"
+                  "Multi-slab atomic swaps with optimal routing",
+                  "Vault custody & collateral management",
+                  "Portfolio margin tracking across all slabs",
+                  "Liquidation engine & risk monitoring",
+                  "Cross-market capital efficiency"
                 ]}
               />
               
               <Card
                 title="Slab Program"
-                programId="SLabZ6PsDLh2X6HzEoqxFDMqCVcJXDKCNEYuPzUvGPk"
-                description="Per-market order book and matching engine in a single 10MB account"
+                programId="SLAB98WHcToiuUMMX9NQSg5E5iB8CjpK21T4h9ZXiep"
+                description="Per-market order book and matching engine (v0: ~4KB, v1: 10MB unified account)"
                 features={[
-                  "SlabState - Header + 5 memory pools (64KB each)",
-                  "Order book with price-time priority",
-                  "CLOB matching engine",
-                  "Risk calculations (IM/MM)",
-                  "Anti-toxicity mechanisms (Kill Band, JIT Penalty, ARG)"
+                  "Price-time priority matching engine",
+                  "Fill receipts for atomic settlement",
+                  "Anti-toxicity protection (Kill Band, JIT)",
+                  "O(1) freelist memory operations",
+                  "Risk calculations (IM/MM)"
+                ]}
+              />
+
+              <Card
+                title="AMM Program"
+                programId="AMMjkEeFdasQ8fs9a9HQyJdciPHtDHVEat8yxiXrTP6p"
+                description="Automated market maker with constant product formula (x·y=k)"
+                features={[
+                  "LP token minting & rewards distribution",
+                  "Dynamic fee optimization",
+                  "Deep liquidity pools for popular pairs",
+                  "Impermanent loss protection mechanisms",
+                  "Integration with Router for hybrid liquidity"
+                ]}
+              />
+
+              <Card
+                title="Oracle Program"
+                programId="oracpooXY8Nnpx2JTLkrLiJsDaMefERUFFRktkAZ3ki"
+                description="Real-time price feed aggregation with multi-source verification"
+                features={[
+                  "Multi-source oracle aggregation",
+                  "Mark price calculation for liquidations",
+                  "Funding rate computation",
+                  "Price verification & outlier detection",
+                  "Cross-slab basis alignment"
                 ]}
               />
             </div>
@@ -174,35 +200,43 @@ export default function InfoPage() {
           >
             <div className="space-y-3">
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/blob/master/README.md"
+                href="https://github.com/HaidarIDK/PERColator/blob/master/README.md"
                 text="README.md - Complete project documentation"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/blob/master/plan.md"
+                href="https://github.com/HaidarIDK/PERColator/blob/master/plan.md"
                 text="plan.md - Full protocol specification"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/tree/master/programs/router/src"
+                href="https://github.com/HaidarIDK/PERColator/tree/master/programs/router/src"
                 text="programs/router/src/ - Router program source"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/tree/master/programs/slab/src"
+                href="https://github.com/HaidarIDK/PERColator/tree/master/programs/slab/src"
                 text="programs/slab/src/ - Slab program source"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/tree/master/sdk/typescript"
+                href="https://github.com/HaidarIDK/PERColator/tree/master/programs/amm/src"
+                text="programs/amm/src/ - AMM program source"
+              />
+              <FileLink
+                href="https://github.com/HaidarIDK/PERColator/tree/master/programs/oracle/src"
+                text="programs/oracle/src/ - Oracle program source"
+              />
+              <FileLink
+                href="https://github.com/HaidarIDK/PERColator/tree/master/sdk/typescript"
                 text="sdk/typescript/ - TypeScript SDK for frontend"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/tree/master/cli"
-                text="cli/ - Command-line tools"
+                href="https://github.com/HaidarIDK/PERColator/tree/master/cli"
+                text="cli/ - Rust CLI tools"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/blob/master/build-bpf.sh"
+                href="https://github.com/HaidarIDK/PERColator/blob/master/build-bpf.sh"
                 text="build-bpf.sh - Build script for Solana BPF"
               />
               <FileLink
-                href="https://github.com/HaidarIDK/percolator/blob/master/deploy-devnet.sh"
+                href="https://github.com/HaidarIDK/PERColator/blob/master/deploy-devnet.sh"
                 text="deploy-devnet.sh - Deployment script"
               />
             </div>

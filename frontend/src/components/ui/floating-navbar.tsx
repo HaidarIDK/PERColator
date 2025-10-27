@@ -22,9 +22,9 @@ export function FloatingNavbar() {
     ? [
         { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
         { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
-        { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
+        { name: "Updates", href: "/updates", icon: <User className="w-5 h-5" /> },
       ]
-    : pathname === '/what-i-added'
+    : pathname === '/updates'
     ? [
         { name: "Home", href: "/", icon: <Home className="w-5 h-5" /> },
         { name: "Architecture", href: "/#architecture", icon: <Settings className="w-5 h-5" /> },
@@ -34,7 +34,7 @@ export function FloatingNavbar() {
         { name: "Home", href: "#home", icon: <Home className="w-5 h-5" /> },
         { name: "Read More", href: "/info", icon: <Info className="w-5 h-5" /> },
         { name: "Architecture", href: "#architecture", icon: <Settings className="w-5 h-5" /> },
-        { name: "What I Added", href: "/what-i-added", icon: <User className="w-5 h-5" /> },
+        { name: "Updates", href: "/updates", icon: <User className="w-5 h-5" /> },
       ]
 
   useEffect(() => {
@@ -68,15 +68,19 @@ export function FloatingNavbar() {
         animate={{ y: 0, opacity: 1 }}
         transition={{ duration: 0.6, delay: 0.5 }}
         className={cn(
-          "fixed top-6 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300",
-          isScrolled ? "top-4" : "top-6"
+          "fixed z-50 transition-all duration-300",
+          // Desktop: top center
+          "md:top-6 md:left-1/2 md:transform md:-translate-x-1/2",
+          // Mobile: left side
+          "top-4 left-4",
+          isScrolled && "md:top-4"
         )}
       >
         <div className="relative">
           {/* Main navbar container */}
-          <div className="bg-black/20 backdrop-blur-md border-[#B8B8FF]/30 rounded-full px-6 py-3 shadow-[0_0_20px_rgba(184,184,255,0.3)]">
-            {/* Desktop Navigation */}
-            <div className="hidden md:flex items-center space-x-1">
+          <div className="bg-black/20 backdrop-blur-md border-[#B8B8FF]/30 px-4 py-3 shadow-[0_0_20px_rgba(184,184,255,0.3)] rounded-2xl md:rounded-full md:px-6">
+            {/* Desktop Navigation - Horizontal */}
+            <div className="hidden md:flex flex-row items-center space-x-1">
               {navItems.map((item, index) => (
                 <motion.button
                   key={item.name}
@@ -141,7 +145,7 @@ export function FloatingNavbar() {
             }}
             transition={{ duration: 0.3 }}
             className={cn(
-              "absolute top-full left-0 right-0 mt-2 bg-black/30 backdrop-blur-md border border-[#B8B8FF]/30 rounded-2xl shadow-[0_0_20px_rgba(184,184,255,0.3)] overflow-hidden",
+              "absolute top-full left-0 mt-2 bg-black/30 backdrop-blur-md border border-[#B8B8FF]/30 rounded-2xl shadow-[0_0_20px_rgba(184,184,255,0.3)] overflow-hidden min-w-[200px]",
               isMobileMenuOpen ? "block" : "hidden"
             )}
           >
@@ -153,14 +157,34 @@ export function FloatingNavbar() {
                   animate={{ opacity: isMobileMenuOpen ? 1 : 0, x: isMobileMenuOpen ? 0 : -20 }}
                   transition={{ duration: 0.3, delay: index * 0.1 }}
                   onClick={() => handleNavClick(item.href)}
-                  className="w-full px-4 py-3 text-left text-white hover:text-[#B8B8FF] hover:bg-[#B8B8FF]/10 transition-all duration-300 flex items-center space-x-3"
+                  className="w-full px-5 py-3 text-left text-white hover:text-[#B8B8FF] hover:bg-[#B8B8FF]/10 transition-all duration-300 flex items-center space-x-3"
                 >
-                  <div className="text-[#B8B8FF]/60">
+                  <div className="text-[#B8B8FF]/60 flex-shrink-0">
                     {item.icon}
                   </div>
-                  <span className="text-sm font-medium">{item.name}</span>
+                  <span className="text-sm font-medium whitespace-nowrap">{item.name}</span>
                 </motion.button>
               ))}
+              
+              {/* Divider */}
+              <div className="mx-3 my-2 h-px bg-[#B8B8FF]/20"></div>
+              
+              {/* PerpDEX Button - Mobile */}
+              <motion.a
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: isMobileMenuOpen ? 1 : 0, x: isMobileMenuOpen ? 0 : -20 }}
+                transition={{ duration: 0.3, delay: navItems.length * 0.1 }}
+                href="/dashboard"
+                className="block mx-3 my-2 px-4 py-3 rounded-xl bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/30 text-white font-semibold hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/40 transition-all duration-300 shadow-[0_0_15px_rgba(184,184,255,0.3)] text-center relative"
+                onClick={() => setIsMobileMenuOpen(false)}
+              >
+                <div className="flex items-center justify-center gap-2">
+                  <span className="text-sm">PerpDEX →</span>
+                  <span className="px-1.5 py-0.5 text-[10px] bg-green-500/90 text-white rounded-full font-bold">
+                    LIVE
+                  </span>
+                </div>
+              </motion.a>
             </div>
           </motion.div>
         </div>
