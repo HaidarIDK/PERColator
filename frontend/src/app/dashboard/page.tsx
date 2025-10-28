@@ -4,6 +4,7 @@ import { Particles } from "@/components/ui/particles"
 import { AuroraText } from "@/components/ui/aurora-text"
 import { motion } from "motion/react"
 import { cn } from "@/lib/utils"
+import { PROGRAM_IDS, formatAddress } from "@/lib/program-config"
 import { 
   Select,
   SelectContent,
@@ -18,6 +19,7 @@ import {
   PieChart, 
   ArrowUpRight, 
   ArrowDownRight,
+  ArrowDown,
   ChevronDown,
   Settings,
   Wallet,
@@ -38,7 +40,7 @@ import { SiSolana } from "react-icons/si"
 import { useState, useEffect, useRef, memo } from "react"
 import { useWallet, useConnection } from "@solana/wallet-adapter-react"
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui"
-import { Transaction, Connection, clusterApiUrl } from "@solana/web3.js"
+import { Transaction, Connection, clusterApiUrl, SystemProgram, TransactionInstruction, PublicKey as SolanaPublicKey } from "@solana/web3.js"
 import { Buffer } from "buffer"
 import { CustomChart, TimeframeSelector } from "@/components/ui/custom-chart"
 import { CustomDataService } from "@/lib/data-service"
@@ -213,6 +215,11 @@ function LightweightChart({ coinId, timeframe, onPriceUpdate }: { coinId: "ether
               setOldestTimestamp(oldestCandle.time as number);
               const lastCandle = chartData[chartData.length - 1];
               setCurrentPrice(lastCandle.close);
+              
+              // Share initial price with parent (order form and AMM)
+              if (onPriceUpdate) {
+                onPriceUpdate(lastCandle.close);
+              }
             }
             
             console.log(`✅ Loaded ${chartData.length} candles for initial chunk`);
@@ -1364,6 +1371,719 @@ const PastTrades = ({ symbol }: { symbol: string }) => {
     </div>
   )
 }
+
+// AMM Liquidity Pool Component
+const AMMInterface = ({ 
+  selectedCoin, 
+  mode,
+  showToast,
+  chartCurrentPrice
+}: { 
+  selectedCoin: "ethereum" | "bitcoin" | "solana"; 
+  mode: "swap" | "add" | "remove";
+  showToast: (message: string, type: 'success' | 'error' | 'warning' | 'info') => void;
+  chartCurrentPrice: number;
+}) => {
+  const wallet = useWallet();
+  const { publicKey, connected, signTransaction } = wallet;
+  const { connection } = useConnection();
+
+  // State for Swap
+  const [swapFromAmount, setSwapFromAmount] = useState("");
+  const [swapToAmount, setSwapToAmount] = useState("");
+  const [swapToToken, setSwapToToken] = useState("USDC");
+  const [priceImpact, setPriceImpact] = useState(0);
+  const [swapLoading, setSwapLoading] = useState(false);
+
+  // State for Add Liquidity
+  const [addToken1Amount, setAddToken1Amount] = useState("");
+  const [addToken2Amount, setAddToken2Amount] = useState("");
+  const [expectedLPTokens, setExpectedLPTokens] = useState(0);
+  const [addLiquidityLoading, setAddLiquidityLoading] = useState(false);
+
+  // State for Remove Liquidity
+  const [lpTokenAmount, setLpTokenAmount] = useState("");
+  const [expectedToken1, setExpectedToken1] = useState(0);
+  const [expectedToken2, setExpectedToken2] = useState(0);
+  const [userLPBalance, setUserLPBalance] = useState(0);
+  const [removeLiquidityLoading, setRemoveLiquidityLoading] = useState(false);
+
+  // Pool state
+  const [poolReserve1, setPoolReserve1] = useState(10000); // Mock: 10,000 SOL
+  const [poolReserve2, setPoolReserve2] = useState(2000000); // Mock: 2M USDC
+  const [poolLiquidity, setPoolLiquidity] = useState(141421); // Mock: sqrt(10000 * 2000000)
+  const [userShare, setUserShare] = useState(0); // User's % of pool
+
+  const getTokenSymbol = () => {
+    switch(selectedCoin) {
+      case "ethereum": return "ETH";
+      case "bitcoin": return "BTC";
+      case "solana": return "SOL";
+      default: return "SOL";
+    }
+  };
+
+  const getTokenPrice = () => {
+    // Use live chart price if available, otherwise fallback to static
+    if (chartCurrentPrice > 0) {
+      return chartCurrentPrice;
+    }
+    switch(selectedCoin) {
+      case "ethereum": return 4130;
+      case "bitcoin": return 114300;
+      case "solana": return 199;
+      default: return 199;
+    }
+  };
+
+  // Update pool reserves when selected coin changes or chart price updates
+  useEffect(() => {
+    const currentPrice = getTokenPrice();
+    
+    switch(selectedCoin) {
+      case "ethereum":
+        // ETH pool: 100 ETH, USDC based on live price
+        setPoolReserve1(100);
+        setPoolReserve2(100 * currentPrice);
+        setPoolLiquidity(Math.sqrt(100 * (100 * currentPrice)));
+        break;
+      case "bitcoin":
+        // BTC pool: 10 BTC, USDC based on live price
+        setPoolReserve1(10);
+        setPoolReserve2(10 * currentPrice);
+        setPoolLiquidity(Math.sqrt(10 * (10 * currentPrice)));
+        break;
+      case "solana":
+      default:
+        // SOL pool: 10,000 SOL, USDC based on live price
+        setPoolReserve1(10000);
+        setPoolReserve2(10000 * currentPrice);
+        setPoolLiquidity(Math.sqrt(10000 * (10000 * currentPrice)));
+        break;
+    }
+  }, [selectedCoin, chartCurrentPrice]);
+
+  // Calculate swap output using constant product formula (x * y = k)
+  const calculateSwapOutput = (amountIn: number, reserveIn: number, reserveOut: number) => {
+    const amountInWithFee = amountIn * 997; // 0.3% fee
+    const numerator = amountInWithFee * reserveOut;
+    const denominator = (reserveIn * 1000) + amountInWithFee;
+    return numerator / denominator;
+  };
+
+  // Calculate price impact
+  const calculatePriceImpact = (amountIn: number, reserveIn: number, reserveOut: number) => {
+    const priceBeforeSwap = reserveOut / reserveIn;
+    const amountOut = calculateSwapOutput(amountIn, reserveIn, reserveOut);
+    const priceAfterSwap = (reserveOut - amountOut) / (reserveIn + amountIn);
+    return ((priceAfterSwap - priceBeforeSwap) / priceBeforeSwap) * 100;
+  };
+
+  // Update swap calculations when input changes or coin changes
+  useEffect(() => {
+    if (swapFromAmount && parseFloat(swapFromAmount) > 0) {
+      const amountIn = parseFloat(swapFromAmount);
+      const amountOut = calculateSwapOutput(amountIn, poolReserve1, poolReserve2);
+      setSwapToAmount(amountOut.toFixed(2));
+      
+      const impact = calculatePriceImpact(amountIn, poolReserve1, poolReserve2);
+      setPriceImpact(Math.abs(impact));
+    } else {
+      setSwapToAmount("");
+      setPriceImpact(0);
+    }
+  }, [swapFromAmount, poolReserve1, poolReserve2, selectedCoin, chartCurrentPrice]);
+
+  // Update add liquidity calculations
+  useEffect(() => {
+    if (addToken1Amount && parseFloat(addToken1Amount) > 0) {
+      const amount1 = parseFloat(addToken1Amount);
+      const ratio = poolReserve2 / poolReserve1;
+      const amount2 = amount1 * ratio;
+      setAddToken2Amount(amount2.toFixed(2));
+      
+      // Calculate LP tokens to receive: sqrt(amount1 * amount2) * totalSupply / sqrt(reserve1 * reserve2)
+      const liquidityMinted = Math.sqrt(amount1 * amount2) * poolLiquidity / Math.sqrt(poolReserve1 * poolReserve2);
+      setExpectedLPTokens(liquidityMinted);
+    } else {
+      setAddToken2Amount("");
+      setExpectedLPTokens(0);
+    }
+  }, [addToken1Amount, poolReserve1, poolReserve2, poolLiquidity, selectedCoin, chartCurrentPrice]);
+
+  // Update remove liquidity calculations
+  useEffect(() => {
+    if (lpTokenAmount && parseFloat(lpTokenAmount) > 0) {
+      const lpAmount = parseFloat(lpTokenAmount);
+      const share = lpAmount / poolLiquidity;
+      setExpectedToken1(poolReserve1 * share);
+      setExpectedToken2(poolReserve2 * share);
+    } else {
+      setExpectedToken1(0);
+      setExpectedToken2(0);
+    }
+  }, [lpTokenAmount, poolLiquidity, poolReserve1, poolReserve2, selectedCoin, chartCurrentPrice]);
+
+  const handleSwap = async () => {
+    if (!connected || !publicKey) {
+      showToast('⚠️ Please connect your wallet', 'warning');
+      return;
+    }
+
+    if (!signTransaction) {
+      showToast('⚠️ Wallet does not support signing', 'warning');
+      return;
+    }
+    
+    setSwapLoading(true);
+    try {
+      // Create a v0 demo transaction (memo with swap details)
+      const transaction = new Transaction();
+      
+      // Add memo instruction for v0 demo
+      const memoData = `PERColator v0 AMM Swap: ${swapFromAmount} ${getTokenSymbol()} → ${swapToAmount} ${swapToToken}`;
+      const memoInstruction = new TransactionInstruction({
+        keys: [],
+        programId: new SolanaPublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
+        data: Buffer.from(memoData, 'utf-8'),
+      });
+      transaction.add(memoInstruction);
+      
+      // Get recent blockhash
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+      
+      // Sign and send transaction
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      // Wait for confirmation
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      });
+      
+      showToast(
+        `✅ AMM Swap Executed On-Chain!\n\n` +
+        `${swapFromAmount} ${getTokenSymbol()} → ${swapToAmount} ${swapToToken}\n\n` +
+        `⚠️ v0 Demo Mode: Visual only\n` +
+        `(No real tokens swapped yet)\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Transaction Signature:\n` +
+        `${signature}\n\n` +
+        `📋 Click to select & copy\n` +
+        `🔗 View on Solscan:\n` +
+        `https://solscan.io/tx/${signature}?cluster=devnet`,
+        'success'
+      );
+      
+      // Log to console for easy copying
+      console.log('Swap Transaction:', signature);
+      console.log('View on Solscan:', `https://solscan.io/tx/${signature}?cluster=devnet`);
+      
+      setSwapFromAmount("");
+      setSwapToAmount("");
+    } catch (error: any) {
+      console.error('Swap failed:', error);
+      const errorMsg = error?.message || 'Unknown error';
+      
+      if (errorMsg.includes('User rejected')) {
+        showToast('❌ You cancelled the transaction', 'error');
+      } else if (errorMsg.includes('insufficient')) {
+        showToast('❌ Insufficient SOL for transaction fees', 'error');
+      } else {
+        showToast('❌ Swap failed\n\n' + errorMsg, 'error');
+      }
+    } finally {
+      setSwapLoading(false);
+    }
+  };
+
+  const handleAddLiquidity = async () => {
+    if (!connected || !publicKey) {
+      showToast('⚠️ Please connect your wallet', 'warning');
+      return;
+    }
+
+    if (!signTransaction) {
+      showToast('⚠️ Wallet does not support signing', 'warning');
+      return;
+    }
+    
+    setAddLiquidityLoading(true);
+    try {
+      // Create a v0 demo transaction (memo with liquidity details)
+      const transaction = new Transaction();
+      
+      const memoData = `PERColator v0 AMM Add Liquidity: ${addToken1Amount} ${getTokenSymbol()} + ${addToken2Amount} USDC = ${expectedLPTokens.toFixed(2)} LP`;
+      const memoInstruction = new TransactionInstruction({
+        keys: [],
+        programId: new SolanaPublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
+        data: Buffer.from(memoData, 'utf-8'),
+      });
+      transaction.add(memoInstruction);
+      
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+      
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      });
+      
+      showToast(
+        `✅ Liquidity Added On-Chain!\n\n` +
+        `Received ${expectedLPTokens.toFixed(2)} LP tokens\n\n` +
+        `⚠️ v0 Demo Mode: Visual only\n` +
+        `(No real LP tokens minted yet)\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Transaction Signature:\n` +
+        `${signature}\n\n` +
+        `📋 Click to select & copy\n` +
+        `🔗 View on Solscan:\n` +
+        `https://solscan.io/tx/${signature}?cluster=devnet`,
+        'success'
+      );
+      
+      console.log('Add Liquidity Transaction:', signature);
+      console.log('View on Solscan:', `https://solscan.io/tx/${signature}?cluster=devnet`);
+      
+      setAddToken1Amount("");
+      setAddToken2Amount("");
+    } catch (error: any) {
+      console.error('Add liquidity failed:', error);
+      const errorMsg = error?.message || 'Unknown error';
+      
+      if (errorMsg.includes('User rejected')) {
+        showToast('❌ You cancelled the transaction', 'error');
+      } else if (errorMsg.includes('insufficient')) {
+        showToast('❌ Insufficient SOL for transaction fees', 'error');
+      } else {
+        showToast('❌ Add liquidity failed\n\n' + errorMsg, 'error');
+      }
+    } finally {
+      setAddLiquidityLoading(false);
+    }
+  };
+
+  const handleRemoveLiquidity = async () => {
+    if (!connected || !publicKey) {
+      showToast('⚠️ Please connect your wallet', 'warning');
+      return;
+    }
+
+    if (!signTransaction) {
+      showToast('⚠️ Wallet does not support signing', 'warning');
+      return;
+    }
+    
+    setRemoveLiquidityLoading(true);
+    try {
+      // Create a v0 demo transaction (memo with liquidity removal details)
+      const transaction = new Transaction();
+      
+      const memoData = `PERColator v0 AMM Remove Liquidity: ${lpTokenAmount} LP → ${expectedToken1.toFixed(2)} ${getTokenSymbol()} + ${expectedToken2.toFixed(2)} USDC`;
+      const memoInstruction = new TransactionInstruction({
+        keys: [],
+        programId: new SolanaPublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
+        data: Buffer.from(memoData, 'utf-8'),
+      });
+      transaction.add(memoInstruction);
+      
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+      
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      });
+      
+      showToast(
+        `✅ Liquidity Removed On-Chain!\n\n` +
+        `Received:\n` +
+        `${expectedToken1.toFixed(2)} ${getTokenSymbol()}\n` +
+        `${expectedToken2.toFixed(2)} USDC\n\n` +
+        `⚠️ v0 Demo Mode: Visual only\n` +
+        `(No real tokens withdrawn yet)\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `Transaction Signature:\n` +
+        `${signature}\n\n` +
+        `📋 Click to select & copy\n` +
+        `🔗 View on Solscan:\n` +
+        `https://solscan.io/tx/${signature}?cluster=devnet`,
+        'success'
+      );
+      
+      console.log('Remove Liquidity Transaction:', signature);
+      console.log('View on Solscan:', `https://solscan.io/tx/${signature}?cluster=devnet`);
+      
+      setLpTokenAmount("");
+    } catch (error: any) {
+      console.error('Remove liquidity failed:', error);
+      const errorMsg = error?.message || 'Unknown error';
+      
+      if (errorMsg.includes('User rejected')) {
+        showToast('❌ You cancelled the transaction', 'error');
+      } else if (errorMsg.includes('insufficient')) {
+        showToast('❌ Insufficient SOL for transaction fees', 'error');
+      } else {
+        showToast('❌ Remove liquidity failed\n\n' + errorMsg, 'error');
+      }
+    } finally {
+      setRemoveLiquidityLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-gradient-to-br from-black/40 via-black/30 to-black/20 backdrop-blur-xl rounded-2xl border border-[#181825] overflow-hidden">
+      {/* Pool Info Header */}
+      <div className="bg-gradient-to-r from-green-500/10 via-emerald-500/5 to-transparent px-4 sm:px-6 py-4 border-b border-[#181825]">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse shadow-[0_0_10px_rgba(74,222,128,0.5)]"></div>
+              AMM Liquidity Pool
+            </h3>
+            <p className="text-xs text-gray-400 mt-1 font-medium">{getTokenSymbol()}/USDC Pool</p>
+          </div>
+          <div className="text-left sm:text-right">
+            <div className="text-[10px] sm:text-xs text-gray-400 uppercase tracking-wide">Total Liquidity</div>
+            <div className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-green-400 to-emerald-400 bg-clip-text text-transparent">
+              ${(poolReserve2 * 2).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Pool Statistics */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 p-4 sm:p-6 bg-black/20">
+        <div className="bg-gradient-to-br from-blue-500/10 via-blue-600/5 to-transparent rounded-xl p-3 sm:p-4 border border-blue-500/20 hover:border-blue-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-blue-500/10">
+          <div className="text-[10px] sm:text-xs text-gray-400 mb-1 uppercase tracking-wide">{getTokenSymbol()} Reserve</div>
+          <div className="text-sm sm:text-base font-bold text-white">{poolReserve1.toLocaleString()}</div>
+        </div>
+        <div className="bg-gradient-to-br from-green-500/10 via-green-600/5 to-transparent rounded-xl p-3 sm:p-4 border border-green-500/20 hover:border-green-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-green-500/10">
+          <div className="text-[10px] sm:text-xs text-gray-400 mb-1 uppercase tracking-wide">USDC Reserve</div>
+          <div className="text-sm sm:text-base font-bold text-white">${poolReserve2.toLocaleString()}</div>
+        </div>
+        <div className="bg-gradient-to-br from-purple-500/10 via-purple-600/5 to-transparent rounded-xl p-3 sm:p-4 border border-purple-500/20 hover:border-purple-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-purple-500/10">
+          <div className="text-[10px] sm:text-xs text-gray-400 mb-1 uppercase tracking-wide">AMM Price</div>
+          <div className="text-sm sm:text-base font-bold text-white">${getTokenPrice().toFixed(2)}</div>
+        </div>
+        <div className="bg-gradient-to-br from-orange-500/10 via-orange-600/5 to-transparent rounded-xl p-3 sm:p-4 border border-orange-500/20 hover:border-orange-500/40 transition-all duration-300 hover:shadow-lg hover:shadow-orange-500/10">
+          <div className="text-[10px] sm:text-xs text-gray-400 mb-1 uppercase tracking-wide">Your Share</div>
+          <div className="text-sm sm:text-base font-bold text-white">{userShare.toFixed(3)}%</div>
+        </div>
+      </div>
+
+      {/* Mode Content */}
+      <div className="p-4 sm:p-6">
+        {mode === "swap" && (
+          <div className="space-y-4 sm:space-y-5">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm sm:text-base font-bold text-white">Swap Tokens</h4>
+              <div className="text-xs text-gray-500">Fee: 0.3%</div>
+            </div>
+            
+            {/* From Token */}
+            <div className="group bg-gradient-to-br from-black/60 via-black/40 to-black/30 rounded-2xl p-4 sm:p-5 border border-[#181825] hover:border-[#B8B8FF]/30 transition-all duration-300 hover:shadow-lg hover:shadow-[#B8B8FF]/5">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs sm:text-sm text-gray-400 font-medium uppercase tracking-wide">From</label>
+                <span className="text-xs text-gray-500">Balance: <span className="text-white font-medium">0.00</span></span>
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <input
+                  type="number"
+                  value={swapFromAmount}
+                  onChange={(e) => setSwapFromAmount(e.target.value)}
+                  placeholder="0.0"
+                  className="flex-1 bg-transparent text-2xl sm:text-3xl font-bold text-white outline-none placeholder:text-gray-700"
+                />
+                <div className="flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-br from-[#B8B8FF]/20 to-[#B8B8FF]/10 rounded-xl border border-[#B8B8FF]/40 shadow-lg shadow-[#B8B8FF]/10">
+                  <span className="text-sm sm:text-base font-bold text-white">{getTokenSymbol()}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Swap Arrow */}
+            <div className="flex justify-center -my-2 sm:-my-3 relative z-10">
+              <div className="bg-gradient-to-br from-black/80 to-black/60 border-2 border-[#181825] rounded-full p-2 sm:p-2.5 hover:border-[#B8B8FF]/50 hover:shadow-lg hover:shadow-[#B8B8FF]/20 transition-all duration-300 cursor-pointer">
+                <ArrowDown className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#B8B8FF]" />
+              </div>
+            </div>
+
+            {/* To Token */}
+            <div className="group bg-gradient-to-br from-black/60 via-black/40 to-black/30 rounded-2xl p-4 sm:p-5 border border-[#181825] hover:border-green-500/30 transition-all duration-300 hover:shadow-lg hover:shadow-green-500/5">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs sm:text-sm text-gray-400 font-medium uppercase tracking-wide">To</label>
+                <span className="text-xs text-gray-500">Balance: <span className="text-white font-medium">0.00</span></span>
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <input
+                  type="number"
+                  value={swapToAmount}
+                  readOnly
+                  placeholder="0.0"
+                  className="flex-1 bg-transparent text-2xl sm:text-3xl font-bold text-white outline-none placeholder:text-gray-700"
+                />
+                <div className="flex items-center gap-2 px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-br from-green-500/20 to-green-600/10 rounded-xl border border-green-500/40 shadow-lg shadow-green-500/10">
+                  <span className="text-sm sm:text-base font-bold text-white">{swapToToken}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Swap Details */}
+            {swapFromAmount && parseFloat(swapFromAmount) > 0 && (
+              <div className="bg-gradient-to-br from-[#B8B8FF]/10 via-purple-500/5 to-transparent rounded-2xl p-4 sm:p-5 border border-[#B8B8FF]/30 space-y-3 backdrop-blur-sm">
+                <div className="text-xs sm:text-sm font-semibold text-white mb-2">Transaction Details</div>
+                <div className="flex justify-between items-center text-xs sm:text-sm">
+                  <span className="text-gray-400">Exchange Rate</span>
+                  <span className="text-white font-bold">1 {getTokenSymbol()} = {(parseFloat(swapToAmount) / parseFloat(swapFromAmount)).toFixed(2)} {swapToToken}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs sm:text-sm">
+                  <span className="text-gray-400">Price Impact</span>
+                  <span className={cn(
+                    "font-bold px-2 py-0.5 rounded-md",
+                    priceImpact < 1 
+                      ? "text-green-400 bg-green-500/10" 
+                      : priceImpact < 3 
+                      ? "text-yellow-400 bg-yellow-500/10" 
+                      : "text-red-400 bg-red-500/10"
+                  )}>
+                    {priceImpact.toFixed(3)}%
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs sm:text-sm">
+                  <span className="text-gray-400">Min. Received (0.5% slippage)</span>
+                  <span className="text-white font-bold">{(parseFloat(swapToAmount) * 0.995).toFixed(2)} {swapToToken}</span>
+                </div>
+                <div className="pt-2 border-t border-[#B8B8FF]/10">
+                  <div className="flex justify-between items-center text-xs sm:text-sm">
+                    <span className="text-gray-400">LP Fee (0.3%)</span>
+                    <span className="text-purple-400 font-medium">{(parseFloat(swapFromAmount) * 0.003).toFixed(4)} {getTokenSymbol()}</span>
+                  </div>
+                </div>
+                <div className="flex justify-between text-base font-bold pt-1.5 border-t border-[#181825]">
+                  <span className="text-[#B8B8FF]">Total:</span>
+                  <span className="text-white">{parseFloat(swapToAmount).toFixed(2)} {swapToToken}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Swap Button */}
+            <button
+              onClick={handleSwap}
+              disabled={!connected || swapLoading || !swapFromAmount || parseFloat(swapFromAmount) <= 0}
+              className={cn(
+                "w-full py-3 sm:py-4 rounded-xl font-bold text-base sm:text-lg transition-all duration-300 shadow-lg",
+                !connected || swapLoading || !swapFromAmount || parseFloat(swapFromAmount) <= 0
+                  ? "bg-gray-600/20 text-gray-500 cursor-not-allowed"
+                  : "bg-gradient-to-r from-[#B8B8FF]/40 via-purple-500/40 to-[#B8B8FF]/40 hover:from-[#B8B8FF]/50 hover:via-purple-500/50 hover:to-[#B8B8FF]/50 border border-[#B8B8FF]/50 text-white hover:shadow-[#B8B8FF]/30"
+              )}
+            >
+              {swapLoading ? (
+                <div className="flex items-center justify-center gap-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                  Swapping...
+                </div>
+              ) : !connected ? "Connect Wallet" : "Swap Tokens"}
+            </button>
+          </div>
+        )}
+
+        {mode === "add" && (
+          <div className="space-y-4 sm:space-y-5">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm sm:text-base font-bold text-white">Add Liquidity</h4>
+              <div className="text-xs text-gray-500">Earn fees from swaps</div>
+            </div>
+            
+            {/* Token 1 Input */}
+            <div className="group bg-gradient-to-br from-black/60 via-black/40 to-black/30 rounded-2xl p-4 sm:p-5 border border-[#181825] hover:border-blue-500/30 transition-all duration-300 hover:shadow-lg hover:shadow-blue-500/5">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs sm:text-sm text-gray-400 font-medium uppercase tracking-wide">{getTokenSymbol()}</label>
+                <span className="text-xs text-gray-500">Balance: <span className="text-white font-medium">0.00</span></span>
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <input
+                  type="number"
+                  value={addToken1Amount}
+                  onChange={(e) => setAddToken1Amount(e.target.value)}
+                  placeholder="0.0"
+                  className="flex-1 bg-transparent text-2xl sm:text-3xl font-bold text-white outline-none placeholder:text-gray-700"
+                />
+                <div className="px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-br from-blue-500/20 to-blue-600/10 rounded-xl border border-blue-500/40">
+                  <span className="text-sm sm:text-base font-bold text-white">{getTokenSymbol()}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-center -my-3 relative z-10">
+              <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 border-2 border-green-500/30 rounded-full p-2.5 shadow-lg shadow-green-500/10">
+                <div className="text-green-400 text-xl font-bold">+</div>
+              </div>
+            </div>
+
+            {/* Token 2 Input */}
+            <div className="group bg-gradient-to-br from-black/60 via-black/40 to-black/30 rounded-2xl p-4 sm:p-5 border border-[#181825] hover:border-green-500/30 transition-all duration-300 hover:shadow-lg hover:shadow-green-500/5">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs sm:text-sm text-gray-400 font-medium uppercase tracking-wide">USDC</label>
+                <span className="text-xs text-gray-500">Balance: <span className="text-white font-medium">0.00</span></span>
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <input
+                  type="number"
+                  value={addToken2Amount}
+                  readOnly
+                  placeholder="0.0"
+                  className="flex-1 bg-transparent text-2xl sm:text-3xl font-bold text-gray-400 outline-none placeholder:text-gray-700"
+                />
+                <div className="px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-br from-green-500/20 to-green-600/10 rounded-xl border border-green-500/40">
+                  <span className="text-sm sm:text-base font-bold text-white">USDC</span>
+                </div>
+              </div>
+            </div>
+
+            {/* LP Token Receipt */}
+            {addToken1Amount && parseFloat(addToken1Amount) > 0 && (
+              <div className="bg-gradient-to-br from-green-500/15 via-emerald-500/10 to-transparent rounded-2xl p-4 sm:p-5 border border-green-500/30 space-y-3 backdrop-blur-sm">
+                <div className="text-xs sm:text-sm font-semibold text-white mb-2">Expected Output</div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-300">LP Tokens</span>
+                  <span className="text-xl sm:text-2xl font-bold text-green-400">{expectedLPTokens.toFixed(2)}</span>
+                </div>
+                <div className="pt-2 border-t border-green-500/20">
+                  <div className="flex justify-between items-center text-xs sm:text-sm">
+                    <span className="text-gray-400">Your Pool Share</span>
+                    <span className="text-white font-bold">{((expectedLPTokens / (poolLiquidity + expectedLPTokens)) * 100).toFixed(4)}%</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Add Liquidity Button */}
+            <button
+              onClick={handleAddLiquidity}
+              disabled={!connected || addLiquidityLoading || !addToken1Amount || parseFloat(addToken1Amount) <= 0}
+              className={cn(
+                "w-full py-3 sm:py-4 rounded-xl font-bold text-base sm:text-lg transition-all duration-300 shadow-lg",
+                !connected || addLiquidityLoading || !addToken1Amount || parseFloat(addToken1Amount) <= 0
+                  ? "bg-gray-600/20 text-gray-500 cursor-not-allowed"
+                  : "bg-gradient-to-r from-green-500/40 via-emerald-500/40 to-green-500/40 hover:from-green-500/50 hover:via-emerald-500/50 hover:to-green-500/50 border border-green-500/50 text-white hover:shadow-green-500/30"
+              )}
+            >
+              {addLiquidityLoading ? (
+                <div className="flex items-center justify-center gap-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                  Adding Liquidity...
+                </div>
+              ) : !connected ? "Connect Wallet" : "Add Liquidity"}
+            </button>
+          </div>
+        )}
+
+        {mode === "remove" && (
+          <div className="space-y-4 sm:space-y-5">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm sm:text-base font-bold text-white">Remove Liquidity</h4>
+              <div className="text-xs text-gray-500">Burn LP tokens</div>
+            </div>
+            
+            {/* LP Token Input */}
+            <div className="group bg-gradient-to-br from-black/60 via-black/40 to-black/30 rounded-2xl p-4 sm:p-5 border border-[#181825] hover:border-orange-500/30 transition-all duration-300 hover:shadow-lg hover:shadow-orange-500/5">
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs sm:text-sm text-gray-400 font-medium uppercase tracking-wide">LP Tokens</label>
+                <span className="text-xs text-gray-500">Balance: <span className="text-white font-medium">{userLPBalance.toFixed(2)}</span></span>
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4">
+                <input
+                  type="number"
+                  value={lpTokenAmount}
+                  onChange={(e) => setLpTokenAmount(e.target.value)}
+                  placeholder="0.0"
+                  className="flex-1 bg-transparent text-2xl sm:text-3xl font-bold text-white outline-none placeholder:text-gray-700"
+                />
+                <button 
+                  onClick={() => setLpTokenAmount(userLPBalance.toString())}
+                  className="px-3 sm:px-4 py-2 sm:py-2.5 bg-gradient-to-br from-orange-500/30 to-red-500/30 rounded-xl text-xs sm:text-sm font-bold text-white hover:from-orange-500/40 hover:to-red-500/40 transition-all duration-300 border border-orange-500/50"
+                >
+                  MAX
+                </button>
+              </div>
+            </div>
+
+            {/* Token Receipt Breakdown */}
+            {lpTokenAmount && parseFloat(lpTokenAmount) > 0 && (
+              <div className="bg-gradient-to-br from-orange-500/15 via-red-500/10 to-transparent rounded-2xl p-4 sm:p-5 border border-orange-500/30 space-y-3 backdrop-blur-sm">
+                <div className="text-xs sm:text-sm font-semibold text-white mb-2">You will receive</div>
+                <div className="flex justify-between items-center p-3 bg-black/30 rounded-xl border border-orange-500/20">
+                  <span className="text-sm text-gray-300">{getTokenSymbol()}</span>
+                  <span className="text-xl sm:text-2xl font-bold text-white">{expectedToken1.toFixed(4)}</span>
+                </div>
+                <div className="flex justify-between items-center p-3 bg-black/30 rounded-xl border border-orange-500/20">
+                  <span className="text-sm text-gray-300">USDC</span>
+                  <span className="text-xl sm:text-2xl font-bold text-white">{expectedToken2.toFixed(2)}</span>
+                </div>
+                <div className="pt-2 border-t border-orange-500/20">
+                  <div className="flex justify-between items-center text-xs sm:text-sm">
+                    <span className="text-gray-400">LP Tokens Burned</span>
+                    <span className="text-red-400 font-bold">{lpTokenAmount}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Remove Liquidity Button */}
+            <button
+              onClick={handleRemoveLiquidity}
+              disabled={!connected || removeLiquidityLoading || !lpTokenAmount || parseFloat(lpTokenAmount) <= 0}
+              className={cn(
+                "w-full py-3 sm:py-4 rounded-xl font-bold text-base sm:text-lg transition-all duration-300 shadow-lg",
+                !connected || removeLiquidityLoading || !lpTokenAmount || parseFloat(lpTokenAmount) <= 0
+                  ? "bg-gray-600/20 text-gray-500 cursor-not-allowed"
+                  : "bg-gradient-to-r from-orange-500/40 via-red-500/40 to-orange-500/40 hover:from-orange-500/50 hover:via-red-500/50 hover:to-orange-500/50 border border-orange-500/50 text-white hover:shadow-orange-500/30"
+              )}
+            >
+              {removeLiquidityLoading ? (
+                <div className="flex items-center justify-center gap-2">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                  Removing Liquidity...
+                </div>
+              ) : !connected ? "Connect Wallet" : "Remove Liquidity"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Info Footer */}
+      <div className="px-4 sm:px-6 py-4 bg-black/30 border-t border-[#181825]">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs sm:text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400">AMM Program:</span>
+            <code className="text-green-400 font-mono bg-green-500/10 px-2 py-1 rounded border border-green-500/20">{formatAddress(PROGRAM_IDS.amm)}</code>
+          </div>
+          <div className="text-center text-gray-500">
+            <span className="hidden sm:inline">Constant Product Formula: </span>
+            <span className="font-mono text-[#B8B8FF]">x · y = k</span>
+            <span className="mx-2 hidden sm:inline">|</span>
+            <span className="sm:inline block mt-1 sm:mt-0">Fee: <span className="text-white font-bold">0.3%</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // Advanced Cross-Slab Trading Component
 const CrossSlabTrader = ({ selectedCoin }: { selectedCoin: "ethereum" | "bitcoin" | "solana" }) => {
@@ -3473,7 +4193,31 @@ const StatusFooter = () => {
         </div>
       </div>
 
-      {/* Bottom row - Additional info */}
+      {/* Bottom row - Program IDs */}
+      <div className="px-4 py-2 bg-black/10 border-t border-[#181825]/50">
+        <div className="flex items-center justify-between text-[10px]">
+          <div className="flex items-center space-x-4">
+            <span className="text-gray-500 font-medium">Programs:</span>
+            <div className="flex items-center space-x-1">
+              <span className="text-gray-400">Slab:</span>
+              <code className="text-blue-400 font-mono bg-blue-500/5 px-1.5 py-0.5 rounded">{formatAddress(PROGRAM_IDS.slab)}</code>
+            </div>
+            <div className="flex items-center space-x-1">
+              <span className="text-gray-400">Router:</span>
+              <code className="text-purple-400 font-mono bg-purple-500/5 px-1.5 py-0.5 rounded">{formatAddress(PROGRAM_IDS.router)}</code>
+            </div>
+            <div className="flex items-center space-x-1">
+              <span className="text-gray-400">AMM:</span>
+              <code className="text-green-400 font-mono bg-green-500/5 px-1.5 py-0.5 rounded">{formatAddress(PROGRAM_IDS.amm)}</code>
+            </div>
+            <div className="flex items-center space-x-1">
+              <span className="text-gray-400">Oracle:</span>
+              <code className="text-orange-400 font-mono bg-orange-500/5 px-1.5 py-0.5 rounded">{formatAddress(PROGRAM_IDS.oracle)}</code>
+            </div>
+          </div>
+          <span className="text-gray-500">All programs deployed on Devnet</span>
+        </div>
+      </div>
       
     </motion.div>
   );
@@ -3483,6 +4227,7 @@ export default function TradingDashboard() {
   // Default to ETH chart
   const [selectedCoin, setSelectedCoin] = useState<"ethereum" | "bitcoin" | "solana">("ethereum")
   const [selectedTimeframe, setSelectedTimeframe] = useState<"15" | "60" | "240" | "D">("15")
+  const [ammMode, setAmmMode] = useState<"swap" | "add" | "remove">("swap")
   const wallet = useWallet();
   const { publicKey, connected } = wallet;
   const [faucetLoading, setFaucetLoading] = useState(false);
@@ -3490,6 +4235,7 @@ export default function TradingDashboard() {
   const [toasts, setToasts] = useState<Array<{ id: string; message: string; type: 'success' | 'error' | 'warning' | 'info' }>>([]);
   const [mounted, setMounted] = useState(false);
   const [tradingMode, setTradingMode] = useState<"simple" | "advanced">("simple");
+  const [interfaceMode, setInterfaceMode] = useState<"amm" | "orderbook">("orderbook");
   
   // Share price between chart and order form
   const [chartCurrentPrice, setChartCurrentPrice] = useState<number>(0);
@@ -3502,9 +4248,11 @@ export default function TradingDashboard() {
   const showToast = (message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info') => {
     const id = Date.now().toString();
     setToasts(prev => [...prev, { id, message, type }]);
+    // Longer timeout for messages with transaction signatures (10 seconds)
+    const timeout = message.length > 200 || message.includes('Transaction Signature') ? 10000 : 5000;
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
-    }, 5000);
+    }, timeout);
   };
 
   const closeToast = (id: string) => {
@@ -3669,7 +4417,7 @@ export default function TradingDashboard() {
             )}
           </div>
           
-          <div className="flex items-center gap-2 sm:gap-3 ml-auto flex-wrap">
+          <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3 ml-auto flex-nowrap">
             <Link href="/portfolio">
               <button className="px-2 sm:px-4 py-1.5 sm:py-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/50 text-purple-400 text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5 sm:gap-2">
                 <Wallet className="w-4 h-4" />
@@ -3691,16 +4439,7 @@ export default function TradingDashboard() {
               {mounted ? (
                 <WalletMultiButton />
               ) : (
-                <div style={{ 
-                  height: '32px',
-                  fontSize: '12px',
-                  padding: '0 16px',
-                  backgroundColor: 'rgba(184, 184, 255, 0.1)',
-                  borderRadius: '8px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  color: '#B8B8FF'
-                }}>
+                <div className="px-3 py-2 sm:px-4 sm:py-2 text-xs sm:text-sm bg-[#B8B8FF]/10 rounded-lg flex items-center text-[#B8B8FF] whitespace-nowrap">
                   Loading...
                 </div>
               )}
@@ -3709,10 +4448,52 @@ export default function TradingDashboard() {
         </div>
         
 
+        {/* Interface Mode Toggle - Above Everything */}
+        {tradingMode === "simple" && (
+          <div className="mb-4 max-w-md mx-auto">
+            <div className="bg-gradient-to-br from-black/40 via-black/30 to-black/20 backdrop-blur-xl rounded-2xl border border-[#181825] p-2">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setInterfaceMode("amm")}
+                  className={cn(
+                    "flex-1 py-2 px-3 sm:px-4 rounded-lg text-xs sm:text-sm font-bold transition-all duration-300",
+                    interfaceMode === "amm"
+                      ? "bg-gradient-to-r from-[#B8B8FF]/30 to-purple-500/20 text-white border border-[#B8B8FF]/50 shadow-lg shadow-[#B8B8FF]/10"
+                      : "bg-black/30 text-gray-400 hover:text-white hover:bg-black/50 border border-transparent"
+                  )}
+                >
+                  AMM
+                </button>
+                <button
+                  onClick={() => setInterfaceMode("orderbook")}
+                  className={cn(
+                    "flex-1 py-2 px-3 sm:px-4 rounded-lg text-xs sm:text-sm font-bold transition-all duration-300",
+                    interfaceMode === "orderbook"
+                      ? "bg-gradient-to-r from-cyan-500/30 to-blue-500/20 text-white border border-cyan-500/50 shadow-lg shadow-cyan-500/10"
+                      : "bg-black/30 text-gray-400 hover:text-white hover:bg-black/50 border border-transparent"
+                  )}
+                >
+                  Order Book
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Main Trading Interface */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-[calc(100vh-180px)]">
+        <div className={cn(
+          "grid grid-cols-1 gap-4 min-h-[calc(100vh-180px)]",
+          tradingMode === "simple" && interfaceMode === "amm" 
+            ? "lg:grid-cols-2" 
+            : "lg:grid-cols-12"
+        )}>
           {/* Center - Chart */}
-          <div className="lg:col-span-6 order-1">
+          <div className={cn(
+            "order-1",
+            tradingMode === "simple" && interfaceMode === "amm" 
+              ? "lg:col-span-1" 
+              : "lg:col-span-6"
+          )}>
             <TradingViewChartComponent 
               symbol={selectedSymbol} 
               selectedCoin={selectedCoin}
@@ -3725,15 +4506,84 @@ export default function TradingDashboard() {
             />
           </div>
 
-          {/* Order Book + Transactions (Wider) */}
-          <div className="lg:col-span-3 order-3 lg:order-2">
-            <OrderBook symbol={selectedSymbol} walletAddress={publicKey?.toBase58()} />
-          </div>
+          {/* Order Book + Transactions (Only show in OrderBook mode) */}
+          {(tradingMode === "advanced" || interfaceMode === "orderbook") && (
+            <div className="lg:col-span-3 order-3 lg:order-2">
+              <OrderBook symbol={selectedSymbol} walletAddress={publicKey?.toBase58()} />
+            </div>
+          )}
 
-          {/* Rightmost - Order Form */}
-          <div className="lg:col-span-3 order-2 lg:order-3">
+          {/* Rightmost - Order Form / AMM Interface */}
+          <div className={cn(
+            "order-2 space-y-3",
+            tradingMode === "simple" && interfaceMode === "amm" 
+              ? "lg:col-span-1 lg:order-2" 
+              : "lg:col-span-3 lg:order-3"
+          )}>
             {tradingMode === "simple" ? (
-              <OrderForm selectedCoin={selectedCoin} chartCurrentPrice={chartCurrentPrice} />
+              <>
+                {interfaceMode === "amm" ? (
+                  <>
+                    {/* AMM Mode Selector */}
+                    <div className="bg-gradient-to-br from-black/40 via-black/30 to-black/20 backdrop-blur-xl rounded-2xl border border-[#181825] p-2 sm:p-3">
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => setAmmMode("swap")}
+                          className={cn(
+                            "flex-1 py-2.5 sm:py-3 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300",
+                            ammMode === "swap"
+                              ? "bg-gradient-to-br from-[#B8B8FF]/40 via-purple-500/30 to-[#B8B8FF]/40 text-white border-2 border-[#B8B8FF]/50 shadow-lg shadow-[#B8B8FF]/20"
+                              : "bg-black/40 text-gray-400 hover:text-white hover:bg-black/60 border-2 border-transparent hover:border-[#B8B8FF]/20"
+                          )}
+                        >
+                          <div className="flex items-center justify-center gap-1 sm:gap-1.5">
+                            <ArrowDown className="w-3 h-3 sm:w-4 sm:h-4" />
+                            <span>Swap</span>
+                          </div>
+                        </button>
+                        <button
+                          onClick={() => setAmmMode("add")}
+                          className={cn(
+                            "flex-1 py-2.5 sm:py-3 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300",
+                            ammMode === "add"
+                              ? "bg-gradient-to-br from-green-500/40 via-emerald-500/30 to-green-500/40 text-white border-2 border-green-500/50 shadow-lg shadow-green-500/20"
+                              : "bg-black/40 text-gray-400 hover:text-white hover:bg-black/60 border-2 border-transparent hover:border-green-500/20"
+                          )}
+                        >
+                          <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+                            <TrendingUp className="w-3 h-3 sm:w-4 sm:h-4" />
+                            <span className="hidden md:inline">Add Liquidity</span>
+                            <span className="md:hidden">Add</span>
+                          </div>
+                        </button>
+                        <button
+                          onClick={() => setAmmMode("remove")}
+                          className={cn(
+                            "flex-1 py-2.5 sm:py-3 px-2 sm:px-4 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300",
+                            ammMode === "remove"
+                              ? "bg-gradient-to-br from-orange-500/40 via-red-500/30 to-orange-500/40 text-white border-2 border-orange-500/50 shadow-lg shadow-orange-500/20"
+                              : "bg-black/40 text-gray-400 hover:text-white hover:bg-black/60 border-2 border-transparent hover:border-orange-500/20"
+                          )}
+                        >
+                          <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+                            <TrendingDown className="w-3 h-3 sm:w-4 sm:h-4" />
+                            <span className="hidden md:inline">Remove Liquidity</span>
+                            <span className="md:hidden">Remove</span>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+                    
+                    {/* AMM Interface */}
+                    <AMMInterface selectedCoin={selectedCoin} mode={ammMode} showToast={showToast} chartCurrentPrice={chartCurrentPrice} />
+                  </>
+                ) : (
+                  <>
+                    {/* Order Book Interface (Reserve/Commit) */}
+                    <OrderForm selectedCoin={selectedCoin} chartCurrentPrice={chartCurrentPrice} />
+                  </>
+                )}
+              </>
             ) : (
               <CrossSlabTrader selectedCoin={selectedCoin} />
             )}

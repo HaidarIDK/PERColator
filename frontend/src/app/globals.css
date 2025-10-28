@@ -428,9 +428,33 @@ body {
   position: relative !important;
 }
 
+/* Mobile responsive styles for wallet button */
+@media (max-width: 768px) {
+  .wallet-adapter-button {
+    padding: 0.5rem 0.75rem !important;
+    font-size: 0.75rem !important;
+    border-radius: 8px !important;
+    min-width: auto !important;
+    white-space: nowrap !important;
+  }
+  
+  .wallet-adapter-button i {
+    width: 16px !important;
+    height: 16px !important;
+    margin-right: 0.25rem !important;
+  }
+}
+
 .wallet-adapter-button-trigger-wrapper {
   position: relative !important;
   z-index: 9999 !important;
+  flex-shrink: 0 !important;
+}
+
+@media (max-width: 768px) {
+  .wallet-adapter-button-trigger-wrapper {
+    margin-left: auto !important;
+  }
 }
 
 .wallet-adapter-button:hover {

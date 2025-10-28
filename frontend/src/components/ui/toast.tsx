@@ -33,18 +33,18 @@ export function Toast({ message, type, onClose }: ToastProps) {
       initial={{ opacity: 0, y: -20, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -20, scale: 0.95 }}
-      className={`bg-gradient-to-r ${getColors()} border-2 rounded-lg p-4 shadow-2xl backdrop-blur-lg max-w-md`}
+      className={`bg-gradient-to-r ${getColors()} border-2 rounded-lg p-4 shadow-2xl backdrop-blur-lg max-w-2xl`}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5">
+        <div className="mt-0.5 flex-shrink-0">
           {getIcon()}
         </div>
-        <div className="flex-1">
-          <p className="text-sm font-medium whitespace-pre-line">{message}</p>
+        <div className="flex-1 select-text">
+          <p className="text-sm font-medium whitespace-pre-line break-all">{message}</p>
         </div>
         <button
           onClick={onClose}
-          className="text-gray-400 hover:text-white transition-colors"
+          className="text-gray-400 hover:text-white transition-colors flex-shrink-0"
         >
           <X className="w-4 h-4" />
         </button>

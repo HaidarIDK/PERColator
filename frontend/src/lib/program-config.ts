@@ -6,11 +6,17 @@
 import { PublicKey } from '@solana/web3.js';
 
 export const PROGRAM_IDS = {
-  // Slab Program (v0 deployed)
+  // Slab Program (v0 deployed on devnet)
   slab: new PublicKey(process.env.NEXT_PUBLIC_SLAB_PROGRAM_ID || 'SLAB98WHcToiuUMMX9NQSg5E5iB8CjpK21T4h9ZXiep'),
   
-  // Router Program (v0 deployed)
+  // Router Program (v0 deployed on devnet)
   router: new PublicKey(process.env.NEXT_PUBLIC_ROUTER_PROGRAM_ID || 'RoutqcxkpVH8jJ2cULG9u6WbdRskQwXkJe8CqZehcyr'),
+  
+  // AMM Program (deployed on devnet)
+  amm: new PublicKey(process.env.NEXT_PUBLIC_AMM_PROGRAM_ID || 'AMMjkEeFdasQ8fs9a9HQyJdciPHtDHVEat8yxiXrTP6p'),
+  
+  // Oracle Program (deployed on devnet)
+  oracle: new PublicKey(process.env.NEXT_PUBLIC_ORACLE_PROGRAM_ID || 'oracpooXY8Nnpx2JTLkrLiJsDaMefERUFFRktkAZ3ki'),
 } as const;
 
 export const ACCOUNTS = {

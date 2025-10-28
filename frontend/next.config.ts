@@ -4,6 +4,16 @@ const nextConfig: NextConfig = {
   /* config options here */
   reactStrictMode: true,
   
+  // Performance optimizations
+  swcMinify: true,
+  compress: true,
+  poweredByHeader: false,
+  
+  // Experimental optimizations
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'motion'],
+  },
+  
   // Allow build to proceed with TypeScript/ESLint errors
   typescript: {
     ignoreBuildErrors: true,

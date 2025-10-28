@@ -22,7 +22,7 @@ const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description:
   title,
   description,
 }) => (
-  <div className="group relative">
+  <div className="group relative h-full">
     {/* Decorative corner elements */}
     <div className="absolute -top-2 -left-2 w-3 h-3 sm:w-4 sm:h-4 border-t-2 border-l-2 border-[#B8B8FF] opacity-60 group-hover:opacity-100 transition-opacity duration-300"></div>
     <div className="absolute -top-2 -right-2 w-3 h-3 sm:w-4 sm:h-4 border-t-2 border-r-2 border-[#B8B8FF] opacity-60 group-hover:opacity-100 transition-opacity duration-300"></div>
@@ -30,7 +30,7 @@ const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description:
     <div className="absolute -bottom-2 -right-2 w-3 h-3 sm:w-4 sm:h-4 border-b-2 border-r-2 border-[#B8B8FF] opacity-60 group-hover:opacity-100 transition-opacity duration-300"></div>
     
     {/* Main card container */}
-    <div className="relative rounded-2xl p-4 sm:p-8 border border-[#181825] hover:border-[#B8B8FF]/50 transition-all duration-500 backdrop-blur-sm overflow-hidden bg-black/20">
+    <div className="relative h-full rounded-2xl p-4 sm:p-8 border border-[#181825] hover:border-[#B8B8FF]/50 transition-all duration-500 backdrop-blur-sm overflow-hidden bg-black/20">
      
       
       <div className="absolute inset-0 bg-gradient-to-br from-[#B8B8FF]/0 via-[#B8B8FF]/5 to-[#B8B8FF]/0 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -56,6 +56,7 @@ const FeatureCard: React.FC<{ icon: React.ReactNode; title: string; description:
 
 export default function Home() {
   const [commitsAhead, setCommitsAhead] = useState<number | null>(null)
+  const [showCopiedToast, setShowCopiedToast] = useState(false)
 
   useEffect(() => {
     async function fetchCommitsAhead() {
@@ -71,6 +72,12 @@ export default function Home() {
     fetchCommitsAhead()
   }, [])
 
+  const handleCopyAddress = () => {
+    navigator.clipboard.writeText('CXobgfkQT6wCysehb3abkuimkmx5chS62fZew9NBpump')
+    setShowCopiedToast(true)
+    setTimeout(() => setShowCopiedToast(false), 3000)
+  }
+
   return (
     <div className="relative min-h-screen bg-black overflow-hidden"> 
       <Particles
@@ -84,6 +91,18 @@ export default function Home() {
       
       {/* Floating Navbar */}
       <FloatingNavbar />
+      
+      {/* X/Twitter Button - Top Right */}
+      <a 
+        href="https://x.com/DexPERColator" 
+        target="_blank" 
+        rel="noopener noreferrer"
+        className="fixed top-6 right-6 z-50 w-12 h-12 rounded-full bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/30 border border-[#B8B8FF]/40 flex items-center justify-center hover:from-[#B8B8FF]/30 hover:to-[#B8B8FF]/40 hover:border-[#B8B8FF]/60 transition-all duration-300 hover:shadow-[0_0_20px_rgba(184,184,255,0.5)] backdrop-blur-md"
+      >
+        <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+        </svg>
+      </a>
       
       <main id="home" className="relative z-10 flex flex-col items-center justify-center min-h-screen px-3 sm:px-4 text-center">
         <motion.div
@@ -116,7 +135,7 @@ export default function Home() {
             transition={{ duration: 0.8, delay: 1.2 }}
             className="text-sm sm:text-lg md:text-xl text-gray-400 mb-6 max-w-4xl mx-auto leading-relaxed px-2"
           >
-            a perp DEX program that just uses one slab of memory in an account for everything with its own LP/risk/matching engine
+            A perpetual DEX with multiple slabs - each liquidity provider can have their own 10MB slab with dedicated matching, risk, and LP management.
           </motion.p>
 
           {/* Contract Address */}
@@ -129,15 +148,12 @@ export default function Home() {
             <div className="bg-gradient-to-r from-[#B8B8FF]/20 to-[#B8B8FF]/10 border border-[#B8B8FF]/40 rounded-xl p-3 sm:p-4 backdrop-blur-sm">
               <div className="flex flex-col items-center gap-2">
                 <span className="text-xs font-semibold text-[#B8B8FF] uppercase tracking-wider">Contract Address</span>
-                <div className="flex items-center gap-1 sm:gap-2 bg-black/30 px-2 sm:px-4 py-2 rounded-lg border border-[#B8B8FF]/20 w-full max-w-full overflow-hidden">
-                  <code className="text-[10px] sm:text-sm md:text-base text-white font-mono truncate">
+                <div className="flex items-center justify-center gap-1 sm:gap-2 bg-black/30 px-3 sm:px-4 py-2 rounded-lg border border-[#B8B8FF]/20 mx-auto">
+                  <code className="text-[10px] sm:text-sm md:text-base text-white font-mono text-center">
                     CXobgfkQT6wCysehb3abkuimkmx5chS62fZew9NBpump
                   </code>
                   <button
-                    onClick={() => {
-                      navigator.clipboard.writeText('CXobgfkQT6wCysehb3abkuimkmx5chS62fZew9NBpump')
-                      alert('Contract address copied to clipboard!')
-                    }}
+                    onClick={handleCopyAddress}
                     className="p-1.5 rounded-lg bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 text-[#B8B8FF] transition-all duration-200 flex-shrink-0"
                     title="Copy to clipboard"
                   >
@@ -209,6 +225,12 @@ export default function Home() {
               animate={{ y: [0, 10, 0] }}
               transition={{ duration: 1.5, repeat: Infinity, ease: "easeInOut" }}
               className="flex flex-col items-center gap-2 cursor-pointer"
+              onClick={() => {
+                window.scrollTo({
+                  top: document.documentElement.scrollHeight,
+                  behavior: 'smooth'
+                });
+              }}
             >
               <span className="text-sm text-gray-400">Scroll to explore</span>
               <svg
@@ -617,7 +639,7 @@ export default function Home() {
               </div>
 
               <div className="bg-black/20 backdrop-blur-sm border border-[#B8B8FF]/30 rounded-xl p-6">
-                <h4 className="text-xl font-bold text-[#B8B8FF] mb-4">Technology Stack</h4>
+                <h4 className="text-xl font-bold text-[#B8B8FF] mb-4 text-center">Technology Stack</h4>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="text-center">
                     <div className="text-2xl font-bold text-white">Pinocchio</div>
@@ -644,14 +666,42 @@ export default function Home() {
 
       {/* Footer */}
       <footer id="about" className="relative z-10 text-center py-8 text-gray-500">
-        <motion.p
+        <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.8, delay: 2.8 }}
+          className="flex flex-col items-center gap-4"
         >
-          © 2025 PERColator. Powered by Solana.
-        </motion.p>
+          <a 
+            href="https://x.com/DexPERColator" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="w-10 h-10 rounded-full bg-gradient-to-r from-[#B8B8FF]/10 to-[#B8B8FF]/20 border border-[#B8B8FF]/30 flex items-center justify-center hover:from-[#B8B8FF]/20 hover:to-[#B8B8FF]/30 hover:border-[#B8B8FF]/50 transition-all duration-300 group"
+          >
+            <svg className="w-5 h-5 text-gray-400 group-hover:text-white transition-colors" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+            </svg>
+          </a>
+          <p>© 2025 PERColator. Powered by Solana.</p>
+        </motion.div>
       </footer>
+
+      {/* Copy Toast Notification */}
+      {showCopiedToast && (
+        <motion.div
+          initial={{ opacity: 0, y: 50 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 50 }}
+          className="fixed bottom-8 left-1/2 transform -translate-x-1/2 z-[9999] pointer-events-none"
+        >
+          <div className="bg-gradient-to-r from-green-500/90 to-emerald-500/90 backdrop-blur-lg px-6 py-3 rounded-xl border border-green-400/50 shadow-lg shadow-green-500/20 flex items-center gap-3">
+            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-white font-semibold text-sm">Contract address copied to clipboard!</span>
+          </div>
+        </motion.div>
+      )}
     </div>
   )
 }
