@@ -187,3 +187,282 @@ mod slab_orderbook_tests {
         assert_eq!(slab.book.num_asks, 1);
     }
 }
+
+#[cfg(test)]
+mod adapter_tests {
+    use crate::state::SlabState;
+    use crate::adapter::{process_ob_add, process_remove};
+    use adapter_core::{RiskGuard, Side, ObOrder, RemoveSel};
+    use pinocchio::pubkey::Pubkey;
+    use std::mem;
+
+    /// Helper to create a test SlabState
+    fn create_test_slab() -> SlabState {
+        let mut slab = unsafe { mem::zeroed::<SlabState>() };
+
+        slab.header.lp_owner = Pubkey::from([42u8; 32]);
+        slab.header.router_id = Pubkey::from([1u8; 32]);
+        slab.header.instrument = Pubkey::default();
+        slab.header.seqno = 100;
+        slab.header.mark_px = 60_000_000_000;  // $60k in 1e6 scale
+        slab.header.taker_fee_bps = 10;
+        slab.header.contract_size = 1_000_000;
+        slab.header.bump = 255;
+
+        slab.book.next_order_id = 1;
+        slab.book.num_bids = 0;
+        slab.book.num_asks = 0;
+
+        slab
+    }
+
+    #[test]
+    fn test_adapter_ob_add_single_bid() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Create a buy order: 1 BTC @ $59,900
+        let orders = vec![ObOrder {
+            side: Side::Bid,
+            px_q64: (59_900_000_000u128) << 64,  // $59,900 in Q64
+            qty_q64: (1_000_000u128) << 64,       // 1 BTC in Q64
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let result = process_ob_add(&mut slab, &orders, &guard).unwrap();
+
+        // Verify order was added
+        assert_eq!(slab.book.num_bids, 1);
+        assert_eq!(slab.book.bids[0].price, 59_900_000_000);
+        assert_eq!(slab.book.bids[0].qty, 1_000_000);
+
+        // Verify exposure delta
+        // Bid: positive base (receiving), negative quote (paying)
+        let expected_base = 1_000_000i128 << 64;
+        let expected_quote = -(59_900_000_000i128 * 1_000_000i128 / 1_000_000i128) << 64;
+
+        assert_eq!(result.exposure_delta.base_q64, expected_base);
+        assert_eq!(result.exposure_delta.quote_q64, expected_quote);
+        assert_eq!(result.lp_shares_delta, 0); // OB doesn't use shares
+    }
+
+    #[test]
+    fn test_adapter_ob_add_single_ask() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Create a sell order: 0.5 BTC @ $60,100
+        let orders = vec![ObOrder {
+            side: Side::Ask,
+            px_q64: (60_100_000_000u128) << 64,  // $60,100 in Q64
+            qty_q64: (500_000u128) << 64,         // 0.5 BTC in Q64
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let result = process_ob_add(&mut slab, &orders, &guard).unwrap();
+
+        // Verify order was added
+        assert_eq!(slab.book.num_asks, 1);
+        assert_eq!(slab.book.asks[0].price, 60_100_000_000);
+        assert_eq!(slab.book.asks[0].qty, 500_000);
+
+        // Verify exposure delta
+        // Ask: negative base (selling), positive quote (receiving)
+        let expected_base = -(500_000i128 << 64);
+        let expected_quote = (60_100_000_000i128 * 500_000i128 / 1_000_000i128) << 64;
+
+        assert_eq!(result.exposure_delta.base_q64, expected_base);
+        assert_eq!(result.exposure_delta.quote_q64, expected_quote);
+    }
+
+    #[test]
+    fn test_adapter_ob_add_multiple_orders() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Add multiple orders at different price levels
+        let orders = vec![
+            ObOrder {
+                side: Side::Bid,
+                px_q64: (59_900_000_000u128) << 64,
+                qty_q64: (1_000_000u128) << 64,
+                tif_slots: 1000,
+                _padding: [0; 4],
+            },
+            ObOrder {
+                side: Side::Ask,
+                px_q64: (60_100_000_000u128) << 64,
+                qty_q64: (1_000_000u128) << 64,
+                tif_slots: 1000,
+                _padding: [0; 4],
+            },
+            ObOrder {
+                side: Side::Bid,
+                px_q64: (59_800_000_000u128) << 64,
+                qty_q64: (500_000u128) << 64,
+                tif_slots: 1000,
+                _padding: [0; 4],
+            },
+        ];
+
+        let result = process_ob_add(&mut slab, &orders, &guard).unwrap();
+
+        // Verify orders were added
+        assert_eq!(slab.book.num_bids, 2);
+        assert_eq!(slab.book.num_asks, 1);
+
+        // Orders should exist
+        assert!(result.exposure_delta.base_q64 != 0 || result.exposure_delta.quote_q64 != 0);
+    }
+
+    #[test]
+    fn test_adapter_remove_by_ids() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Add a bid order
+        let orders = vec![ObOrder {
+            side: Side::Bid,
+            px_q64: (59_900_000_000u128) << 64,
+            qty_q64: (1_000_000u128) << 64,
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let add_result = process_ob_add(&mut slab, &orders, &guard).unwrap();
+        assert_eq!(slab.book.num_bids, 1);
+
+        // Get the order ID
+        let order_id = slab.book.bids[0].order_id as u128;
+
+        // Remove the order by ID
+        let selector = RemoveSel::ObByIds { ids: vec![order_id] };
+        let remove_result = process_remove(&mut slab, &selector, &guard).unwrap();
+
+        // Verify order was removed
+        assert_eq!(slab.book.num_bids, 0);
+
+        // Verify exposure delta is opposite of addition
+        // Add gave: base=+1_000_000, quote=-59_900_000_000
+        // Remove should give: base=-1_000_000, quote=+59_900_000_000
+        assert_eq!(remove_result.exposure_delta.base_q64, -add_result.exposure_delta.base_q64);
+        assert_eq!(remove_result.exposure_delta.quote_q64, -add_result.exposure_delta.quote_q64);
+    }
+
+    #[test]
+    fn test_adapter_remove_all() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Add multiple orders
+        let orders = vec![
+            ObOrder {
+                side: Side::Bid,
+                px_q64: (59_900_000_000u128) << 64,
+                qty_q64: (1_000_000u128) << 64,
+                tif_slots: 1000,
+                _padding: [0; 4],
+            },
+            ObOrder {
+                side: Side::Ask,
+                px_q64: (60_100_000_000u128) << 64,
+                qty_q64: (500_000u128) << 64,
+                tif_slots: 1000,
+                _padding: [0; 4],
+            },
+        ];
+
+        process_ob_add(&mut slab, &orders, &guard).unwrap();
+        assert_eq!(slab.book.num_bids, 1);
+        assert_eq!(slab.book.num_asks, 1);
+
+        // Remove all orders
+        let selector = RemoveSel::ObAll;
+        let result = process_remove(&mut slab, &selector, &guard).unwrap();
+
+        // Verify all orders were removed
+        assert_eq!(slab.book.num_bids, 0);
+        assert_eq!(slab.book.num_asks, 0);
+
+        // Exposure delta should be non-zero (unwinding positions)
+        assert!(result.exposure_delta.base_q64 != 0 || result.exposure_delta.quote_q64 != 0);
+    }
+
+    #[test]
+    fn test_adapter_invalid_price() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Try to add order with price=0 (invalid)
+        let orders = vec![ObOrder {
+            side: Side::Bid,
+            px_q64: 0,  // Invalid: price = 0
+            qty_q64: (1_000_000u128) << 64,
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let result = process_ob_add(&mut slab, &orders, &guard);
+
+        // Should return InvalidPrice error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adapter_invalid_quantity() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Try to add order with qty=0 (invalid)
+        let orders = vec![ObOrder {
+            side: Side::Ask,
+            px_q64: (60_000_000_000u128) << 64,
+            qty_q64: 0,  // Invalid: qty = 0
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let result = process_ob_add(&mut slab, &orders, &guard);
+
+        // Should return InvalidQuantity error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adapter_exposure_symmetry() {
+        let mut slab = create_test_slab();
+        let guard = RiskGuard::permissive();
+
+        // Add an order
+        let orders = vec![ObOrder {
+            side: Side::Ask,
+            px_q64: (60_100_000_000u128) << 64,
+            qty_q64: (500_000u128) << 64,
+            tif_slots: 1000,
+            _padding: [0; 4],
+        }];
+
+        let add_result = process_ob_add(&mut slab, &orders, &guard).unwrap();
+
+        // Store exposure from addition
+        let add_base = add_result.exposure_delta.base_q64;
+        let add_quote = add_result.exposure_delta.quote_q64;
+
+        // Get order ID and remove it
+        let order_id = slab.book.asks[0].order_id as u128;
+        let selector = RemoveSel::ObByIds { ids: vec![order_id] };
+        let remove_result = process_remove(&mut slab, &selector, &guard).unwrap();
+
+        // Verify exposure deltas are exact opposites
+        assert_eq!(remove_result.exposure_delta.base_q64, -add_base);
+        assert_eq!(remove_result.exposure_delta.quote_q64, -add_quote);
+
+        // Net exposure should be zero
+        let net_base = add_base + remove_result.exposure_delta.base_q64;
+        let net_quote = add_quote + remove_result.exposure_delta.quote_q64;
+        assert_eq!(net_base, 0);
+        assert_eq!(net_quote, 0);
+    }
+}

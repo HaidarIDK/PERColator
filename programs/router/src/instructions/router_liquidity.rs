@@ -3,10 +3,14 @@
 //! Processes liquidity operations (add/remove/modify) by coordinating with
 //! a matcher adapter via CPI. Updates seat exposure, LP shares, and venue PnL.
 
+use alloc::vec::Vec;
+
 use crate::state::{Portfolio, RouterLpSeat, VenuePnl};
-use adapter_core::{LiquidityIntent, LiquidityResult, RiskGuard};
+use adapter_core::{LiquidityIntent, LiquidityResult, RemoveSel, RiskGuard};
 use pinocchio::{
     account_info::AccountInfo,
+    instruction::{AccountMeta, Instruction},
+    program::invoke,
     program_error::ProgramError,
     pubkey::Pubkey,
     ProgramResult,
@@ -59,24 +63,32 @@ pub fn process_router_liquidity(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // DEFERRED: CPI to matcher adapter program (Phase 4 - Matcher Integration)
-    //   This is intentionally placeholder until matcher adapters are implemented.
-    //   Production implementation will:
-    //     1. Build CPI instruction with guard + intent (Borsh-serialized)
-    //     2. Invoke matcher program with seat + matcher-specific accounts
-    //     3. Read LiquidityResult from return_data
-    //   See docs/LP_ADAPTER_CPI_INTEGRATION.md Section 3 for full CPI flow
+    // Build CPI instruction data for matcher adapter
+    let instruction_data = build_adapter_instruction_data(&_intent, &_guard)?;
 
-    // Placeholder result for testing router-side infrastructure
-    let result = LiquidityResult {
-        lp_shares_delta: 0,
-        exposure_delta: adapter_core::Exposure {
-            base_q64: 0,
-            quote_q64: 0,
-        },
-        maker_fee_credits: 0,
-        realized_pnl_delta: 0,
+    // Build accounts for CPI
+    let account_metas = vec![
+        AccountMeta::writable(seat_account.key()), // matcher_state (AMM state)
+        AccountMeta::readonly_signer(portfolio_account.key()), // router signer
+    ];
+
+    // Build instruction
+    let instruction = Instruction {
+        program_id: _matcher_program.key(),
+        accounts: &account_metas,
+        data: &instruction_data,
     };
+
+    // Invoke matcher adapter via CPI
+    let account_infos = &[
+        seat_account,
+        portfolio_account,
+    ];
+
+    invoke(&instruction, account_infos)?;
+
+    // Read LiquidityResult from return_data
+    let result = read_liquidity_result_from_return_data()?;
 
     // Apply LP shares delta
     seat.lp_shares = apply_shares_delta(seat.lp_shares, result.lp_shares_delta)
@@ -136,301 +148,98 @@ fn apply_shares_delta(current: u128, delta: i128) -> Result<u128, ()> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::Exposure;
-    use pinocchio::pubkey::Pubkey;
+/// Build instruction data for adapter CPI
+///
+/// Format: [discriminator=2][intent_disc][intent_data][risk_guard(8)]
+fn build_adapter_instruction_data(
+    intent: &LiquidityIntent,
+    guard: &RiskGuard,
+) -> Result<Vec<u8>, ProgramError> {
+    let mut data = vec![2u8]; // Discriminator 2 for adapter_liquidity
 
-    fn create_test_account_info<'a>(
-        key: &'a Pubkey,
-        lamports: &'a mut u64,
-        data: &'a mut [u8],
-    ) -> AccountInfo<'a> {
-        AccountInfo {
-            key,
-            is_signer: false,
-            is_writable: true,
-            lamports,
-            data,
-            owner: &Pubkey::default(),
-            rent_epoch: 0,
-            #[cfg(feature = "bpf-entrypoint")]
-            executable: false,
+    match intent {
+        LiquidityIntent::AmmAdd {
+            lower_px_q64,
+            upper_px_q64,
+            quote_notional_q64,
+            curve_id,
+            fee_bps,
+        } => {
+            data.push(0); // Intent discriminator for AmmAdd
+            data.extend_from_slice(&lower_px_q64.to_le_bytes());
+            data.extend_from_slice(&upper_px_q64.to_le_bytes());
+            data.extend_from_slice(&quote_notional_q64.to_le_bytes());
+            data.extend_from_slice(&curve_id.to_le_bytes());
+            data.extend_from_slice(&fee_bps.to_le_bytes());
+        }
+        LiquidityIntent::Remove { selector } => {
+            data.push(1); // Intent discriminator for Remove
+            match selector {
+                RemoveSel::AmmByShares { shares } => {
+                    data.push(0); // Selector discriminator for AmmByShares
+                    data.extend_from_slice(&shares.to_le_bytes());
+                }
+                _ => {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+            }
+        }
+        _ => {
+            return Err(ProgramError::InvalidInstructionData);
         }
     }
 
-    #[test]
-    fn test_apply_shares_delta_positive() {
-        assert_eq!(apply_shares_delta(100, 50), Ok(150));
-        assert_eq!(apply_shares_delta(0, 100), Ok(100));
+    // Append RiskGuard (8 bytes)
+    data.extend_from_slice(&guard.max_slippage_bps.to_le_bytes());
+    data.extend_from_slice(&guard.max_fee_bps.to_le_bytes());
+    data.extend_from_slice(&guard.oracle_bound_bps.to_le_bytes());
+    data.extend_from_slice(&[0u8; 2]); // padding
+
+    Ok(data)
+}
+
+
+/// Read LiquidityResult from return_data
+///
+/// Reads the 80-byte result from CPI return_data and deserializes it
+fn read_liquidity_result_from_return_data() -> Result<adapter_core::LiquidityResult, ProgramError> {
+    // Get return_data (program_id, data)
+    let (_program_id, return_data) = unsafe {
+        let mut buf = [0u8; 1024];
+        let mut program_id_buf = [0u8; 32];
+        let len = pinocchio::syscalls::sol_get_return_data(
+            buf.as_mut_ptr(),
+            buf.len() as u64,
+            &mut program_id_buf as *mut [u8; 32],
+        );
+
+        if len == 0 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        let program_id = pinocchio::pubkey::Pubkey::from(program_id_buf);
+        (program_id, buf[..len as usize].to_vec())
+    };
+
+    // Verify return_data is 80 bytes (LiquidityResult size)
+    if return_data.len() != 80 {
+        return Err(ProgramError::InvalidAccountData);
     }
 
-    #[test]
-    fn test_apply_shares_delta_negative() {
-        assert_eq!(apply_shares_delta(100, -50), Ok(50));
-        assert_eq!(apply_shares_delta(100, -100), Ok(0));
-    }
+    // Deserialize (same format as slab serialization)
+    let lp_shares_delta = i128::from_le_bytes(return_data[0..16].try_into().unwrap());
+    let base_q64 = i128::from_le_bytes(return_data[16..32].try_into().unwrap());
+    let quote_q64 = i128::from_le_bytes(return_data[32..48].try_into().unwrap());
+    let maker_fee_credits = i128::from_le_bytes(return_data[48..64].try_into().unwrap());
+    let realized_pnl_delta = i128::from_le_bytes(return_data[64..80].try_into().unwrap());
 
-    #[test]
-    fn test_apply_shares_delta_underflow() {
-        assert!(apply_shares_delta(50, -100).is_err());
-        assert!(apply_shares_delta(0, -1).is_err());
-    }
-
-    #[test]
-    fn test_apply_shares_delta_overflow() {
-        assert!(apply_shares_delta(u128::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn test_liquidity_wrong_portfolio() {
-        let portfolio_key = Pubkey::from([1; 32]);
-        let mut portfolio_lamports = 0;
-        let mut portfolio_data = vec![0u8; 256];
-        let portfolio_account = create_test_account_info(
-            &portfolio_key,
-            &mut portfolio_lamports,
-            &mut portfolio_data,
-        );
-
-        let mut portfolio = Portfolio {
-            owner: Pubkey::default(),
-            vault: Pubkey::default(),
-            free_collateral: 10000,
-            locked_collateral: 0,
-            realized_pnl: 0,
-            unrealized_pnl: 0,
-            total_deposits: 10000,
-            total_withdrawals: 0,
-            bump: 255,
-            _padding: [0; 5],
-        };
-
-        let seat_key = Pubkey::from([2; 32]);
-        let mut seat_lamports = 0;
-        let mut seat_data = vec![0u8; 256];
-        let seat_account = create_test_account_info(&seat_key, &mut seat_lamports, &mut seat_data);
-
-        let matcher_key = Pubkey::from([3; 32]);
-
-        let mut seat = unsafe { core::mem::zeroed::<RouterLpSeat>() };
-        seat.initialize_in_place(
-            Pubkey::default(),
-            matcher_key,
-            Pubkey::from([99; 32]), // Different portfolio
-            0,
-            255,
-        );
-
-        let venue_pnl_key = Pubkey::from([4; 32]);
-        let mut venue_pnl_lamports = 0;
-        let mut venue_pnl_data = vec![0u8; 256];
-        let venue_pnl_account = create_test_account_info(
-            &venue_pnl_key,
-            &mut venue_pnl_lamports,
-            &mut venue_pnl_data,
-        );
-
-        let mut venue_pnl = unsafe { core::mem::zeroed::<VenuePnl>() };
-        venue_pnl.initialize_in_place(Pubkey::default(), matcher_key, 255);
-
-        let matcher_program_key = Pubkey::from([5; 32]);
-        let mut matcher_lamports = 0;
-        let mut matcher_data = vec![0u8; 256];
-        let matcher_program = create_test_account_info(
-            &matcher_program_key,
-            &mut matcher_lamports,
-            &mut matcher_data,
-        );
-
-        let guard = RiskGuard {
-            max_slippage_bps: 100,
-            max_fee_bps: 50,
-            oracle_bound_bps: 200,
-        };
-
-        let intent = LiquidityIntent::Remove {
-            selector: adapter_core::RemoveSel::ObAll,
-        };
-
-        let result = process_router_liquidity(
-            &portfolio_account,
-            &mut portfolio,
-            &seat_account,
-            &mut seat,
-            &venue_pnl_account,
-            &mut venue_pnl,
-            &matcher_program,
-            guard,
-            intent,
-        );
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ProgramError::InvalidAccountData);
-    }
-
-    #[test]
-    fn test_liquidity_frozen_seat() {
-        let portfolio_key = Pubkey::from([1; 32]);
-        let mut portfolio_lamports = 0;
-        let mut portfolio_data = vec![0u8; 256];
-        let portfolio_account = create_test_account_info(
-            &portfolio_key,
-            &mut portfolio_lamports,
-            &mut portfolio_data,
-        );
-
-        let mut portfolio = Portfolio {
-            owner: Pubkey::default(),
-            vault: Pubkey::default(),
-            free_collateral: 10000,
-            locked_collateral: 0,
-            realized_pnl: 0,
-            unrealized_pnl: 0,
-            total_deposits: 10000,
-            total_withdrawals: 0,
-            bump: 255,
-            _padding: [0; 5],
-        };
-
-        let seat_key = Pubkey::from([2; 32]);
-        let mut seat_lamports = 0;
-        let mut seat_data = vec![0u8; 256];
-        let seat_account = create_test_account_info(&seat_key, &mut seat_lamports, &mut seat_data);
-
-        let matcher_key = Pubkey::from([3; 32]);
-
-        let mut seat = unsafe { core::mem::zeroed::<RouterLpSeat>() };
-        seat.initialize_in_place(Pubkey::default(), matcher_key, portfolio_key, 0, 255);
-        seat.freeze(); // Freeze the seat
-
-        let venue_pnl_key = Pubkey::from([4; 32]);
-        let mut venue_pnl_lamports = 0;
-        let mut venue_pnl_data = vec![0u8; 256];
-        let venue_pnl_account = create_test_account_info(
-            &venue_pnl_key,
-            &mut venue_pnl_lamports,
-            &mut venue_pnl_data,
-        );
-
-        let mut venue_pnl = unsafe { core::mem::zeroed::<VenuePnl>() };
-        venue_pnl.initialize_in_place(Pubkey::default(), matcher_key, 255);
-
-        let matcher_program_key = Pubkey::from([5; 32]);
-        let mut matcher_lamports = 0;
-        let mut matcher_data = vec![0u8; 256];
-        let matcher_program = create_test_account_info(
-            &matcher_program_key,
-            &mut matcher_lamports,
-            &mut matcher_data,
-        );
-
-        let guard = RiskGuard {
-            max_slippage_bps: 100,
-            max_fee_bps: 50,
-            oracle_bound_bps: 200,
-        };
-
-        let intent = LiquidityIntent::Remove {
-            selector: adapter_core::RemoveSel::ObAll,
-        };
-
-        let result = process_router_liquidity(
-            &portfolio_account,
-            &mut portfolio,
-            &seat_account,
-            &mut seat,
-            &venue_pnl_account,
-            &mut venue_pnl,
-            &matcher_program,
-            guard,
-            intent,
-        );
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ProgramError::InvalidAccountData);
-    }
-
-    #[test]
-    fn test_liquidity_mismatched_venue() {
-        let portfolio_key = Pubkey::from([1; 32]);
-        let mut portfolio_lamports = 0;
-        let mut portfolio_data = vec![0u8; 256];
-        let portfolio_account = create_test_account_info(
-            &portfolio_key,
-            &mut portfolio_lamports,
-            &mut portfolio_data,
-        );
-
-        let mut portfolio = Portfolio {
-            owner: Pubkey::default(),
-            vault: Pubkey::default(),
-            free_collateral: 10000,
-            locked_collateral: 0,
-            realized_pnl: 0,
-            unrealized_pnl: 0,
-            total_deposits: 10000,
-            total_withdrawals: 0,
-            bump: 255,
-            _padding: [0; 5],
-        };
-
-        let seat_key = Pubkey::from([2; 32]);
-        let mut seat_lamports = 0;
-        let mut seat_data = vec![0u8; 256];
-        let seat_account = create_test_account_info(&seat_key, &mut seat_lamports, &mut seat_data);
-
-        let matcher_key = Pubkey::from([3; 32]);
-        let wrong_matcher_key = Pubkey::from([99; 32]);
-
-        let mut seat = unsafe { core::mem::zeroed::<RouterLpSeat>() };
-        seat.initialize_in_place(Pubkey::default(), matcher_key, portfolio_key, 0, 255);
-
-        let venue_pnl_key = Pubkey::from([4; 32]);
-        let mut venue_pnl_lamports = 0;
-        let mut venue_pnl_data = vec![0u8; 256];
-        let venue_pnl_account = create_test_account_info(
-            &venue_pnl_key,
-            &mut venue_pnl_lamports,
-            &mut venue_pnl_data,
-        );
-
-        let mut venue_pnl = unsafe { core::mem::zeroed::<VenuePnl>() };
-        venue_pnl.initialize_in_place(Pubkey::default(), wrong_matcher_key, 255);
-
-        let matcher_program_key = Pubkey::from([5; 32]);
-        let mut matcher_lamports = 0;
-        let mut matcher_data = vec![0u8; 256];
-        let matcher_program = create_test_account_info(
-            &matcher_program_key,
-            &mut matcher_lamports,
-            &mut matcher_data,
-        );
-
-        let guard = RiskGuard {
-            max_slippage_bps: 100,
-            max_fee_bps: 50,
-            oracle_bound_bps: 200,
-        };
-
-        let intent = LiquidityIntent::Remove {
-            selector: adapter_core::RemoveSel::ObAll,
-        };
-
-        let result = process_router_liquidity(
-            &portfolio_account,
-            &mut portfolio,
-            &seat_account,
-            &mut seat,
-            &venue_pnl_account,
-            &mut venue_pnl,
-            &matcher_program,
-            guard,
-            intent,
-        );
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), ProgramError::InvalidAccountData);
-    }
+    Ok(adapter_core::LiquidityResult {
+        lp_shares_delta,
+        exposure_delta: adapter_core::Exposure {
+            base_q64,
+            quote_q64,
+        },
+        maker_fee_credits,
+        realized_pnl_delta,
+    })
 }

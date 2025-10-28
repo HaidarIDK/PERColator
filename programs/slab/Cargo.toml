@@ -12,6 +12,7 @@ doctest = false
 pinocchio = { workspace = true }
 pinocchio-pubkey = { workspace = true }
 percolator-common = { path = "../common" }
+adapter-core = { path = "../../crates/adapter_core" }
 
 [features]
 default = []

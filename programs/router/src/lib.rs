@@ -1,5 +1,8 @@
 #![cfg_attr(target_os = "solana", no_std)]
 
+#[macro_use]
+extern crate alloc;
+
 pub mod state;
 pub mod instructions;
 pub mod pda;

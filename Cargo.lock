@@ -3243,6 +3243,7 @@ dependencies = [
 name = "percolator-slab"
 version = "0.1.0"
 dependencies = [
+ "adapter-core",
  "percolator-common",
  "pinocchio",
  "pinocchio-pubkey",

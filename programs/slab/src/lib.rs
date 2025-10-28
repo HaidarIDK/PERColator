@@ -3,6 +3,7 @@
 pub mod state;
 pub mod instructions;
 pub mod pda;
+pub mod adapter;
 
 // Always expose entrypoint for testing
 pub mod entrypoint;
