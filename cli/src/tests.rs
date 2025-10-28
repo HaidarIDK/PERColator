@@ -63,7 +63,7 @@ pub async fn run_smoke_tests(config: &NetworkConfig) -> Result<()> {
         }
     }
 
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(1000));
 
     // Test 3: Deposit
     match test_deposit(config).await {
@@ -77,7 +77,8 @@ pub async fn run_smoke_tests(config: &NetworkConfig) -> Result<()> {
         }
     }
 
-    thread::sleep(Duration::from_millis(500));
+    // Give extra time for deposit to fully settle before withdrawal
+    thread::sleep(Duration::from_millis(1500));
 
     // Test 4: Withdraw
     match test_withdraw(config).await {
@@ -91,7 +92,7 @@ pub async fn run_smoke_tests(config: &NetworkConfig) -> Result<()> {
         }
     }
 
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(1000));
 
     // Test 5: Slab creation
     match test_slab_create(config).await {
@@ -639,7 +640,7 @@ async fn test_portfolio_init(config: &NetworkConfig) -> Result<()> {
 
 /// Test deposit functionality
 async fn test_deposit(config: &NetworkConfig) -> Result<()> {
-    let deposit_amount = LAMPORTS_PER_SOL / 10; // 0.1 SOL
+    let deposit_amount = LAMPORTS_PER_SOL / 5; // 0.2 SOL (ensures enough for withdrawal + rent)
     margin::deposit_collateral(config, deposit_amount, None).await?;
     Ok(())
 }

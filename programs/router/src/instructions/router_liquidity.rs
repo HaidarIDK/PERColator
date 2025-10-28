@@ -108,13 +108,12 @@ pub fn process_router_liquidity(
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Apply venue PnL deltas
-    // Note: venue_fees are tracked separately from LiquidityResult
-    // For now, we pass 0 as placeholder - in production this would be calculated
-    // based on the actual venue fee structure
+    // Note: venue_fees_delta is 0 for LP operations (placing/canceling orders)
+    // Venue fees are charged when takers execute against LP orders, tracked via commit_fill
     venue_pnl
         .apply_deltas(
             result.maker_fee_credits,
-            0, // venue_fees_delta placeholder
+            0, // No venue fees on LP operations
             result.realized_pnl_delta,
         )
         .map_err(|_| ProgramError::ArithmeticOverflow)?;
