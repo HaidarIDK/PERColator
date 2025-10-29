@@ -270,6 +270,99 @@ pub fn release_verified(
     Ok(())
 }
 
+/// Calculate redemption value for burning LP shares (VERIFIED)
+///
+/// Computes the collateral value received when burning LP shares.
+/// Both shares_to_burn and share_price are scaled by 1e6.
+///
+/// # Arguments
+/// * `shares_to_burn` - Number of shares to burn (u128, scaled by 1e6)
+/// * `current_share_price` - Current price per share (u64, scaled by 1e6)
+///
+/// # Returns
+/// * `Ok(redemption_value)` - Collateral value in base units (i128)
+/// * `Err("Overflow")` if calculation would overflow
+///
+/// # Verified Properties
+/// * LP6: No overflow in redemption calculation
+/// * LP7: Redemption value is proportional to shares and price
+/// * Result is always non-negative for valid inputs
+pub fn calculate_redemption_value_verified(
+    shares_to_burn: u128,
+    current_share_price: u64,
+) -> Result<i128, &'static str> {
+    // Calculate: (shares * price) / 1e6
+    // Both are scaled by 1e6, so we divide by 1e6 to get base units
+
+    // First multiply in u128 to detect overflow
+    let product = shares_to_burn
+        .checked_mul(current_share_price as u128)
+        .ok_or("Overflow")?;
+
+    // Divide by scale factor
+    let redemption_u128 = product / 1_000_000;
+
+    // Convert to i128 (saturate at i128::MAX if too large)
+    if redemption_u128 > i128::MAX as u128 {
+        return Err("Overflow");
+    }
+
+    Ok(redemption_u128 as i128)
+}
+
+/// Calculate proportional margin reduction when reducing position (VERIFIED)
+///
+/// When a user reduces their LP position (burns shares or cancels orders),
+/// their margin requirement should be reduced proportionally.
+///
+/// # Arguments
+/// * `initial_margin` - Initial margin requirement (u128)
+/// * `remaining_ratio` - Ratio of position remaining (u128, scaled by 1e6)
+///                       e.g., 500_000 = 50% remaining
+///
+/// # Returns
+/// * `Ok(new_margin)` - New margin requirement (u128)
+/// * `Err("Invalid ratio")` if ratio > 1e6 (> 100%)
+/// * `Err("Overflow")` if calculation would overflow
+///
+/// # Verified Properties
+/// * LP8: New margin <= initial margin (monotonic reduction)
+/// * LP9: If ratio = 0, then margin = 0
+/// * LP10: If ratio = 1e6 (100%), then margin = initial_margin
+/// * No overflow in multiplication or division
+pub fn proportional_margin_reduction_verified(
+    initial_margin: u128,
+    remaining_ratio: u128,
+) -> Result<u128, &'static str> {
+    // Validate ratio is <= 100%
+    if remaining_ratio > 1_000_000 {
+        return Err("Invalid ratio");
+    }
+
+    // Edge case: if ratio is 0, margin is 0
+    if remaining_ratio == 0 {
+        return Ok(0);
+    }
+
+    // Edge case: if ratio is 100%, margin unchanged
+    if remaining_ratio == 1_000_000 {
+        return Ok(initial_margin);
+    }
+
+    // Calculate: initial_margin * remaining_ratio / 1e6
+    let product = initial_margin
+        .checked_mul(remaining_ratio)
+        .ok_or("Overflow")?;
+
+    let new_margin = product / 1_000_000;
+
+    // Verify monotonicity: new_margin <= initial_margin
+    // This is guaranteed by ratio <= 1e6, but we assert it for safety
+    debug_assert!(new_margin <= initial_margin);
+
+    Ok(new_margin)
+}
+
 // ============================================================================
 // Kani Proof Harnesses
 // ============================================================================
@@ -468,6 +561,94 @@ mod kani_proofs {
                 assert!(seat.reserved_quote_q64 == seat_quote_before - quote_amount);
             }
         }
+    }
+
+    /// Proof LP6-LP7: Redemption value calculation is correct and safe
+    ///
+    /// Property: calculate_redemption_value never overflows and correctly
+    /// computes (shares * price) / 1e6
+    #[kani::proof]
+    fn proof_lp6_lp7_redemption_value() {
+        let shares: u128 = kani::any();
+        let price: u64 = kani::any();
+
+        // Bound inputs to make proof tractable
+        kani::assume(shares < (1u128 << 64));
+        kani::assume(price < (1u64 << 32));
+
+        let result = calculate_redemption_value_verified(shares, price);
+
+        match result {
+            Ok(redemption) => {
+                // Verify redemption is non-negative
+                assert!(redemption >= 0);
+
+                // Verify correctness: redemption = (shares * price) / 1e6
+                let product = shares * (price as u128);
+                let expected = product / 1_000_000;
+
+                // Should fit in i128
+                assert!(expected <= i128::MAX as u128);
+                assert!(redemption == expected as i128);
+            }
+            Err(_) => {
+                // If error, verify overflow would occur
+                let product_check = shares.checked_mul(price as u128);
+                if let Some(product) = product_check {
+                    let redemption_u128 = product / 1_000_000;
+                    assert!(redemption_u128 > i128::MAX as u128);
+                } else {
+                    // Multiplication overflowed
+                    assert!(true);
+                }
+            }
+        }
+    }
+
+    /// Proof LP8: Proportional margin reduction is monotonic
+    ///
+    /// Property: new_margin <= initial_margin for all valid ratios
+    #[kani::proof]
+    fn proof_lp8_proportional_margin_monotonic() {
+        let initial_margin: u128 = kani::any();
+        let ratio: u128 = kani::any();
+
+        // Bound inputs
+        kani::assume(initial_margin < (1u128 << 100));
+        kani::assume(ratio <= 1_000_000); // Valid ratio
+
+        let result = proportional_margin_reduction_verified(initial_margin, ratio);
+
+        if let Ok(new_margin) = result {
+            // Monotonicity: new_margin <= initial_margin
+            assert!(new_margin <= initial_margin);
+        }
+    }
+
+    /// Proof LP9: Zero ratio gives zero margin
+    ///
+    /// Property: If ratio = 0, then margin = 0
+    #[kani::proof]
+    fn proof_lp9_zero_ratio_zero_margin() {
+        let initial_margin: u128 = kani::any();
+        kani::assume(initial_margin < (1u128 << 100));
+
+        let result = proportional_margin_reduction_verified(initial_margin, 0);
+
+        assert!(result == Ok(0));
+    }
+
+    /// Proof LP10: Full ratio preserves margin
+    ///
+    /// Property: If ratio = 1e6 (100%), then margin = initial_margin
+    #[kani::proof]
+    fn proof_lp10_full_ratio_preserves_margin() {
+        let initial_margin: u128 = kani::any();
+        kani::assume(initial_margin < (1u128 << 100));
+
+        let result = proportional_margin_reduction_verified(initial_margin, 1_000_000);
+
+        assert!(result == Ok(initial_margin));
     }
 }
 
