@@ -391,6 +391,39 @@ pub fn apply_shares_delta_verified(current: u128, delta: i128) -> Result<u128, &
     model_safety::lp_operations::apply_shares_delta_verified(current, delta)
 }
 
+/// Apply venue PnL deltas using verified logic (VERIFIED)
+///
+/// Wraps the formally verified venue PnL delta function from model_safety.
+/// Properties LP2-LP3: Overflow-safe PnL accounting, conserves net PnL.
+pub fn apply_venue_pnl_deltas_verified(
+    pnl: &mut crate::state::VenuePnl,
+    maker_fee_credits_delta: i128,
+    venue_fees_delta: i128,
+    realized_pnl_delta: i128,
+) -> Result<(), &'static str> {
+    // Convert production VenuePnl to model VenuePnl
+    let mut model_pnl = model_safety::lp_operations::VenuePnl {
+        maker_fee_credits: pnl.maker_fee_credits,
+        venue_fees: pnl.venue_fees,
+        realized_pnl: pnl.realized_pnl,
+    };
+
+    // Apply deltas using verified function
+    model_safety::lp_operations::apply_venue_pnl_deltas_verified(
+        &mut model_pnl,
+        maker_fee_credits_delta,
+        venue_fees_delta,
+        realized_pnl_delta,
+    )?;
+
+    // Write back to production state
+    pnl.maker_fee_credits = model_pnl.maker_fee_credits;
+    pnl.venue_fees = model_pnl.venue_fees;
+    pnl.realized_pnl = model_pnl.realized_pnl;
+
+    Ok(())
+}
+
 // ============================================================================
 // Cross-Slab Execution Bridge Functions
 // ============================================================================

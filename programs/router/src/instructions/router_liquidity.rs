@@ -112,16 +112,17 @@ pub fn process_router_liquidity(
         .checked_add(result.exposure_delta.quote_q64)
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Apply venue PnL deltas
+    // Apply venue PnL deltas using FORMALLY VERIFIED logic
+    // Properties LP2-LP3: Overflow-safe PnL accounting, conserves net PnL
     // Note: venue_fees_delta is 0 for LP operations (placing/canceling orders)
     // Venue fees are charged when takers execute against LP orders, tracked via commit_fill
-    venue_pnl
-        .apply_deltas(
-            result.maker_fee_credits,
-            0, // No venue fees on LP operations
-            result.realized_pnl_delta,
-        )
-        .map_err(|_| ProgramError::ArithmeticOverflow)?;
+    crate::state::model_bridge::apply_venue_pnl_deltas_verified(
+        venue_pnl,
+        result.maker_fee_credits,
+        0, // No venue fees on LP operations
+        result.realized_pnl_delta,
+    )
+    .map_err(|_| ProgramError::ArithmeticOverflow)?;
 
     // Verify seat credit discipline (exposure within reserved limits)
     // This uses the haircut values from the seat's risk class
