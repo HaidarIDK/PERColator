@@ -211,14 +211,43 @@ pub fn process_execute_cross_slab(
         }
     }
 
-    // Phase 4: Calculate IM on net exposure (THE CAPITAL EFFICIENCY PROOF!)
-    // For v0, use simplified margin calculation:
-    // - Calculate net exposure across all slabs for same instrument
-    // - IM = abs(net_exposure) * notional_value * imr_factor
-    let net_exposure = calculate_net_exposure(portfolio);
-    let im_required = calculate_initial_margin(net_exposure, splits);
+    // Phase 4: Calculate IM on net exposure using FORMALLY VERIFIED logic
+    // Property X3: Net exposure = algebraic sum of all signed exposures
+    // Property X3b: If net exposure = 0, then margin = 0 (CAPITAL EFFICIENCY!)
+    // See: crates/model_safety/src/cross_slab.rs for Kani proofs
 
-    msg!("Calculated margin on net exposure");
+    // Convert portfolio exposures to format expected by verified function
+    let exposures: Vec<(u16, u16, i128)> = (0..portfolio.exposure_count as usize)
+        .map(|i| {
+            (
+                portfolio.exposures[i].0,
+                portfolio.exposures[i].1,
+                portfolio.exposures[i].2 as i128,
+            )
+        })
+        .collect();
+
+    let net_exposure = crate::state::model_bridge::net_exposure_verified(&exposures)
+        .map_err(|_| PercolatorError::Overflow)?;
+
+    // Calculate average price from splits (for v0, use first split's price)
+    let avg_price = if !splits.is_empty() {
+        splits[0].limit_px.abs() as u64
+    } else {
+        return Err(PercolatorError::InvalidInstruction);
+    };
+
+    // Initial margin requirement: 10% (1000 bps)
+    let imr_bps = 1000u16;
+
+    let im_required = crate::state::model_bridge::margin_on_net_verified(
+        net_exposure,
+        avg_price,
+        imr_bps,
+    )
+    .map_err(|_| PercolatorError::Overflow)?;
+
+    msg!("Calculated margin on net exposure using verified logic");
 
     portfolio.update_margin(im_required, im_required / 2); // MM = IM / 2 for v0
 
@@ -237,30 +266,13 @@ pub fn process_execute_cross_slab(
     Ok(())
 }
 
-/// Calculate net exposure across all slabs for the same instrument (v0 simplified)
-fn calculate_net_exposure(portfolio: &Portfolio) -> i64 {
-    // For v0, sum all exposures (assuming same instrument across slabs)
-    let mut net = 0i64;
-    for i in 0..portfolio.exposure_count as usize {
-        net += portfolio.exposures[i].2;
-    }
-    net
-}
-
-/// Calculate initial margin requirement (v0 simplified)
-fn calculate_initial_margin(net_exposure: i64, splits: &[SlabSplit]) -> u128 {
-    // For v0, simplified: IM = abs(net_exposure) * avg_price * 0.1 (10% IMR)
-    if splits.is_empty() {
-        return 0;
-    }
-
-    let abs_exposure = net_exposure.abs() as u128;
-    let avg_price = splits[0].limit_px as u128; // Use first split price
-
-    // IM = abs(net_exposure) * price * 0.1 / 1e6 (scale factor)
-    // For v0 proof: if net_exposure = 0, IM = 0!
-    (abs_exposure * avg_price * 10) / (100 * 1_000_000)
-}
+// Ad-hoc functions REMOVED - Now using formally verified functions:
+// - net_exposure_verified() from model_safety::cross_slab
+// - margin_on_net_verified() from model_safety::cross_slab
+// These functions have Kani proofs for properties X1-X4 including:
+//   - X3: Net exposure = algebraic sum
+//   - X3b: If net = 0, then margin = 0 (CAPITAL EFFICIENCY PROOF)
+// See: crates/model_safety/src/cross_slab.rs
 
 // Exclude test module from BPF builds to avoid stack overflow from test-only functions
 #[cfg(all(test, not(target_os = "solana")))]
