@@ -34,6 +34,15 @@ pub struct SlabHeader {
     /// Taker fee (basis points, 1e6 scale)
     pub taker_fee_bps: i64,
 
+    /// Current funding rate (basis points per hour, 1e6 scale)
+    /// Positive = longs pay shorts, Negative = shorts pay longs
+    pub funding_rate: i64,
+    /// Cumulative funding index (grows over time)
+    /// Used for lazy O(1) funding application
+    pub cum_funding: i128,
+    /// Last funding update timestamp (seconds since epoch)
+    pub last_funding_ts: u64,
+
     /// Byte offset to BookArea (from start of account)
     pub off_book: u32,
     /// Byte offset to QuoteCache (from start of account)
@@ -81,6 +90,9 @@ impl SlabHeader {
             lot: 1_000_000,            // 1.0 lot
             mark_px,
             taker_fee_bps,
+            funding_rate: 0,           // No funding initially
+            cum_funding: 0,            // Zero cumulative index
+            last_funding_ts: 0,        // Never updated
             off_book,
             off_quote_cache,
             off_receipt_area,
