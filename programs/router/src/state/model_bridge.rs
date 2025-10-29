@@ -391,6 +391,45 @@ pub fn apply_shares_delta_verified(current: u128, delta: i128) -> Result<u128, &
     model_safety::lp_operations::apply_shares_delta_verified(current, delta)
 }
 
+// ============================================================================
+// Cross-Slab Execution Bridge Functions
+// ============================================================================
+
+/// Calculate net exposure across multiple positions (VERIFIED)
+///
+/// Wraps the formally verified net exposure calculation from model_safety.
+/// Property X3: Net exposure is the algebraic sum of all signed exposures.
+/// This is the foundation for capital efficiency proofs.
+pub fn net_exposure_verified(
+    exposures: &[(u16, u16, i128)],
+) -> Result<i128, &'static str> {
+    use model_safety::cross_slab::Portfolio;
+
+    let mut portfolio = Portfolio::new();
+    for &(slab_idx, instrument_idx, exposure) in exposures {
+        portfolio.update_exposure(slab_idx, instrument_idx, exposure)?;
+    }
+
+    model_safety::cross_slab::net_exposure_verified(&portfolio)
+}
+
+/// Calculate initial margin on NET exposure (VERIFIED)
+///
+/// Wraps the formally verified margin calculation from model_safety.
+/// Property X3: If net exposure = 0, then margin = 0 (CAPITAL EFFICIENCY PROOF!)
+///
+/// # Arguments
+/// * `net_exposure` - Net signed exposure across all positions
+/// * `avg_price` - Average execution price in Q64 format
+/// * `imr_bps` - Initial margin requirement in basis points (e.g., 1000 = 10%)
+pub fn margin_on_net_verified(
+    net_exposure: i128,
+    avg_price: u64,
+    imr_bps: u16,
+) -> Result<u128, &'static str> {
+    model_safety::cross_slab::margin_on_net_verified(net_exposure, avg_price, imr_bps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
