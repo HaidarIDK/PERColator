@@ -61,6 +61,11 @@ pub struct Portfolio {
     /// Using fixed-size array for simplicity (can optimize with HashMap-like structure)
     pub exposures: [(u16, u16, i64); MAX_SLABS * MAX_INSTRUMENTS],
 
+    /// Funding index offsets (parallel to exposures array)
+    /// Tracks the last applied funding index for each position
+    /// Used for lazy O(1) funding rate application
+    pub funding_offsets: [i128; MAX_SLABS * MAX_INSTRUMENTS],
+
     /// LP buckets: venue-scoped liquidity provider exposure
     /// AMM LP reduced ONLY by burn_lp_shares()
     /// Slab LP reduced ONLY by cancel_order()
@@ -113,6 +118,15 @@ impl Portfolio {
             );
         }
 
+        // Zero out funding offsets array
+        unsafe {
+            core::ptr::write_bytes(
+                self.funding_offsets.as_mut_ptr(),
+                0,
+                MAX_SLABS * MAX_INSTRUMENTS,
+            );
+        }
+
         // Initialize LP buckets
         self.lp_bucket_count = 0;
         self._padding3 = [0; 6];
@@ -154,6 +168,7 @@ impl Portfolio {
             pnl_index_checkpoint: crate::state::pnl_vesting::FP_ONE,
             _padding4: [0; 8],
             exposures: [(0, 0, 0); MAX_SLABS * MAX_INSTRUMENTS],
+            funding_offsets: [0; MAX_SLABS * MAX_INSTRUMENTS],
             lp_buckets: [zero_bucket; MAX_LP_BUCKETS],
             lp_bucket_count: 0,
             _padding3: [0; 6],
@@ -189,8 +204,10 @@ impl Portfolio {
             let last_idx = (self.exposure_count - 1) as usize;
             if idx != last_idx {
                 self.exposures[idx] = self.exposures[last_idx];
+                self.funding_offsets[idx] = self.funding_offsets[last_idx];
             }
             self.exposures[last_idx] = (0, 0, 0);
+            self.funding_offsets[last_idx] = 0;
             self.exposure_count -= 1;
         }
     }
@@ -203,6 +220,28 @@ impl Portfolio {
             }
         }
         0
+    }
+
+    /// Get funding offset for (slab, instrument)
+    /// Returns the last applied funding index for the position
+    pub fn get_funding_offset(&self, slab_idx: u16, instrument_idx: u16) -> i128 {
+        for i in 0..self.exposure_count as usize {
+            if self.exposures[i].0 == slab_idx && self.exposures[i].1 == instrument_idx {
+                return self.funding_offsets[i];
+            }
+        }
+        0
+    }
+
+    /// Set funding offset for (slab, instrument)
+    /// Updates the last applied funding index for the position
+    pub fn set_funding_offset(&mut self, slab_idx: u16, instrument_idx: u16, offset: i128) {
+        for i in 0..self.exposure_count as usize {
+            if self.exposures[i].0 == slab_idx && self.exposures[i].1 == instrument_idx {
+                self.funding_offsets[i] = offset;
+                return;
+            }
+        }
     }
 
     /// Update margin requirements (using verified math)

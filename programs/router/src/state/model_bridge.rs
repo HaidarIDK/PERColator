@@ -1198,6 +1198,50 @@ pub fn apply_withdraw_verified(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNDING RATE BRIDGE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Apply funding to a position using formally verified logic (VERIFIED)
+///
+/// This function bridges production state to the verified funding model,
+/// applies the funding payment, and writes back to production state.
+///
+/// # Properties (Proven with Kani in model_safety::funding)
+/// - F1: Conservation - funding is net-zero across equal/opposite positions
+/// - F2: Proportional - payment proportional to position size
+/// - F3: Idempotent - applying twice with same index = applying once
+/// - F4: Overflow safety - no overflow on realistic inputs
+/// - F5: Sign correctness - longs pay when mark > oracle
+pub fn apply_funding_to_position_verified(
+    portfolio: &mut Portfolio,
+    slab_idx: u16,
+    instrument_idx: u16,
+    market_cumulative_index: i128,
+) {
+    // Read position data from portfolio
+    let base_size = portfolio.get_exposure(slab_idx, instrument_idx);
+    let funding_offset = portfolio.get_funding_offset(slab_idx, instrument_idx);
+
+    // Convert to verified model types
+    let mut position = model_safety::funding::Position {
+        base_size,
+        realized_pnl: portfolio.pnl,
+        funding_index_offset: funding_offset,
+    };
+
+    let market = model_safety::funding::MarketFunding {
+        cumulative_funding_index: market_cumulative_index,
+    };
+
+    // Call verified function (F1-F5 properties proven with Kani)
+    model_safety::funding::apply_funding(&mut position, &market);
+
+    // Write back to production state
+    portfolio.pnl = position.realized_pnl;
+    portfolio.set_funding_offset(slab_idx, instrument_idx, position.funding_index_offset);
+}
+
 #[cfg(test)]
 mod deposit_withdraw_bridge_tests {
     use super::*;
