@@ -42,25 +42,19 @@ pub fn process_router_reserve(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Check sufficient free collateral
-    // free_collateral is i128, amounts are u128
-    let total_needed_i128 = (base_amount_q64 as i128)
-        .checked_add(quote_amount_q64 as i128)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-
-    if portfolio.free_collateral < total_needed_i128 {
-        return Err(ProgramError::InsufficientFunds);
-    }
-
-    // Reserve collateral in seat (with overflow protection)
-    seat.reserve(base_amount_q64, quote_amount_q64)
-        .map_err(|_| ProgramError::ArithmeticOverflow)?;
-
-    // Deduct from portfolio free collateral
-    portfolio.free_collateral = portfolio
-        .free_collateral
-        .checked_sub(total_needed_i128)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    // Reserve collateral using FORMALLY VERIFIED logic
+    // Properties LP4-LP5: Collateral conservation, no overflow/underflow
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
+    crate::state::model_bridge::reserve_verified(
+        portfolio,
+        seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )
+    .map_err(|e| match e {
+        "Insufficient collateral" => ProgramError::InsufficientFunds,
+        _ => ProgramError::ArithmeticOverflow,
+    })?;
 
     Ok(())
 }

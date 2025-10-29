@@ -463,6 +463,110 @@ pub fn margin_on_net_verified(
     model_safety::cross_slab::margin_on_net_verified(net_exposure, avg_price, imr_bps)
 }
 
+// ============================================================================
+// LP Reserve/Release Bridge Functions
+// ============================================================================
+
+/// Reserve collateral from portfolio into seat using verified logic (VERIFIED)
+///
+/// Wraps the formally verified reserve function from model_safety.
+/// Properties LP4-LP5: Collateral conservation, no overflow/underflow.
+///
+/// # Arguments
+/// * `portfolio` - Production portfolio state (mutable)
+/// * `seat` - Production LP seat state (mutable)
+/// * `base_amount_q64` - Base asset amount to reserve
+/// * `quote_amount_q64` - Quote asset amount to reserve
+///
+/// # Returns
+/// * `Ok(())` if reservation succeeds
+/// * `Err("Insufficient collateral")` if portfolio doesn't have enough
+/// * `Err("Overflow")` if seat reservation would overflow
+pub fn reserve_verified(
+    portfolio: &mut crate::state::Portfolio,
+    seat: &mut crate::state::RouterLpSeat,
+    base_amount_q64: u128,
+    quote_amount_q64: u128,
+) -> Result<(), &'static str> {
+    // Convert production state to model state
+    let mut model_portfolio = model_safety::lp_operations::Portfolio {
+        free_collateral: portfolio.free_collateral,
+    };
+
+    let mut model_seat = model_safety::lp_operations::Seat {
+        lp_shares: seat.lp_shares,
+        reserved_base_q64: seat.reserved_base_q64,
+        reserved_quote_q64: seat.reserved_quote_q64,
+        exposure_base_q64: seat.exposure.base_q64,
+        exposure_quote_q64: seat.exposure.quote_q64,
+    };
+
+    // Call verified reserve function
+    model_safety::lp_operations::reserve_verified(
+        &mut model_portfolio,
+        &mut model_seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )?;
+
+    // Write back to production state
+    portfolio.free_collateral = model_portfolio.free_collateral;
+    seat.reserved_base_q64 = model_seat.reserved_base_q64;
+    seat.reserved_quote_q64 = model_seat.reserved_quote_q64;
+
+    Ok(())
+}
+
+/// Release collateral from seat back to portfolio using verified logic (VERIFIED)
+///
+/// Wraps the formally verified release function from model_safety.
+/// Properties LP4-LP5: Collateral conservation, no overflow/underflow.
+///
+/// # Arguments
+/// * `portfolio` - Production portfolio state (mutable)
+/// * `seat` - Production LP seat state (mutable)
+/// * `base_amount_q64` - Base asset amount to release
+/// * `quote_amount_q64` - Quote asset amount to release
+///
+/// # Returns
+/// * `Ok(())` if release succeeds
+/// * `Err("Insufficient reserves")` if seat doesn't have enough reserved
+/// * `Err("Overflow")` if portfolio would overflow
+pub fn release_verified(
+    portfolio: &mut crate::state::Portfolio,
+    seat: &mut crate::state::RouterLpSeat,
+    base_amount_q64: u128,
+    quote_amount_q64: u128,
+) -> Result<(), &'static str> {
+    // Convert production state to model state
+    let mut model_portfolio = model_safety::lp_operations::Portfolio {
+        free_collateral: portfolio.free_collateral,
+    };
+
+    let mut model_seat = model_safety::lp_operations::Seat {
+        lp_shares: seat.lp_shares,
+        reserved_base_q64: seat.reserved_base_q64,
+        reserved_quote_q64: seat.reserved_quote_q64,
+        exposure_base_q64: seat.exposure.base_q64,
+        exposure_quote_q64: seat.exposure.quote_q64,
+    };
+
+    // Call verified release function
+    model_safety::lp_operations::release_verified(
+        &mut model_portfolio,
+        &mut model_seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )?;
+
+    // Write back to production state
+    portfolio.free_collateral = model_portfolio.free_collateral;
+    seat.reserved_base_q64 = model_seat.reserved_base_q64;
+    seat.reserved_quote_q64 = model_seat.reserved_quote_q64;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

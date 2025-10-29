@@ -37,20 +37,19 @@ pub fn process_router_release(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Release collateral from seat (with underflow protection)
-    seat.release(base_amount_q64, quote_amount_q64)
-        .map_err(|_| ProgramError::InsufficientFunds)?;
-
-    // Add back to portfolio free collateral
-    // free_collateral is i128, amounts are u128
-    let total_released_i128 = (base_amount_q64 as i128)
-        .checked_add(quote_amount_q64 as i128)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-
-    portfolio.free_collateral = portfolio
-        .free_collateral
-        .checked_add(total_released_i128)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    // Release collateral using FORMALLY VERIFIED logic
+    // Properties LP4-LP5: Collateral conservation, no overflow/underflow
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
+    crate::state::model_bridge::release_verified(
+        portfolio,
+        seat,
+        base_amount_q64,
+        quote_amount_q64,
+    )
+    .map_err(|e| match e {
+        "Insufficient reserves" => ProgramError::InsufficientFunds,
+        _ => ProgramError::ArithmeticOverflow,
+    })?;
 
     Ok(())
 }
