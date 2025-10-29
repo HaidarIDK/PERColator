@@ -22,6 +22,7 @@ pub mod deposit_withdraw;
 pub mod orderbook;
 pub mod lp_operations;
 pub mod cross_slab;
+pub mod funding;
 
 #[cfg(test)]
 pub mod negative_tests;
