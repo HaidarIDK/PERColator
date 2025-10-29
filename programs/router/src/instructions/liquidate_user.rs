@@ -228,6 +228,7 @@ pub fn process_liquidate_user(
         router_authority,
         &slab_accounts[..plan.split_count],
         &receipt_accounts[..plan.split_count],
+        &oracle_accounts[..plan.split_count],
         plan.get_splits(),
     )?;
     msg!("Liquidate: Execution complete via cross-slab logic");

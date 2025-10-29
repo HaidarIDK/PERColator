@@ -12,6 +12,7 @@ doctest = false
 pinocchio = { workspace = true }
 pinocchio-pubkey = { workspace = true }
 percolator-common = { path = "../common" }
+percolator-oracle = { path = "../oracle" }
 model_safety = { path = "../../crates/model_safety", default-features = false }
 adapter-core = { path = "../../crates/adapter_core", default-features = false }
 arrayvec = { version = "0.7", default-features = false }

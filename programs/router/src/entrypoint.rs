@@ -276,8 +276,9 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
 /// 2. `[writable]` Vault account
 /// 3. `[writable]` Registry account
 /// 4. `[]` Router authority PDA
-/// 5..5+N. `[writable]` Slab accounts (N = num_splits)
-/// 5+N..5+2N. `[writable]` Receipt PDAs (N = num_splits)
+/// 5..5+N. `[]` Oracle accounts (N = num_splits)
+/// 5+N..5+2N. `[writable]` Slab accounts (N = num_splits)
+/// 5+2N..5+3N. `[writable]` Receipt PDAs (N = num_splits)
 ///
 /// Instruction data layout:
 /// - num_splits: u8 (1 byte)
@@ -328,16 +329,17 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Verify we have enough accounts: 5 base + num_splits slabs + num_splits receipts
-    let required_accounts = 5 + (num_splits * 2);
+    // Verify we have enough accounts: 5 base + num_splits oracles + num_splits slabs + num_splits receipts
+    let required_accounts = 5 + (num_splits * 3);
     if accounts.len() < required_accounts {
         msg!("Error: Insufficient accounts for ExecuteCrossSlab");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Split accounts into slabs and receipts
-    let slab_accounts = &accounts[5..5 + num_splits];
-    let receipt_accounts = &accounts[5 + num_splits..5 + num_splits * 2];
+    // Split accounts into oracles, slabs, and receipts
+    let oracle_accounts = &accounts[5..5 + num_splits];
+    let slab_accounts = &accounts[5 + num_splits..5 + (num_splits * 2)];
+    let receipt_accounts = &accounts[5 + (num_splits * 2)..5 + (num_splits * 3)];
 
     // Parse splits from instruction data (on stack, small)
     // Use a fixed-size buffer to avoid heap allocation
@@ -388,6 +390,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
         router_authority,
         slab_accounts,
         receipt_accounts,
+        oracle_accounts,
         splits,
     )?;
 

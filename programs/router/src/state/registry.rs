@@ -65,8 +65,8 @@ pub struct SlabRegistry {
     pub min_equity_to_quote: i128,
     /// Oracle price tolerance (basis points, e.g., 50 = 0.5%)
     pub oracle_tolerance_bps: u64,
-    /// Padding for alignment
-    pub _padding2: [u8; 8],
+    /// Maximum oracle staleness (seconds, e.g., 60 = 1 minute)
+    pub max_oracle_staleness_secs: i64,
 
     // Insurance fund parameters and state
     /// Insurance parameters (configurable by governance)
@@ -118,7 +118,7 @@ impl SlabRegistry {
         self.router_cap_per_slab = 1_000_000_000;  // 1000 units max per slab
         self.min_equity_to_quote = 100_000_000;  // $100 minimum equity
         self.oracle_tolerance_bps = 50;  // 0.5% oracle tolerance
-        self._padding2 = [0; 8];
+        self.max_oracle_staleness_secs = 60;  // 60 seconds staleness threshold
 
         // Initialize insurance with defaults
         self.insurance_params = crate::state::insurance::InsuranceParams::default();
@@ -162,7 +162,7 @@ impl SlabRegistry {
             router_cap_per_slab: 1_000_000_000,
             min_equity_to_quote: 100_000_000,
             oracle_tolerance_bps: 50,
-            _padding2: [0; 8],
+            max_oracle_staleness_secs: 60,
             insurance_params: crate::state::insurance::InsuranceParams::default(),
             insurance_state: crate::state::insurance::InsuranceState::default(),
             pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),

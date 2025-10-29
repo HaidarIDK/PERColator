@@ -3177,6 +3177,9 @@ name = "percolator-e2e-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "model_safety",
+ "percolator-common",
+ "percolator-router",
  "pinocchio",
  "serde",
  "serde_json",
@@ -3235,6 +3238,7 @@ dependencies = [
  "arrayvec",
  "model_safety",
  "percolator-common",
+ "percolator-oracle",
  "pinocchio",
  "pinocchio-pubkey",
 ]

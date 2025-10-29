@@ -78,6 +78,21 @@ impl PriceOracle {
         self.timestamp = timestamp;
         self.confidence = confidence;
     }
+
+    /// Check if the oracle is stale
+    ///
+    /// Returns true if the oracle timestamp is older than the threshold
+    ///
+    /// # Arguments
+    /// * `current_time` - Current Unix timestamp
+    /// * `max_staleness_secs` - Maximum allowed staleness in seconds
+    pub fn is_stale(&self, current_time: i64, max_staleness_secs: i64) -> bool {
+        if self.timestamp == 0 {
+            return true; // Uninitialized oracle is always stale
+        }
+        let age = current_time.saturating_sub(self.timestamp);
+        age > max_staleness_secs
+    }
 }
 
 #[cfg(test)]

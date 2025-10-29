@@ -32,6 +32,7 @@ pub struct SlabSplit {
 /// * `router_authority` - Router authority PDA (for CPI signing)
 /// * `slab_accounts` - Array of slab accounts to execute on
 /// * `receipt_accounts` - Array of receipt PDAs (one per slab)
+/// * `oracle_accounts` - Array of oracle accounts (one per slab) for staleness checks
 /// * `splits` - How to split the order across slabs
 ///
 /// # Returns
@@ -47,6 +48,7 @@ pub fn process_execute_cross_slab(
     router_authority: &AccountInfo,
     slab_accounts: &[AccountInfo],
     receipt_accounts: &[AccountInfo],
+    oracle_accounts: &[AccountInfo],
     splits: &[SlabSplit],
 ) -> Result<(), PercolatorError> {
     // Verify portfolio belongs to user
@@ -148,9 +150,11 @@ pub fn process_execute_cross_slab(
     }
     msg!("Funding application complete");
 
-    // Verify we have matching number of slabs and receipts
-    if slab_accounts.len() != receipt_accounts.len() || slab_accounts.len() != splits.len() {
-        msg!("Error: Mismatched slab/receipt/split counts");
+    // Verify we have matching number of slabs, receipts, oracles, and splits
+    if slab_accounts.len() != receipt_accounts.len()
+        || slab_accounts.len() != oracle_accounts.len()
+        || slab_accounts.len() != splits.len() {
+        msg!("Error: Mismatched slab/receipt/oracle/split counts");
         return Err(PercolatorError::InvalidInstruction);
     }
 
@@ -162,8 +166,94 @@ pub fn process_execute_cross_slab(
         return Err(PercolatorError::InvalidAccount);
     }
 
-    // Phase 1: Read QuoteCache from each slab (v0 - skip validation for now)
-    // In production, we'd validate seqno consistency here (TOCTOU safety)
+    // Phase 0: Validate all slabs are registered in the SlabRegistry
+    // This prevents unauthorized slab execution (addresses VULNERABILITY_REPORT.md #1)
+    msg!("Validating slabs are registered");
+    for (i, split) in splits.iter().enumerate() {
+        let slab_id = &split.slab_id;
+
+        // Check if slab is registered and active in the registry
+        if registry.find_slab(slab_id).is_none() {
+            msg!("Error: Slab is not registered or not active in registry");
+            return Err(PercolatorError::InvalidAccount);
+        }
+    }
+    msg!("All slabs validated successfully");
+
+    // Phase 0.5: Oracle staleness checks (VULNERABILITY_REPORT.md #2)
+    // When oracle is stale, only position-REDUCING operations are allowed
+    // This prevents trading on potentially incorrect prices
+    msg!("Checking oracle staleness");
+
+    // Get current time for staleness check
+    let current_time = Clock::get()
+        .map(|clock| clock.unix_timestamp)
+        .unwrap_or(0);
+
+    // For each split, check if it would increase position and if oracle is stale
+    for (i, split) in splits.iter().enumerate() {
+        let oracle_account = &oracle_accounts[i];
+
+        // Parse PriceOracle from account data
+        let oracle_data = oracle_account
+            .try_borrow_data()
+            .map_err(|_| PercolatorError::InvalidAccount)?;
+
+        if oracle_data.len() < core::mem::size_of::<percolator_oracle::PriceOracle>() {
+            msg!("Error: Invalid oracle account size");
+            return Err(PercolatorError::InvalidAccount);
+        }
+
+        // Cast to PriceOracle (assuming repr(C) layout)
+        let oracle = unsafe {
+            &*(oracle_data.as_ptr() as *const percolator_oracle::PriceOracle)
+        };
+
+        // Validate oracle magic bytes
+        if !oracle.validate() {
+            msg!("Error: Invalid oracle magic bytes");
+            return Err(PercolatorError::InvalidAccount);
+        }
+
+        // Check staleness
+        let is_stale = oracle.is_stale(current_time, registry.max_oracle_staleness_secs);
+
+        drop(oracle_data); // Release borrow
+
+        // Get current exposure for this slab/instrument
+        let slab_idx = i as u16;
+        let instrument_idx = 0u16;
+        let current_exposure = portfolio.get_exposure(slab_idx, instrument_idx);
+
+        // Calculate what the new exposure would be after this trade
+        let new_exposure = if split.side == 0 {
+            // Buy increases long or reduces short
+            current_exposure + split.qty
+        } else {
+            // Sell reduces long or increases short
+            current_exposure - split.qty
+        };
+
+        // Check if this trade increases the absolute position size
+        let is_position_increasing = new_exposure.abs() > current_exposure.abs();
+
+        // Block position-increasing operations when oracle is stale
+        if is_position_increasing && is_stale {
+            msg!("Error: Cannot increase position when oracle is stale");
+            return Err(PercolatorError::StalePrice);
+        }
+
+        // Log position direction for monitoring
+        if is_position_increasing {
+            msg!("Trade increases position (oracle fresh)");
+        } else {
+            msg!("Trade reduces position (allowed with any oracle)");
+        }
+    }
+    msg!("Oracle staleness checks complete");
+
+    // Phase 1: Read QuoteCache from each slab
+    // Seqno consistency validation occurs during commit_fill (TOCTOU safety)
 
     // Phase 2: CPI to each slab's commit_fill
     msg!("Executing fills on slabs");
