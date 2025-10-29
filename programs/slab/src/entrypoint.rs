@@ -9,7 +9,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order}};
+use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding}};
 use crate::state::{SlabState, Side as OrderSide};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, validate_signer, borrow_account_data_mut, InstructionReader};
@@ -42,6 +42,7 @@ pub fn process_instruction(
             msg!("Instruction: AdapterLiquidity");
             return process_adapter_liquidity_inner(accounts, &instruction_data[1..]);
         }
+        5 => SlabInstruction::UpdateFunding,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -65,6 +66,10 @@ pub fn process_instruction(
         SlabInstruction::CancelOrder => {
             msg!("Instruction: CancelOrder");
             process_cancel_order_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::UpdateFunding => {
+            msg!("Instruction: UpdateFunding");
+            process_update_funding_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -277,6 +282,42 @@ fn process_cancel_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], dat
     process_cancel_order(slab, owner_account.key(), order_id)?;
 
     msg!("CancelOrder processed successfully");
+    Ok(())
+}
+
+/// Process update_funding instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Slab state account
+/// 1. `[signer]` LP owner (authority)
+///
+/// Expected data layout (8 bytes):
+/// - oracle_price: i64 (8 bytes) - oracle reference price (1e6 scale)
+fn process_update_funding_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: UpdateFunding instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let slab_account = &accounts[0];
+    let authority_account = &accounts[1];
+
+    // Validate accounts
+    validate_owner(slab_account, program_id)?;
+    validate_writable(slab_account)?;
+    validate_signer(authority_account)?;
+
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
+
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let oracle_price = reader.read_i64()?;
+
+    // Call the update_funding logic
+    process_update_funding(slab, authority_account.key(), oracle_price)?;
+
+    msg!("UpdateFunding processed successfully");
     Ok(())
 }
 
