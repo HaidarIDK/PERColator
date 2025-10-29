@@ -93,21 +93,24 @@ pub fn process_burn_lp_shares(
         return Err(PercolatorError::InsufficientBalance);
     }
 
-    // Calculate redemption value
-    // redemption = shares_to_burn * current_share_price
-    // Both are scaled by 1e6, so divide by 1e6
-    let shares_i128 = shares_to_burn as i128;
-    let price_i128 = current_share_price as i128;
-    let redemption_value = (shares_i128 * price_i128) / 1_000_000;
+    // Calculate redemption value using FORMALLY VERIFIED logic (VERIFIED)
+    // Properties LP6-LP7: Overflow safety and proportional calculation correctness
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
+    let redemption_value = crate::state::model_bridge::calculate_redemption_value_verified(
+        shares_to_burn as u128,
+        current_share_price as u64,
+    )
+    .map_err(|_| PercolatorError::Overflow)?;
 
-    msg!("BurnLpShares: Redemption value calculated");
+    msg!("BurnLpShares: Redemption value calculated (verified)");
 
     // Calculate proportional reduction
     let initial_shares = amm.lp_shares;
     let remaining_shares = initial_shares - shares_to_burn;
 
-    // Proportionally reduce margin
-    // new_mm = old_mm * (remaining_shares / initial_shares)
+    // Proportionally reduce margin using FORMALLY VERIFIED logic (VERIFIED)
+    // Properties LP8-LP10: Monotonicity, zero ratio, and full ratio preservation
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
     let initial_im = bucket.im;
     let initial_mm = bucket.mm;
 
@@ -115,16 +118,28 @@ pub fn process_burn_lp_shares(
     let new_mm: u128;
 
     if remaining_shares == 0 {
-        // Burning all shares - zero out margin
+        // Burning all shares - zero out margin (ratio = 0)
         new_im = 0;
         new_mm = 0;
         msg!("BurnLpShares: Burning all shares, zeroing margin");
     } else {
-        // Partial burn - proportional reduction
-        // new_margin = old_margin * remaining_shares / initial_shares
-        new_im = ((initial_im as u128) * (remaining_shares as u128)) / (initial_shares as u128);
-        new_mm = ((initial_mm as u128) * (remaining_shares as u128)) / (initial_shares as u128);
-        msg!("BurnLpShares: Proportional margin reduction");
+        // Partial burn - proportional reduction using verified logic
+        // remaining_ratio = remaining_shares / initial_shares (scaled by 1e6)
+        let remaining_ratio = ((remaining_shares as u128) * 1_000_000) / (initial_shares as u128);
+
+        new_im = crate::state::model_bridge::proportional_margin_reduction_verified(
+            initial_im,
+            remaining_ratio,
+        )
+        .map_err(|_| PercolatorError::Overflow)?;
+
+        new_mm = crate::state::model_bridge::proportional_margin_reduction_verified(
+            initial_mm,
+            remaining_ratio,
+        )
+        .map_err(|_| PercolatorError::Overflow)?;
+
+        msg!("BurnLpShares: Proportional margin reduction (verified)");
     }
 
     // SAFETY TRIPWIRE 2: Accounting consistency

@@ -133,27 +133,31 @@ pub fn process_cancel_lp_orders(
 
     msg!("CancelLpOrders: Updated reservations");
 
-    // Calculate proportional margin reduction
-    // We use the maximum of (quote_freed / initial_quote, base_freed / initial_base)
-    // to determine the reduction ratio
-    let quote_ratio = if initial_reserved_quote > 0 {
-        ((initial_reserved_quote - slab.reserved_quote) as u128 * 1_000_000) / (initial_reserved_quote as u128)
+    // Calculate proportional margin reduction using FORMALLY VERIFIED logic (VERIFIED)
+    // Properties LP8-LP10: Monotonicity, zero ratio, and full ratio preservation
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
+    //
+    // We calculate the remaining ratio (what's left after canceling)
+    // remaining_ratio = remaining / initial for both quote and base
+    // Use the smaller remaining ratio (more conservative - if either goes down, reduce margin more)
+    let quote_remaining_ratio = if initial_reserved_quote > 0 {
+        ((slab.reserved_quote as u128) * 1_000_000) / (initial_reserved_quote as u128)
     } else {
-        0
+        1_000_000  // 100% if no initial quote
     };
 
-    let base_ratio = if initial_reserved_base > 0 {
-        ((initial_reserved_base - slab.reserved_base) as u128 * 1_000_000) / (initial_reserved_base as u128)
+    let base_remaining_ratio = if initial_reserved_base > 0 {
+        ((slab.reserved_base as u128) * 1_000_000) / (initial_reserved_base as u128)
     } else {
-        0
+        1_000_000  // 100% if no initial base
     };
 
-    // Use the larger ratio (more conservative)
-    let reduction_ratio = quote_ratio.max(base_ratio);
+    // Use the smaller remaining ratio (more conservative)
+    let remaining_ratio = quote_remaining_ratio.min(base_remaining_ratio);
 
-    msg!("CancelLpOrders: Reduction ratio calculated");
+    msg!("CancelLpOrders: Remaining ratio calculated (verified)");
 
-    // Calculate new margin
+    // Calculate new margin using verified logic
     let new_im: u128;
     let new_mm: u128;
 
@@ -163,10 +167,20 @@ pub fn process_cancel_lp_orders(
         new_mm = 0;
         msg!("CancelLpOrders: All orders canceled, zeroing margin");
     } else {
-        // Proportional reduction based on freed reservations
-        new_im = initial_im - ((initial_im * reduction_ratio as u128) / 1_000_000);
-        new_mm = initial_mm - ((initial_mm * reduction_ratio as u128) / 1_000_000);
-        msg!("CancelLpOrders: Proportional margin reduction");
+        // Proportional reduction based on remaining reservations
+        new_im = crate::state::model_bridge::proportional_margin_reduction_verified(
+            initial_im,
+            remaining_ratio,
+        )
+        .map_err(|_| PercolatorError::Overflow)?;
+
+        new_mm = crate::state::model_bridge::proportional_margin_reduction_verified(
+            initial_mm,
+            remaining_ratio,
+        )
+        .map_err(|_| PercolatorError::Overflow)?;
+
+        msg!("CancelLpOrders: Proportional margin reduction (verified)");
     }
 
     // Update bucket margin

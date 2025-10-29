@@ -567,6 +567,52 @@ pub fn release_verified(
     Ok(())
 }
 
+/// Calculate redemption value for burning LP shares using verified logic (VERIFIED)
+///
+/// Wraps the formally verified redemption value calculation from model_safety.
+/// Properties LP6-LP7: Overflow safety and proportional calculation correctness.
+///
+/// # Arguments
+/// * `shares_to_burn` - Number of shares to burn (u128, scaled by 1e6)
+/// * `current_share_price` - Current price per share (u64, scaled by 1e6)
+///
+/// # Returns
+/// * `Ok(redemption_value)` - Collateral value in base units (i128)
+/// * `Err("Overflow")` if calculation would overflow
+pub fn calculate_redemption_value_verified(
+    shares_to_burn: u128,
+    current_share_price: u64,
+) -> Result<i128, &'static str> {
+    model_safety::lp_operations::calculate_redemption_value_verified(
+        shares_to_burn,
+        current_share_price,
+    )
+}
+
+/// Calculate proportional margin reduction using verified logic (VERIFIED)
+///
+/// Wraps the formally verified proportional margin reduction from model_safety.
+/// Properties LP8-LP10: Monotonicity, zero ratio, and full ratio preservation.
+///
+/// # Arguments
+/// * `initial_margin` - Initial margin requirement (u128)
+/// * `remaining_ratio` - Ratio of position remaining (u128, scaled by 1e6)
+///                       e.g., 500_000 = 50% remaining
+///
+/// # Returns
+/// * `Ok(new_margin)` - New margin requirement (u128)
+/// * `Err("Invalid ratio")` if ratio > 1e6 (> 100%)
+/// * `Err("Overflow")` if calculation would overflow
+pub fn proportional_margin_reduction_verified(
+    initial_margin: u128,
+    remaining_ratio: u128,
+) -> Result<u128, &'static str> {
+    model_safety::lp_operations::proportional_margin_reduction_verified(
+        initial_margin,
+        remaining_ratio,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
