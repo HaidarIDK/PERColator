@@ -71,29 +71,24 @@ pub fn process_liquidate_user(
 ) -> Result<(), PercolatorError> {
     msg!("Liquidate: Starting liquidation check");
 
-    // Step 1: Calculate health = equity - MM
+    // Step 1: Check liquidation eligibility using FORMALLY VERIFIED logic (L1-L13)
+    // This uses the verified is_liquidatable function backed by 13 Kani proofs.
+    // Properties: Margin threshold correctness, overflow safety, consistent definitions
+    use crate::state::model_bridge::is_liquidatable_verified;
+    let is_liquidatable_formal = is_liquidatable_verified(portfolio, registry);
+
+    // If not liquidatable by verified check, portfolio is healthy
+    if !is_liquidatable_formal {
+        msg!("Liquidate: Portfolio is healthy (verified check)");
+        return Err(PercolatorError::PortfolioHealthy);
+    }
+
+    // Calculate health = equity - MM for mode determination and tracking
     let health = portfolio.equity.saturating_sub(portfolio.mm as i128);
-    msg!("Liquidate: Health calculated");
+    msg!("Liquidate: Portfolio is liquidatable (verified)");
 
     // Store health in portfolio for tracking
     portfolio.health = health;
-
-    // Step 1.5: Verify with formally proven liquidation check (L1-L13)
-    // This uses the verified is_liquidatable function backed by 13 Kani proofs.
-    // Production uses health-based check (more conservative), but we validate
-    // with the verified function to ensure correctness.
-    #[cfg(not(target_os = "solana"))]
-    {
-        use crate::state::model_bridge::is_liquidatable_verified;
-        let is_liquidatable_formal = is_liquidatable_verified(portfolio, registry);
-
-        // Production's health < 0 should imply verified liquidatable check
-        // (production is more conservative - counts negative PnL, model clamps to 0)
-        if health < 0 && !is_liquidatable_formal {
-            // This should not happen - log for debugging but don't fail
-            msg!("Warning: Health check disagrees with verified liquidatable check");
-        }
-    }
 
     // Step 2: Determine liquidation mode
     let mode = if is_preliq {

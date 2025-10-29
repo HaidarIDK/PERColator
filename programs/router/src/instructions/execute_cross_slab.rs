@@ -217,17 +217,20 @@ pub fn process_execute_cross_slab(
     // See: crates/model_safety/src/cross_slab.rs for Kani proofs
 
     // Convert portfolio exposures to format expected by verified function
-    let exposures: Vec<(u16, u16, i128)> = (0..portfolio.exposure_count as usize)
-        .map(|i| {
-            (
-                portfolio.exposures[i].0,
-                portfolio.exposures[i].1,
-                portfolio.exposures[i].2 as i128,
-            )
-        })
-        .collect();
+    // Use stack-allocated array instead of Vec (no_std/BPF compatible)
+    use percolator_common::{MAX_SLABS, MAX_INSTRUMENTS};
+    const MAX_EXPOSURES: usize = MAX_SLABS * MAX_INSTRUMENTS;
+    let mut exposures_buf: [(u16, u16, i128); MAX_EXPOSURES] = [(0, 0, 0); MAX_EXPOSURES];
+    let exposure_count = portfolio.exposure_count as usize;
+    for i in 0..exposure_count {
+        exposures_buf[i] = (
+            portfolio.exposures[i].0,
+            portfolio.exposures[i].1,
+            portfolio.exposures[i].2 as i128,
+        );
+    }
 
-    let net_exposure = crate::state::model_bridge::net_exposure_verified(&exposures)
+    let net_exposure = crate::state::model_bridge::net_exposure_verified(&exposures_buf[..exposure_count])
         .map_err(|_| PercolatorError::Overflow)?;
 
     // Calculate average price from splits (for v0, use first split's price)
