@@ -13,6 +13,7 @@ pinocchio = { workspace = true }
 pinocchio-pubkey = { workspace = true }
 percolator-common = { path = "../common" }
 adapter-core = { path = "../../crates/adapter_core" }
+model_safety = { path = "../../crates/model_safety" }
 
 [features]
 default = []

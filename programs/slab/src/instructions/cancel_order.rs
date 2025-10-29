@@ -2,7 +2,7 @@
 //!
 //! Allows users to cancel their resting limit orders from the orderbook
 
-use crate::state::SlabState;
+use crate::state::{SlabState, model_bridge};
 use percolator_common::PercolatorError;
 use pinocchio::{msg, pubkey::Pubkey};
 
@@ -40,8 +40,10 @@ pub fn process_cancel_order(
         return Err(PercolatorError::Unauthorized);
     }
 
-    // Remove the order from the book
-    slab.book.remove_order(order_id).map_err(|_| {
+    // Remove the order from the book using FORMALLY VERIFIED orderbook logic
+    // This call ensures property O2 (no double-execution) is maintained
+    // See: crates/model_safety/src/orderbook.rs for Kani proofs
+    model_bridge::remove_order_verified(&mut slab.book, order_id).map_err(|_| {
         msg!("Error: Order not found during removal");
         PercolatorError::OrderNotFound
     })?;

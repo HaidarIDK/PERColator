@@ -773,3 +773,363 @@ mod tests {
         // Implementation MUST reject the third $2 withdrawal or limit it to $1
     }
 }
+
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// DEPOSIT/WITHDRAW BRIDGE - Integrates deposit_withdraw formal model
+// ═══════════════════════════════════════════════════════════════════════════
+//
+
+/// Convert Q32.32 fixed-point (i128) to u64 representation where u64::MAX = 1.0
+///
+/// Used to bridge adaptive_warmup's unlocked_frac to deposit_withdraw model.
+///
+/// # Fixed-Point Representations
+///
+/// - **Q32.32 (adaptive_warmup)**: `2^32` represents 1.0
+/// - **u64 (deposit_withdraw)**: `u64::MAX` represents 1.0 (used in `>> 64` shift)
+///
+/// # Arguments
+///
+/// * `q32_value` - Q32.32 value (i128) where 2^32 = 1.0
+///
+/// # Returns
+///
+/// u64 value where u64::MAX = 1.0
+#[inline]
+fn q32_to_u64_frac(q32_value: i128) -> u64 {
+    const F: i128 = 1i128 << 32; // Q32.32 scale factor (2^32 = 1.0)
+
+    // Clamp to [0, F] range (0.0 to 1.0)
+    let clamped = if q32_value < 0 {
+        0
+    } else if q32_value > F {
+        F
+    } else {
+        q32_value
+    };
+
+    // Convert: (clamped * u64::MAX) / 2^32
+    // Do arithmetic in u128 to avoid overflow
+    let result_u128 = (clamped as u128 * u64::MAX as u128) / F as u128;
+    result_u128.min(u64::MAX as u128) as u64
+}
+
+/// Convert Portfolio to deposit_withdraw::Account
+///
+/// This enables using the verified deposit/withdraw model for:
+/// - Computing safe withdrawal amounts (respecting margin and vesting)
+/// - Validating deposit operations
+/// - Proving properties D2-D5
+///
+/// # Arguments
+///
+/// * `portfolio` - Production portfolio
+/// * `registry` - Global registry (for unlocked_frac)
+///
+/// # Returns
+///
+/// model_safety::deposit_withdraw::Account with converted fields
+pub fn portfolio_to_deposit_account(
+    portfolio: &Portfolio,
+    registry: &SlabRegistry,
+) -> model_safety::deposit_withdraw::Account {
+    model_safety::deposit_withdraw::Account {
+        principal: portfolio.principal,
+        equity: portfolio.equity,
+        vested_pnl: portfolio.vested_pnl,
+        maintenance_margin: portfolio.mm as i128,
+    }
+}
+
+/// Get safe withdrawal amount using verified model
+///
+/// This wraps the verified `max_withdrawable` function from deposit_withdraw model.
+///
+/// # Verified Properties (from Kani proofs)
+///
+/// When this function is used:
+/// - **D2**: Withdrawals change balances by exact amount ✅
+/// - **D3**: Withdrawals maintain margin safety ✅
+/// - **D4**: Withdrawals respect vesting caps ✅
+/// - **D5**: No withdrawal creates immediately liquidatable state ✅
+///
+/// # Arguments
+///
+/// * `portfolio` - User portfolio
+/// * `registry` - Global registry with vesting state
+///
+/// # Returns
+///
+/// Maximum safe withdrawal amount (respects both margin and vesting)
+pub fn get_max_withdrawable_verified(
+    portfolio: &Portfolio,
+    registry: &SlabRegistry,
+) -> i128 {
+    let account = portfolio_to_deposit_account(portfolio, registry);
+    let unlocked_frac_u64 = q32_to_u64_frac(registry.warmup_state.unlocked_frac);
+    model_safety::deposit_withdraw::max_withdrawable(
+        account,
+        unlocked_frac_u64,
+    )
+}
+
+/// Apply verified deposit operation
+///
+/// This uses the formally verified `apply_deposit` function.
+///
+/// # Verified Properties
+///
+/// - **D2**: Principal and equity increase by exact amount ✅
+/// - No overflow (checked arithmetic) ✅
+///
+/// # Arguments
+///
+/// * `portfolio` - User portfolio (mutable)
+/// * `amount` - Deposit amount
+///
+/// # Returns
+///
+/// Result indicating success or error
+pub fn apply_deposit_verified(
+    portfolio: &mut Portfolio,
+    amount: i128,
+) -> Result<(), model_safety::deposit_withdraw::DepositWithdrawError> {
+    // Create account directly from portfolio (registry not needed for deposits)
+    let account = model_safety::deposit_withdraw::Account {
+        principal: portfolio.principal,
+        equity: portfolio.equity,
+        vested_pnl: portfolio.vested_pnl,
+        maintenance_margin: portfolio.mm as i128,
+    };
+
+    let new_account = model_safety::deposit_withdraw::apply_deposit(account, amount)?;
+
+    // Apply changes back to portfolio
+    portfolio.principal = new_account.principal;
+    portfolio.equity = new_account.equity;
+    portfolio.vested_pnl = new_account.vested_pnl;
+
+    Ok(())
+}
+
+/// Apply verified withdrawal operation
+///
+/// This uses the formally verified `apply_withdraw` function.
+///
+/// # Verified Properties
+///
+/// - **D2**: Principal and equity decrease by exact amount ✅
+/// - **D3**: Withdrawal maintains margin safety ✅
+/// - **D4**: Withdrawal respects vesting caps ✅
+/// - **D5**: No withdrawal creates immediately liquidatable state ✅
+///
+/// # Arguments
+///
+/// * `portfolio` - User portfolio (mutable)
+/// * `registry` - Global registry with vesting params
+/// * `amount` - Withdrawal amount
+/// * `account_lamports` - Current portfolio account lamports (for rent check)
+///
+/// # Returns
+///
+/// Result indicating success or error
+pub fn apply_withdraw_verified(
+    portfolio: &mut Portfolio,
+    registry: &SlabRegistry,
+    amount: i128,
+    account_lamports: u64,
+) -> Result<(), model_safety::deposit_withdraw::DepositWithdrawError> {
+    let account = portfolio_to_deposit_account(portfolio, registry);
+
+    let unlocked_frac_u64 = q32_to_u64_frac(registry.warmup_state.unlocked_frac);
+
+    let params = model_safety::deposit_withdraw::Params {
+        min_rent_exempt: 1_000_000_000, // ~1 SOL
+        unlocked_frac: unlocked_frac_u64,
+    };
+
+    let new_account = model_safety::deposit_withdraw::apply_withdraw(
+        account,
+        &params,
+        amount,
+        account_lamports,
+    )?;
+
+    // Apply changes back to portfolio
+    portfolio.principal = new_account.principal;
+    portfolio.equity = new_account.equity;
+    portfolio.vested_pnl = new_account.vested_pnl;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod deposit_withdraw_bridge_tests {
+    use super::*;
+    use pinocchio::pubkey::Pubkey;
+
+    #[test]
+    fn test_portfolio_to_deposit_account() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = (1i128 << 32) / 2; // 50% unlocked (Q32.32)
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000; // $100
+        portfolio.equity = 120_000_000; // $120 (profit)
+        portfolio.vested_pnl = 15_000_000; // $15 vested
+        portfolio.mm = 10_000_000; // $10 maintenance margin
+
+        let account = portfolio_to_deposit_account(&portfolio, &registry);
+
+        assert_eq!(account.principal, 100_000_000);
+        assert_eq!(account.equity, 120_000_000);
+        assert_eq!(account.vested_pnl, 15_000_000);
+        assert_eq!(account.maintenance_margin, 10_000_000);
+    }
+
+    #[test]
+    fn test_get_max_withdrawable_verified_basic() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = 1i128 << 32; // Fully unlocked (Q32.32)
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.equity = 120_000_000;
+        portfolio.vested_pnl = 20_000_000; // All PnL vested
+        portfolio.mm = 0; // No position
+
+        let max = get_max_withdrawable_verified(&portfolio, &registry);
+
+        // Should be able to withdraw principal + vested PnL
+        // With u64::MAX for 100% unlocking, we get ~99.99% due to fixed-point
+        assert!(max >= 119_900_000); // At least $119.9
+        assert!(max <= 120_000_000); // At most $120
+    }
+
+    #[test]
+    fn test_get_max_withdrawable_verified_with_vesting_throttle() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = (1i128 << 32) / 2; // 50% unlocked (Q32.32)
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.vested_pnl = 20_000_000; // $20 vested PnL
+        portfolio.mm = 0;
+
+        let max = get_max_withdrawable_verified(&portfolio, &registry);
+
+        // Should be principal + (vested_pnl * 50%)
+        // = 100M + 10M = 110M
+        assert!(max >= 109_900_000); // Account for rounding
+        assert!(max <= 110_100_000);
+    }
+
+    #[test]
+    fn test_apply_deposit_verified_success() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.equity = 100_000_000;
+
+        let result = apply_deposit_verified(&mut portfolio, 50_000_000);
+
+        assert!(result.is_ok());
+        assert_eq!(portfolio.principal, 150_000_000);
+        assert_eq!(portfolio.equity, 150_000_000);
+    }
+
+    #[test]
+    fn test_apply_deposit_verified_zero_amount() {
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        let result = apply_deposit_verified(&mut portfolio, 0);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            model_safety::deposit_withdraw::DepositWithdrawError::ZeroAmount
+        );
+    }
+
+    #[test]
+    fn test_apply_withdraw_verified_success() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = 1i128 << 32; // Fully unlocked (Q32.32)
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.equity = 100_000_000;
+        portfolio.vested_pnl = 0;
+        portfolio.mm = 0; // No position
+
+        let account_lamports = 150_000_000_000u64; // 150 SOL
+
+        let result = apply_withdraw_verified(
+            &mut portfolio,
+            &registry,
+            50_000_000,
+            account_lamports,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(portfolio.principal, 50_000_000);
+        assert_eq!(portfolio.equity, 50_000_000);
+    }
+
+    #[test]
+    fn test_apply_withdraw_verified_exceeds_max() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = 0; // Nothing unlocked
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.equity = 100_000_000;
+        portfolio.vested_pnl = 20_000_000;
+        portfolio.mm = 0;
+
+        let account_lamports = 150_000_000_000u64;
+
+        // Try to withdraw more than principal (vesting throttled to 0)
+        let result = apply_withdraw_verified(
+            &mut portfolio,
+            &registry,
+            110_000_000,
+            account_lamports,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            model_safety::deposit_withdraw::DepositWithdrawError::InsufficientWithdrawable
+        );
+    }
+
+    #[test]
+    fn test_apply_withdraw_verified_margin_safety() {
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        registry.warmup_state.unlocked_frac = 1i128 << 32; // 100% unlocked (Q32.32)
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000_000;
+        portfolio.equity = 100_000_000;
+        portfolio.vested_pnl = 0;
+        portfolio.mm = 95_000_000; // High margin requirement
+
+        let account_lamports = 150_000_000_000u64;
+
+        // Try to withdraw too much (would drop below maintenance margin)
+        let result = apply_withdraw_verified(
+            &mut portfolio,
+            &registry,
+            50_000_000,
+            account_lamports,
+        );
+
+        // Should be rejected by margin safety check
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            model_safety::deposit_withdraw::DepositWithdrawError::WouldBeLiquidatable
+        );
+    }
+}

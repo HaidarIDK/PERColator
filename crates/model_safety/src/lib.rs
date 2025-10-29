@@ -18,6 +18,8 @@ pub mod lp_bucket;
 pub mod adaptive_warmup;
 pub mod crisis;
 pub mod fee_distribution;
+pub mod deposit_withdraw;
+pub mod orderbook;
 
 #[cfg(test)]
 pub mod negative_tests;

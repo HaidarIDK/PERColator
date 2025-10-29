@@ -82,18 +82,13 @@ pub fn process_deposit(
         &[user_account, portfolio_account, system_program],
     )?;
 
-    // Update portfolio state
-    // Principal = deposits - withdrawals (never haircutted)
-    // Equity = principal + PnL
+    // Update portfolio state using FORMALLY VERIFIED deposit logic
+    // This call ensures properties D2 (exact amount increase) is maintained
+    // See: crates/model_safety/src/deposit_withdraw.rs for Kani proofs
     let amount_i128 = amount as i128;
 
-    portfolio.principal = portfolio.principal
-        .checked_add(amount_i128)
-        .ok_or(PercolatorError::Overflow)?;
-
-    portfolio.equity = portfolio.equity
-        .checked_add(amount_i128)
-        .ok_or(PercolatorError::Overflow)?;
+    crate::state::model_bridge::apply_deposit_verified(portfolio, amount_i128)
+        .map_err(|_| PercolatorError::Overflow)?;
 
     msg!("Deposit successful");
 

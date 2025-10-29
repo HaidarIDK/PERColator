@@ -9,7 +9,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, Side}};
+use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order}};
 use crate::state::{SlabState, Side as OrderSide};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, validate_signer, borrow_account_data_mut, InstructionReader};
@@ -165,8 +165,8 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
 
     // Convert side byte to Side enum
     let side = match side_byte {
-        0 => Side::Buy,
-        1 => Side::Sell,
+        0 => OrderSide::Buy,
+        1 => OrderSide::Sell,
         _ => {
             msg!("Error: Invalid side");
             return Err(PercolatorError::InvalidSide.into());

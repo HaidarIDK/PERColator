@@ -53,26 +53,40 @@ pub fn process_withdraw(
         return Err(PercolatorError::Unauthorized.into());
     }
 
-    // Check adaptive warmup withdrawal limit
-    // Principal is always withdrawable, but vested PnL is capped by unlocked_frac
-    let max_withdrawable = portfolio.max_withdrawable_with_warmup(registry.warmup_state.unlocked_frac);
-
-    // Convert to u64 for comparison (max with 0 to handle negative equity)
-    let max_withdrawable_u64 = max_withdrawable.max(0) as u64;
-
-    if amount > max_withdrawable_u64 {
-        msg!("Error: Insufficient withdrawable funds");
-        return Err(PercolatorError::InsufficientFunds.into());
-    }
-
-    // Check portfolio account will remain rent-exempt after withdrawal
-    let min_rent_exempt = 1_000_000_000u64; // ~1 SOL for 135KB account (approximate)
+    // Update portfolio state using FORMALLY VERIFIED withdrawal logic
+    // This call ensures properties D2-D5 are maintained:
+    // - D2: Exact amount decrease
+    // - D3: Margin safety preserved
+    // - D4: Vesting throttle respected
+    // - D5: No immediately liquidatable state
+    // See: crates/model_safety/src/deposit_withdraw.rs for Kani proofs
+    let amount_i128 = amount as i128;
     let portfolio_lamports = portfolio_account.lamports();
 
-    if portfolio_lamports < amount + min_rent_exempt {
-        msg!("Error: Withdrawal would make portfolio account not rent-exempt");
-        return Err(PercolatorError::InsufficientFunds.into());
-    }
+    crate::state::model_bridge::apply_withdraw_verified(
+        portfolio,
+        registry,
+        amount_i128,
+        portfolio_lamports,
+    )
+    .map_err(|e| match e {
+        model_safety::deposit_withdraw::DepositWithdrawError::InsufficientWithdrawable => {
+            msg!("Error: Insufficient withdrawable funds (vesting limit)");
+            PercolatorError::InsufficientFunds
+        }
+        model_safety::deposit_withdraw::DepositWithdrawError::InsufficientRentExempt => {
+            msg!("Error: Withdrawal would make portfolio account not rent-exempt");
+            PercolatorError::InsufficientFunds
+        }
+        model_safety::deposit_withdraw::DepositWithdrawError::WouldBeLiquidatable => {
+            msg!("Error: Withdrawal would create liquidatable position");
+            PercolatorError::InsufficientFunds
+        }
+        _ => {
+            msg!("Error: Invalid withdrawal");
+            PercolatorError::InvalidQuantity
+        }
+    })?;
 
     // Transfer SOL from portfolio to user
     // Since the router program owns the portfolio account, we can directly manipulate lamports
@@ -81,18 +95,6 @@ pub fn process_withdraw(
         *portfolio_account.borrow_mut_lamports_unchecked() -= amount;
         *user_account.borrow_mut_lamports_unchecked() += amount;
     }
-
-    // Update portfolio state
-    // Reduce principal and equity
-    let amount_i128 = amount as i128;
-
-    portfolio.principal = portfolio.principal
-        .checked_sub(amount_i128)
-        .ok_or(PercolatorError::Underflow)?;
-
-    portfolio.equity = portfolio.equity
-        .checked_sub(amount_i128)
-        .ok_or(PercolatorError::Underflow)?;
 
     msg!("Withdrawal successful");
 

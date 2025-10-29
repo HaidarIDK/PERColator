@@ -2,7 +2,7 @@
 //!
 //! Allows users to place resting limit orders in the orderbook
 
-use crate::state::{SlabState, Side as OrderSide};
+use crate::state::{SlabState, Side as OrderSide, model_bridge};
 use percolator_common::PercolatorError;
 use pinocchio::{msg, pubkey::Pubkey, sysvars::{clock::Clock, Sysvar}};
 
@@ -45,16 +45,35 @@ pub fn process_place_order(
     // In BPF, this would use get_clock_sysvar(); for testing we use a default
     let timestamp = Clock::get().map(|c| c.unix_timestamp as u64).unwrap_or(0);
 
-    // Insert order into the book
-    let order_id = slab.book.insert_order(
-        side,
+    // Insert order using FORMALLY VERIFIED orderbook logic
+    // This call ensures property O1 (sorted price-time priority) is maintained
+    // See: crates/model_safety/src/orderbook.rs for Kani proofs
+    let order_id = model_bridge::insert_order_verified(
+        &mut slab.book,
         *owner,
+        side,
         price,
         qty,
         timestamp,
-    ).map_err(|_| {
-        msg!("Error inserting order");
-        PercolatorError::PoolFull
+    ).map_err(|e| {
+        match e {
+            "Invalid price" => {
+                msg!("Error: Price must be positive");
+                PercolatorError::InvalidPrice
+            }
+            "Invalid quantity" => {
+                msg!("Error: Quantity must be positive");
+                PercolatorError::InvalidQuantity
+            }
+            "Order book full" => {
+                msg!("Error: Order book full");
+                PercolatorError::PoolFull
+            }
+            _ => {
+                msg!("Error: Failed to insert order");
+                PercolatorError::PoolFull
+            }
+        }
     })?;
 
     // Increment seqno (book state changed)

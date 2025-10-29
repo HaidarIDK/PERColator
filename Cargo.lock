@@ -3244,6 +3244,7 @@ name = "percolator-slab"
 version = "0.1.0"
 dependencies = [
  "adapter-core",
+ "model_safety",
  "percolator-common",
  "pinocchio",
  "pinocchio-pubkey",
