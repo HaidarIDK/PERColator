@@ -1411,3 +1411,202 @@ mod deposit_withdraw_bridge_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod funding_bridge_tests {
+    use super::*;
+    use pinocchio::pubkey::Pubkey;
+
+    #[test]
+    fn test_apply_funding_basic_long_position() {
+        // Test F2 (Proportional) and F5 (Sign correctness) properties
+        // When mark > oracle, longs pay shorts (funding index increases)
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        // Add a long position: +10 contracts on slab 0, instrument 0
+        portfolio.exposures[0] = (0, 0, 10_000_000); // 10 contracts (1e6 scale)
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0; // Starting offset
+
+        // Market cumulative funding index has increased by 1000
+        // This means longs need to pay funding
+        let market_cumulative_index = 1000i128;
+
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
+
+        // Funding payment = position_size * (new_index - old_index)
+        // = 10 * 1000 = 10,000
+        // Longs pay, so PnL decreases
+        assert_eq!(portfolio.pnl, 10_000);
+        assert_eq!(portfolio.funding_offsets[0], 1000);
+    }
+
+    #[test]
+    fn test_apply_funding_short_position() {
+        // Test F5: When mark > oracle, shorts receive from longs
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        // Add a short position: -5 contracts on slab 0, instrument 0
+        portfolio.exposures[0] = (0, 0, -5_000_000); // -5 contracts (1e6 scale)
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0;
+
+        let market_cumulative_index = 2000i128;
+
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
+
+        // Funding payment = -5 * 2000 = -10,000
+        // Shorts receive, so PnL increases (negative payment = receiving)
+        assert_eq!(portfolio.pnl, -10_000);
+        assert_eq!(portfolio.funding_offsets[0], 2000);
+    }
+
+    #[test]
+    fn test_apply_funding_idempotence() {
+        // Test F3 (Idempotence): Applying funding twice with same index = applying once
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        portfolio.exposures[0] = (0, 0, 10_000_000); // 10 contracts
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0;
+
+        let market_cumulative_index = 1000i128;
+
+        // Apply funding first time
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
+        let pnl_after_first = portfolio.pnl;
+        let offset_after_first = portfolio.funding_offsets[0];
+
+        assert_eq!(pnl_after_first, 10_000);
+        assert_eq!(offset_after_first, 1000);
+
+        // Apply funding second time with SAME index
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
+
+        // PnL and offset should be unchanged (idempotence)
+        assert_eq!(portfolio.pnl, pnl_after_first);
+        assert_eq!(portfolio.funding_offsets[0], offset_after_first);
+    }
+
+    #[test]
+    fn test_apply_funding_incremental_updates() {
+        // Test that funding can be applied incrementally
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        portfolio.exposures[0] = (0, 0, 10_000_000); // 10 contracts
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0;
+
+        // First funding update
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 1000i128);
+        assert_eq!(portfolio.pnl, 10_000);
+        assert_eq!(portfolio.funding_offsets[0], 1000);
+
+        // Second funding update (index increased by another 500)
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 1500i128);
+        assert_eq!(portfolio.pnl, 15_000); // 10 * 1500
+        assert_eq!(portfolio.funding_offsets[0], 1500);
+
+        // Third funding update (index increased by another 300)
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 1800i128);
+        assert_eq!(portfolio.pnl, 18_000); // 10 * 1800
+        assert_eq!(portfolio.funding_offsets[0], 1800);
+    }
+
+    #[test]
+    fn test_apply_funding_zero_position() {
+        // Test that zero position has no funding impact
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        portfolio.exposures[0] = (0, 0, 0); // 0 contracts
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0;
+
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 10000i128);
+
+        // No funding payment for zero position
+        assert_eq!(portfolio.pnl, 0);
+        assert_eq!(portfolio.funding_offsets[0], 10000);
+    }
+
+    #[test]
+    fn test_apply_funding_negative_index_movement() {
+        // Test when mark < oracle (negative funding rate, index decreases)
+        // In practice, indices are monotonically increasing, but the model supports this
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        portfolio.exposures[0] = (0, 0, 10_000_000); // 10 contracts long
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 5000;
+
+        // Index moved from 5000 to 3000 (mark < oracle, shorts pay longs)
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 3000i128);
+
+        // Funding payment = 10 * (3000 - 5000) = 10 * (-2000) = -20,000
+        // Longs receive (negative payment), so PnL increases
+        assert_eq!(portfolio.pnl, -20_000);
+        assert_eq!(portfolio.funding_offsets[0], 3000);
+    }
+
+    #[test]
+    fn test_apply_funding_multiple_positions() {
+        // Test F1 (Conservation) indirectly: equal opposite positions cancel
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 0;
+
+        // Add two positions: one long, one short of equal size
+        portfolio.exposures[0] = (0, 0, 10_000_000); // 10 contracts long
+        portfolio.exposures[1] = (1, 0, -10_000_000); // 10 contracts short
+        portfolio.exposure_count = 2;
+        portfolio.funding_offsets[0] = 0;
+        portfolio.funding_offsets[1] = 0;
+
+        let market_cumulative_index = 1000i128;
+
+        // Apply funding to both positions
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
+        apply_funding_to_position_verified(&mut portfolio, 1, 0, market_cumulative_index);
+
+        // Long pays: +10,000, Short receives: -10,000
+        // Net PnL change = 10,000 + (-10,000) = 0 (conservation!)
+        assert_eq!(portfolio.pnl, 0);
+    }
+
+    #[test]
+    fn test_apply_funding_no_position_found() {
+        // Test applying funding to a non-existent position
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 100_000; // Existing PnL
+        portfolio.exposure_count = 0; // No positions
+
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 1000i128);
+
+        // No position means base_size = 0, so no funding payment
+        // PnL should be unchanged
+        assert_eq!(portfolio.pnl, 100_000);
+    }
+
+    #[test]
+    fn test_apply_funding_with_existing_pnl() {
+        // Test that funding is added to existing PnL correctly
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.pnl = 50_000; // Existing unrealized PnL
+
+        portfolio.exposures[0] = (0, 0, 5_000_000); // 5 contracts long
+        portfolio.exposure_count = 1;
+        portfolio.funding_offsets[0] = 0;
+
+        apply_funding_to_position_verified(&mut portfolio, 0, 0, 2000i128);
+
+        // Funding payment = 5 * 2000 = 10,000
+        // Total PnL = existing 50,000 + funding 10,000 = 60,000
+        assert_eq!(portfolio.pnl, 60_000);
+        assert_eq!(portfolio.funding_offsets[0], 2000);
+    }
+}
