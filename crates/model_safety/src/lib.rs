@@ -20,6 +20,7 @@ pub mod crisis;
 pub mod fee_distribution;
 pub mod deposit_withdraw;
 pub mod orderbook;
+pub mod lp_operations;
 
 #[cfg(test)]
 pub mod negative_tests;

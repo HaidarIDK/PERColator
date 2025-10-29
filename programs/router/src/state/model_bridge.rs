@@ -379,6 +379,18 @@ pub fn socialize_losses_verified(
     Ok(())
 }
 
+// ============================================================================
+// LP Operations Bridge Functions
+// ============================================================================
+
+/// Apply LP shares delta using verified logic (VERIFIED)
+///
+/// Wraps the formally verified shares delta function from model_safety.
+/// Property LP1: No overflow or underflow in shares arithmetic.
+pub fn apply_shares_delta_verified(current: u128, delta: i128) -> Result<u128, &'static str> {
+    model_safety::lp_operations::apply_shares_delta_verified(current, delta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

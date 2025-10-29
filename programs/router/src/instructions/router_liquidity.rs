@@ -90,9 +90,14 @@ pub fn process_router_liquidity(
     // Read LiquidityResult from return_data
     let result = read_liquidity_result_from_return_data()?;
 
-    // Apply LP shares delta
-    seat.lp_shares = apply_shares_delta(seat.lp_shares, result.lp_shares_delta)
-        .map_err(|_| ProgramError::ArithmeticOverflow)?;
+    // Apply LP shares delta using FORMALLY VERIFIED logic
+    // Property LP1: No overflow or underflow in shares arithmetic
+    // See: crates/model_safety/src/lp_operations.rs for Kani proofs
+    seat.lp_shares = crate::state::model_bridge::apply_shares_delta_verified(
+        seat.lp_shares,
+        result.lp_shares_delta,
+    )
+    .map_err(|_| ProgramError::ArithmeticOverflow)?;
 
     // Apply exposure delta
     seat.exposure.base_q64 = seat
@@ -131,21 +136,7 @@ pub fn process_router_liquidity(
     Ok(())
 }
 
-/// Apply shares delta to current shares
-///
-/// This is equivalent to `adapter_core::add_shares_checked` but operates
-/// on u128 current value and i128 delta.
-fn apply_shares_delta(current: u128, delta: i128) -> Result<u128, ()> {
-    if delta >= 0 {
-        current.checked_add(delta as u128).ok_or(())
-    } else {
-        let abs_delta = delta.abs() as u128;
-        if current < abs_delta {
-            return Err(());
-        }
-        Ok(current - abs_delta)
-    }
-}
+// Removed: apply_shares_delta() - now using formally verified version from model_bridge
 
 /// Build instruction data for adapter CPI
 ///
