@@ -404,6 +404,8 @@ pub async fn place_order(
     side: String,
     price: i64,
     qty: i64,
+    post_only: bool,
+    reduce_only: bool,
 ) -> Result<()> {
     println!("{}", "=== Place Order ===".bright_green().bold());
     println!("{} {}", "Network:".bright_cyan(), config.network);
@@ -411,6 +413,12 @@ pub async fn place_order(
     println!("{} {}", "Side:".bright_cyan(), side);
     println!("{} {} ({})", "Price:".bright_cyan(), price, price as f64 / 1_000_000.0);
     println!("{} {} ({})", "Quantity:".bright_cyan(), qty, qty as f64 / 1_000_000.0);
+    if post_only {
+        println!("{} {}", "Post-only:".bright_cyan(), "true");
+    }
+    if reduce_only {
+        println!("{} {}", "Reduce-only:".bright_cyan(), "true");
+    }
 
     // Parse side
     let side_u8 = match side.to_lowercase().as_str() {
@@ -443,11 +451,15 @@ pub async fn place_order(
     // - Bytes 1-8: price (i64 little-endian)
     // - Bytes 9-16: qty (i64 little-endian)
     // - Byte 17: side (u8)
-    let mut instruction_data = Vec::with_capacity(18);
+    // - Byte 18: post_only (u8, optional)
+    // - Byte 19: reduce_only (u8, optional)
+    let mut instruction_data = Vec::with_capacity(20);
     instruction_data.push(2); // PlaceOrder discriminator
     instruction_data.extend_from_slice(&price.to_le_bytes());
     instruction_data.extend_from_slice(&qty.to_le_bytes());
     instruction_data.push(side_u8);
+    instruction_data.push(post_only as u8);
+    instruction_data.push(reduce_only as u8);
 
     // Build PlaceOrder instruction
     // Accounts:

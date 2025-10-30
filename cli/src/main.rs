@@ -300,6 +300,14 @@ enum MatcherCommands {
         /// Quantity (scaled by 1e6, e.g., 1_000_000 for quantity 1.0)
         #[arg(long)]
         qty: i64,
+
+        /// Post-only (reject if order would cross immediately)
+        #[arg(long)]
+        post_only: bool,
+
+        /// Reduce-only (order can only reduce existing position)
+        #[arg(long)]
+        reduce_only: bool,
     },
 
     /// Cancel an order by ID
@@ -642,8 +650,8 @@ async fn main() -> anyhow::Result<()> {
                 MatcherCommands::UpdateFunding { slab, oracle_price, wait_time } => {
                     matcher::update_funding(&config, slab, oracle_price, wait_time).await?;
                 }
-                MatcherCommands::PlaceOrder { slab, side, price, qty } => {
-                    matcher::place_order(&config, slab, side, price, qty).await?;
+                MatcherCommands::PlaceOrder { slab, side, price, qty, post_only, reduce_only } => {
+                    matcher::place_order(&config, slab, side, price, qty, post_only, reduce_only).await?;
                 }
                 MatcherCommands::CancelOrder { slab, order_id } => {
                     matcher::cancel_order(&config, slab, order_id).await?;
