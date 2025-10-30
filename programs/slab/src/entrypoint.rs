@@ -11,6 +11,7 @@ use pinocchio::{
 
 use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding}};
 use crate::state::{SlabState, Side as OrderSide};
+use crate::state::model_bridge::{TimeInForce, SelfTradePrevent};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, validate_signer, borrow_account_data_mut, InstructionReader};
 
@@ -137,21 +138,25 @@ fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data:
 /// 0. `[writable]` Slab state account
 /// 1. `[writable]` Fill receipt account
 /// 2. `[signer]` Router signer
+/// 3. Taker owner (for self-trade prevention)
 ///
-/// Expected data layout (21 bytes):
+/// Expected data layout:
 /// - expected_seqno: u32 (4 bytes) - expected slab seqno (TOCTOU protection)
 /// - side: u8 (1 byte) - 0 = Buy, 1 = Sell
 /// - qty: i64 (8 bytes) - quantity to fill (1e6 scale)
 /// - limit_px: i64 (8 bytes) - limit price (1e6 scale)
+/// - time_in_force: u8 (1 byte, optional) - 0=GTC, 1=IOC, 2=FOK (default: GTC)
+/// - self_trade_prevention: u8 (1 byte, optional) - 0=None, 1=CancelNewest, 2=CancelOldest, 3=DecrementAndCancel (default: None)
 fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 3 {
-        msg!("Error: CommitFill instruction requires at least 3 accounts");
+    if accounts.len() < 4 {
+        msg!("Error: CommitFill instruction requires at least 4 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
     let slab_account = &accounts[0];
     let receipt_account = &accounts[1];
     let router_signer = &accounts[2];
+    let taker_owner_account = &accounts[3];
 
     // Validate slab account
     validate_owner(slab_account, program_id)?;
@@ -168,6 +173,10 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
     let qty = reader.read_i64()?;
     let limit_px = reader.read_i64()?;
 
+    // Optional TIF and STP parameters (backward compatible - default to GTC and None)
+    let tif_byte = reader.read_u8().unwrap_or(0);
+    let stp_byte = reader.read_u8().unwrap_or(0);
+
     // Convert side byte to Side enum
     let side = match side_byte {
         0 => OrderSide::Buy,
@@ -178,15 +187,41 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
         }
     };
 
+    // Convert TIF byte to TimeInForce enum
+    let time_in_force = match tif_byte {
+        0 => TimeInForce::GTC,
+        1 => TimeInForce::IOC,
+        2 => TimeInForce::FOK,
+        _ => {
+            msg!("Error: Invalid time-in-force");
+            return Err(PercolatorError::InvalidTimeInForce.into());
+        }
+    };
+
+    // Convert STP byte to SelfTradePrevent enum
+    let self_trade_prevention = match stp_byte {
+        0 => SelfTradePrevent::None,
+        1 => SelfTradePrevent::CancelNewest,
+        2 => SelfTradePrevent::CancelOldest,
+        3 => SelfTradePrevent::DecrementAndCancel,
+        _ => {
+            msg!("Error: Invalid self-trade prevention");
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+    };
+
     // Call the commit_fill logic
     process_commit_fill(
         slab,
         receipt_account,
         router_signer.key(),
         expected_seqno,
+        taker_owner_account.key(),
         side,
         qty,
         limit_px,
+        time_in_force,
+        self_trade_prevention,
     )?;
 
     msg!("CommitFill processed successfully");
@@ -199,10 +234,12 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
 /// 0. `[writable]` Slab state account
 /// 1. `[signer]` Order owner
 ///
-/// Expected data layout (17 bytes):
+/// Expected data layout:
 /// - side: u8 (1 byte) - 0 = Buy, 1 = Sell
 /// - price: i64 (8 bytes) - limit price (1e6 scale)
 /// - qty: i64 (8 bytes) - order quantity (1e6 scale)
+/// - post_only: u8 (1 byte, optional) - 1 = true, 0 = false (default: 0)
+/// - reduce_only: u8 (1 byte, optional) - 1 = true, 0 = false (default: 0)
 fn process_place_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 2 {
         msg!("Error: PlaceOrder instruction requires at least 2 accounts");
@@ -226,6 +263,10 @@ fn process_place_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
     let price = reader.read_i64()?;
     let qty = reader.read_i64()?;
 
+    // Optional flags (backward compatible - default to false if not present)
+    let post_only = reader.read_u8().unwrap_or(0) != 0;
+    let reduce_only = reader.read_u8().unwrap_or(0) != 0;
+
     // Convert side byte to Side enum
     let side = match side_byte {
         0 => OrderSide::Buy,
@@ -243,6 +284,8 @@ fn process_place_order_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
         side,
         price,
         qty,
+        post_only,
+        reduce_only,
     )?;
 
     msg!("PlaceOrder processed successfully");

@@ -28,6 +28,8 @@ pub struct SlabHeader {
     pub tick: i64,
     /// Lot size (1e6 fixed)
     pub lot: i64,
+    /// Minimum order size (1e6 fixed)
+    pub min_order_size: i64,
     /// Mark price from shared oracle (1e6 scale)
     pub mark_px: i64,
 
@@ -88,6 +90,7 @@ impl SlabHeader {
             contract_size,
             tick: 1_000_000,           // $1 tick
             lot: 1_000_000,            // 1.0 lot
+            min_order_size: 1_000_000, // 1.0 minimum
             mark_px,
             taker_fee_bps,
             funding_rate: 0,           // No funding initially

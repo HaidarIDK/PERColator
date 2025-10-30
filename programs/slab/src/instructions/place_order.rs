@@ -16,6 +16,8 @@ use pinocchio::{msg, pubkey::Pubkey, sysvars::{clock::Clock, Sysvar}};
 /// * `side` - Buy or Sell
 /// * `price` - Limit price (1e6 scale, positive)
 /// * `qty` - Order quantity (1e6 scale, positive)
+/// * `post_only` - If true, reject order if it would cross immediately
+/// * `reduce_only` - If true, order can only reduce existing position
 ///
 /// # Returns
 /// * Order ID of the placed order
@@ -23,6 +25,10 @@ use pinocchio::{msg, pubkey::Pubkey, sysvars::{clock::Clock, Sysvar}};
 /// # Errors
 /// * InvalidPrice - Price must be positive
 /// * InvalidQuantity - Quantity must be positive
+/// * InvalidTickSize - Price not aligned to tick size
+/// * InvalidLotSize - Quantity not aligned to lot size
+/// * OrderTooSmall - Quantity below minimum order size
+/// * WouldCross - Post-only order would cross
 /// * OrderBookFull - Book has reached capacity
 pub fn process_place_order(
     slab: &mut SlabState,
@@ -30,6 +36,8 @@ pub fn process_place_order(
     side: OrderSide,
     price: i64,
     qty: i64,
+    post_only: bool,
+    reduce_only: bool,
 ) -> Result<u64, PercolatorError> {
     // Validate order parameters
     if price <= 0 {
@@ -45,18 +53,40 @@ pub fn process_place_order(
     // In BPF, this would use get_clock_sysvar(); for testing we use a default
     let timestamp = Clock::get().map(|c| c.unix_timestamp as u64).unwrap_or(0);
 
-    // Insert order using FORMALLY VERIFIED orderbook logic
-    // This call ensures property O1 (sorted price-time priority) is maintained
+    // Insert order using FORMALLY VERIFIED orderbook logic with extended validation
+    // This call ensures properties O1 (sorted price-time priority), O7 (tick size),
+    // O8 (lot/min size), and O9 (post-only) are maintained
     // See: crates/model_safety/src/orderbook.rs for Kani proofs
-    let order_id = model_bridge::insert_order_verified(
+    let order_id = model_bridge::insert_order_extended_verified(
         &mut slab.book,
         *owner,
         side,
         price,
         qty,
         timestamp,
+        slab.header.tick,           // tick_size
+        slab.header.lot,            // lot_size
+        slab.header.min_order_size, // min_order_size
+        post_only,
+        reduce_only,
     ).map_err(|e| {
         match e {
+            "Invalid tick size" => {
+                msg!("Error: Price not aligned to tick size");
+                PercolatorError::InvalidTickSize
+            }
+            "Invalid lot size" => {
+                msg!("Error: Quantity not aligned to lot size");
+                PercolatorError::InvalidLotSize
+            }
+            "Order too small" => {
+                msg!("Error: Order quantity below minimum");
+                PercolatorError::OrderTooSmall
+            }
+            "Post-only order would cross" => {
+                msg!("Error: Post-only order would cross existing orders");
+                PercolatorError::WouldCross
+            }
             "Invalid price" => {
                 msg!("Error: Price must be positive");
                 PercolatorError::InvalidPrice

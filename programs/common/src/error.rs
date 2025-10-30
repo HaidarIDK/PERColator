@@ -47,6 +47,12 @@ pub enum PercolatorError {
     InvalidQuantity = 211,
     PoolFull = 212,
     SeqnoMismatch = 213,
+    InvalidTickSize = 214,
+    InvalidLotSize = 215,
+    OrderTooSmall = 216,
+    WouldCross = 217,
+    CannotFillCompletely = 218,
+    SelfTrade = 219,
 
     // Matching errors (300-399)
     InvalidSide = 300,

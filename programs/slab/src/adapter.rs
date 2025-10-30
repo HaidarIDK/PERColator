@@ -122,6 +122,8 @@ pub(crate) fn process_ob_add(
             order_side,
             price,
             qty,
+            false, // post_only (LP orders not subject to post-only)
+            false, // reduce_only (LP orders can open positions)
         )?;
 
         // Calculate exposure delta for this order
