@@ -21,6 +21,39 @@ pub enum Side {
     Sell,
 }
 
+/// Time-in-force policy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeInForce {
+    /// Good-till-cancel: order rests until filled or cancelled
+    GTC,
+    /// Immediate-or-cancel: match immediately, cancel remainder
+    IOC,
+    /// Fill-or-kill: fill complete order immediately or reject
+    FOK,
+}
+
+/// Self-trade prevention policy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTradePrevent {
+    /// Allow self-trades
+    None,
+    /// Cancel the incoming (newer) order
+    CancelNewest,
+    /// Cancel the resting (older) order
+    CancelOldest,
+    /// Reduce both orders by overlap amount
+    DecrementAndCancel,
+}
+
+/// Order flags
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderFlags {
+    /// Post-only: reject if order would cross immediately
+    pub post_only: bool,
+    /// Reduce-only: can only reduce existing position
+    pub reduce_only: bool,
+}
+
 /// Simplified order for formal verification (no Pubkey dependency)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Order {
@@ -70,6 +103,12 @@ pub struct Orderbook {
     pub bids: [Order; MAX_ORDERS_PER_SIDE],
     /// Sell orders (sorted ascending by price, then FIFO by timestamp)
     pub asks: [Order; MAX_ORDERS_PER_SIDE],
+    /// Minimum price increment (tick size, 0 = no restriction)
+    pub tick_size: i64,
+    /// Minimum quantity increment (lot size, 0 = no restriction)
+    pub lot_size: i64,
+    /// Minimum order size (0 = no restriction)
+    pub min_order_size: i64,
 }
 
 impl Orderbook {
@@ -81,6 +120,23 @@ impl Orderbook {
             num_asks: 0,
             bids: [Order::empty(); MAX_ORDERS_PER_SIDE],
             asks: [Order::empty(); MAX_ORDERS_PER_SIDE],
+            tick_size: 0,
+            lot_size: 0,
+            min_order_size: 0,
+        }
+    }
+
+    /// Create orderbook with market parameters
+    pub const fn with_params(tick_size: i64, lot_size: i64, min_order_size: i64) -> Self {
+        Self {
+            next_order_id: 1,
+            num_bids: 0,
+            num_asks: 0,
+            bids: [Order::empty(); MAX_ORDERS_PER_SIDE],
+            asks: [Order::empty(); MAX_ORDERS_PER_SIDE],
+            tick_size,
+            lot_size,
+            min_order_size,
         }
     }
 }
@@ -111,6 +167,18 @@ pub enum OrderbookError {
     Overflow,
     /// No liquidity available
     NoLiquidity,
+    /// Price not a multiple of tick size
+    InvalidTickSize,
+    /// Quantity not a multiple of lot size
+    InvalidLotSize,
+    /// Order size below minimum
+    OrderTooSmall,
+    /// Post-only order would cross
+    WouldCross,
+    /// Fill-or-kill order cannot be filled completely
+    CannotFillCompletely,
+    /// Self-trade detected
+    SelfTrade,
 }
 
 /// Check if bids are sorted correctly (descending price, FIFO timestamp)
@@ -692,6 +760,311 @@ mod proofs {
         }
         // If it fails, it should be with a proper error, not a panic
     }
+}
+
+//==============================================================================
+// Extended Order Book Features (Tick/Lot, TimeInForce, Post-Only, STPF)
+//==============================================================================
+
+/// Validate price against tick size
+///
+/// Property O7: Price validity
+/// - If tick_size > 0, price must be a multiple of tick_size
+/// - If tick_size == 0, no restriction
+pub fn validate_tick_size(price: i64, tick_size: i64) -> Result<(), OrderbookError> {
+    if tick_size > 0 && price % tick_size != 0 {
+        return Err(OrderbookError::InvalidTickSize);
+    }
+    Ok(())
+}
+
+/// Validate quantity against lot size and minimum
+///
+/// Property O8: Quantity validity
+/// - If lot_size > 0, qty must be a multiple of lot_size
+/// - If min_order_size > 0, qty must be >= min_order_size
+pub fn validate_lot_size(qty: i64, lot_size: i64, min_order_size: i64) -> Result<(), OrderbookError> {
+    if lot_size > 0 && qty % lot_size != 0 {
+        return Err(OrderbookError::InvalidLotSize);
+    }
+    if min_order_size > 0 && qty < min_order_size {
+        return Err(OrderbookError::OrderTooSmall);
+    }
+    Ok(())
+}
+
+/// Check if an order would cross immediately (for post-only validation)
+///
+/// Property O9: Post-only check
+/// - Buy order crosses if price >= best ask
+/// - Sell order crosses if price <= best bid
+pub fn would_cross(book: &Orderbook, side: Side, price: i64) -> bool {
+    match side {
+        Side::Buy => {
+            // Buy crosses if price >= best ask
+            if book.num_asks > 0 {
+                price >= book.asks[0].price
+            } else {
+                false
+            }
+        }
+        Side::Sell => {
+            // Sell crosses if price <= best bid
+            if book.num_bids > 0 {
+                price <= book.bids[0].price
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Check if a fill would be a self-trade
+///
+/// Property O10: Self-trade detection
+/// - Returns true if maker and taker have same owner_id
+pub fn is_self_trade(maker_owner: u64, taker_owner: u64) -> bool {
+    maker_owner == taker_owner
+}
+
+/// Insert order with extended validation (tick/lot, post-only)
+///
+/// Property O7+O8+O9: Extended validation
+/// - Validates tick size, lot size, minimum order size
+/// - Enforces post-only constraint if flags.post_only == true
+pub fn insert_order_extended(
+    book: &mut Orderbook,
+    owner_id: u64,
+    side: Side,
+    price: i64,
+    qty: i64,
+    timestamp: u64,
+    flags: OrderFlags,
+) -> Result<u64, OrderbookError> {
+    // Basic validation (positive price/qty)
+    if price <= 0 {
+        return Err(OrderbookError::InvalidPrice);
+    }
+    if qty <= 0 {
+        return Err(OrderbookError::InvalidQuantity);
+    }
+
+    // Validate tick size
+    validate_tick_size(price, book.tick_size)?;
+
+    // Validate lot size and minimum
+    validate_lot_size(qty, book.lot_size, book.min_order_size)?;
+
+    // Post-only check
+    if flags.post_only && would_cross(book, side, price) {
+        return Err(OrderbookError::WouldCross);
+    }
+
+    // Call original insert_order
+    insert_order(book, owner_id, side, price, qty, timestamp)
+}
+
+/// Calculate how much quantity can be filled at or better than limit price
+///
+/// Used for Fill-or-Kill validation
+fn calculate_available_liquidity(book: &Orderbook, side: Side, limit_px: i64) -> i64 {
+    let mut available = 0i64;
+
+    match side {
+        Side::Buy => {
+            // Buying: check asks at or below limit price
+            for i in 0..book.num_asks as usize {
+                if book.asks[i].price <= limit_px {
+                    available = available.saturating_add(book.asks[i].qty);
+                } else {
+                    break; // Asks are sorted ascending, no more valid prices
+                }
+            }
+        }
+        Side::Sell => {
+            // Selling: check bids at or above limit price
+            for i in 0..book.num_bids as usize {
+                if book.bids[i].price >= limit_px {
+                    available = available.saturating_add(book.bids[i].qty);
+                } else {
+                    break; // Bids are sorted descending, no more valid prices
+                }
+            }
+        }
+    }
+
+    available
+}
+
+/// Match orders with TimeInForce support (IOC, FOK)
+///
+/// Property O11: TimeInForce semantics
+/// - GTC: same as match_orders (fill what you can, rest remains)
+/// - IOC: fill what you can immediately, cancel remainder (no resting order)
+/// - FOK: fill complete order or reject (all-or-nothing)
+///
+/// Property O12: Self-trade prevention
+/// - If stp != None, applies self-trade prevention policy
+pub fn match_orders_with_tif(
+    book: &mut Orderbook,
+    taker_owner: u64,
+    side: Side,
+    qty: i64,
+    limit_px: i64,
+    tif: TimeInForce,
+    stp: SelfTradePrevent,
+) -> Result<MatchResult, OrderbookError> {
+    // For FOK, check if enough liquidity exists
+    if tif == TimeInForce::FOK {
+        let available = calculate_available_liquidity(book, side, limit_px);
+        if available < qty {
+            return Err(OrderbookError::CannotFillCompletely);
+        }
+    }
+
+    // Match orders (with self-trade prevention if enabled)
+    match_orders_with_stp(book, taker_owner, side, qty, limit_px, stp)
+}
+
+/// Match orders with self-trade prevention
+///
+/// Property O12: Self-trade prevention
+/// - Skips maker orders with same owner_id as taker
+/// - Returns SelfTrade error if stp policy requires it
+fn match_orders_with_stp(
+    book: &mut Orderbook,
+    taker_owner: u64,
+    side: Side,
+    mut qty: i64,
+    limit_px: i64,
+    stp: SelfTradePrevent,
+) -> Result<MatchResult, OrderbookError> {
+    if qty <= 0 {
+        return Err(OrderbookError::InvalidQuantity);
+    }
+
+    let mut total_filled = 0i64;
+    let mut total_notional = 0i64;
+    let mut num_fills = 0u32;
+
+    // Get the opposite side's orders
+    let (orders, count) = match side {
+        Side::Buy => (&mut book.asks[..], &mut book.num_asks),
+        Side::Sell => (&mut book.bids[..], &mut book.num_bids),
+    };
+
+    let mut i = 0;
+    while i < *count as usize && qty > 0 {
+        let maker = &mut orders[i];
+
+        // Check price limit
+        let price_ok = match side {
+            Side::Buy => maker.price <= limit_px,   // Buy: maker price must be <= limit
+            Side::Sell => maker.price >= limit_px,  // Sell: maker price must be >= limit
+        };
+
+        if !price_ok {
+            break; // No more valid prices
+        }
+
+        // Self-trade prevention
+        if is_self_trade(maker.owner_id, taker_owner) {
+            match stp {
+                SelfTradePrevent::None => {
+                    // Allow self-trade, continue matching
+                }
+                SelfTradePrevent::CancelNewest => {
+                    // Cancel taker order (stop matching)
+                    break;
+                }
+                SelfTradePrevent::CancelOldest => {
+                    // Cancel maker order (skip this order)
+                    i += 1;
+                    continue;
+                }
+                SelfTradePrevent::DecrementAndCancel => {
+                    // Reduce both by overlap
+                    let overlap = if maker.qty < qty { maker.qty } else { qty };
+                    maker.qty = maker.qty.saturating_sub(overlap);
+                    qty = qty.saturating_sub(overlap);
+
+                    if maker.qty == 0 {
+                        i += 1;
+                    }
+                    continue; // Don't count this as a fill
+                }
+            }
+        }
+
+        // Calculate fill quantity
+        let fill_qty = if maker.qty < qty { maker.qty } else { qty };
+
+        // Calculate notional (fill_qty * price / SCALE)
+        let notional = match (fill_qty as i128)
+            .checked_mul(maker.price as i128)
+            .and_then(|v| v.checked_div(1_000_000))
+            .and_then(|v| i64::try_from(v).ok())
+        {
+            Some(n) => n,
+            None => return Err(OrderbookError::Overflow),
+        };
+
+        // Update totals
+        total_filled = match total_filled.checked_add(fill_qty) {
+            Some(v) => v,
+            None => return Err(OrderbookError::Overflow),
+        };
+        total_notional = match total_notional.checked_add(notional) {
+            Some(v) => v,
+            None => return Err(OrderbookError::Overflow),
+        };
+        num_fills += 1;
+
+        // Update maker order
+        maker.qty = maker.qty.saturating_sub(fill_qty);
+        qty = qty.saturating_sub(fill_qty);
+
+        // If maker order is fully filled, mark for removal
+        if maker.qty == 0 {
+            i += 1;
+        }
+    }
+
+    // Remove filled orders (compact the array)
+    let mut write_idx = 0;
+    for read_idx in 0..(*count as usize) {
+        if orders[read_idx].qty > 0 {
+            if write_idx != read_idx {
+                orders[write_idx] = orders[read_idx];
+            }
+            write_idx += 1;
+        }
+    }
+    *count = write_idx as u16;
+
+    // Calculate VWAP
+    let vwap_px = if total_filled > 0 {
+        match (total_notional as i128)
+            .checked_mul(1_000_000)
+            .and_then(|v| v.checked_div(total_filled as i128))
+            .and_then(|v| i64::try_from(v).ok())
+        {
+            Some(v) => v,
+            None => return Err(OrderbookError::Overflow),
+        }
+    } else {
+        0
+    };
+
+    if total_filled == 0 {
+        return Err(OrderbookError::NoLiquidity);
+    }
+
+    Ok(MatchResult {
+        filled_qty: total_filled,
+        vwap_px,
+        notional: total_notional,
+    })
 }
 
 //==============================================================================
