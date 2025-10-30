@@ -301,3 +301,86 @@ pub async fn show_matcher_info(config: &NetworkConfig, slab_id: String) -> Resul
 
     Ok(())
 }
+
+/// Update funding rate for a slab
+///
+/// Calls the UpdateFunding instruction (discriminator = 5) on the slab program.
+/// This updates the cumulative funding index based on mark-oracle price deviation.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+/// * `oracle_price` - Oracle price (scaled by 1e6, e.g., 100_000_000 for price 100)
+/// * `wait_time` - Optional time to wait before calling (simulates time passage)
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn update_funding(
+    config: &NetworkConfig,
+    slab_address: String,
+    oracle_price: i64,
+    wait_time: Option<u64>,
+) -> Result<()> {
+    println!("{}", "=== Update Funding ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+    println!("{} {} ({})", "Oracle Price:".bright_cyan(), oracle_price, oracle_price as f64 / 1_000_000.0);
+
+    // Wait if requested (simulates time passage for funding accrual)
+    if let Some(seconds) = wait_time {
+        println!("\n{} Waiting {} seconds to simulate funding accrual...", "⏱".bright_yellow(), seconds);
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+    }
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+    let authority = &config.keypair;
+
+    // Use slab program ID from config
+    let slab_program_id = config.slab_program_id;
+
+    // Build instruction data:
+    // - Byte 0: discriminator = 5 (UpdateFunding)
+    // - Bytes 1-8: oracle_price (i64 little-endian)
+    let mut instruction_data = Vec::with_capacity(9);
+    instruction_data.push(5); // UpdateFunding discriminator
+    instruction_data.extend_from_slice(&oracle_price.to_le_bytes());
+
+    // Build UpdateFunding instruction
+    // Accounts:
+    // 0. [writable] slab_account
+    // 1. [signer] authority (LP owner)
+    let instruction = Instruction {
+        program_id: slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),
+            AccountMeta::new_readonly(authority.pubkey(), true),
+        ],
+        data: instruction_data,
+    };
+
+    // Create and send transaction
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&authority.pubkey()),
+        &[authority],
+        recent_blockhash,
+    );
+
+    println!("\n{}", "Sending transaction...".dimmed());
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to send UpdateFunding transaction")?;
+
+    println!("\n{} {}", "✓ Funding updated! Signature:".bright_green(), signature);
+
+    Ok(())
+}

@@ -20,6 +20,7 @@ mod insurance;
 mod crisis;
 mod keeper;
 mod tests;
+mod tests_funding;
 
 use config::NetworkConfig;
 
@@ -182,6 +183,10 @@ enum Commands {
         #[arg(long)]
         lp_insolvency: bool,
 
+        /// Run funding mechanics tests
+        #[arg(long)]
+        funding: bool,
+
         /// Run all tests
         #[arg(long)]
         all: bool,
@@ -263,6 +268,20 @@ enum MatcherCommands {
         /// Maximum position exposure
         #[arg(long, default_value = "1000000000000")]
         max_exposure: u128,
+    },
+
+    /// Update funding rate for a slab
+    UpdateFunding {
+        /// Slab address
+        slab: String,
+
+        /// Oracle price (scaled by 1e6, e.g., 100_000_000 for price 100)
+        #[arg(long)]
+        oracle_price: i64,
+
+        /// Time to wait (simulates time passage for funding accrual, in seconds)
+        #[arg(long)]
+        wait_time: Option<u64>,
     },
 }
 
@@ -586,6 +605,9 @@ async fn main() -> anyhow::Result<()> {
                         max_exposure
                     ).await?;
                 }
+                MatcherCommands::UpdateFunding { slab, oracle_price, wait_time } => {
+                    matcher::update_funding(&config, slab, oracle_price, wait_time).await?;
+                }
             }
         }
         Commands::Liquidity { command } => {
@@ -704,6 +726,7 @@ async fn main() -> anyhow::Result<()> {
             capital_efficiency,
             crisis: test_crisis,
             lp_insolvency,
+            funding,
             all,
         } => {
             println!("{}", "Running test suite...".bright_green().bold());
@@ -734,6 +757,9 @@ async fn main() -> anyhow::Result<()> {
             }
             if all || lp_insolvency {
                 tests::run_lp_insolvency_tests(&config).await?;
+            }
+            if all || funding {
+                tests_funding::run_funding_tests().await?;
             }
         }
         Commands::Status { exchange, detailed } => {
