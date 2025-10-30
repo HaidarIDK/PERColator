@@ -48,6 +48,7 @@ test-ledger/
 # CRITICAL: Private keypair files - NEVER commit these!
 *-keypair.json
 scripts/*-keypair.json
+scripts/keypairs/*.json
 scripts/*-wallet.json
 scripts/*-program.json
 scripts/perc-*.json

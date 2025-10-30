@@ -1,0 +1,18 @@
+[package]
+name = "percolator-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+doctest = false
+
+[dependencies]
+pinocchio = { workspace = true }
+pinocchio-pubkey = { workspace = true }
+percolator-common = { path = "../common" }
+
+[features]
+default = []
+bpf-entrypoint = []

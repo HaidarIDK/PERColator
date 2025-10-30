@@ -1,0 +1,15 @@
+[package]
+name = "proofs-kani"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+amm_model = { path = "../../amm_model", default-features = false }
+model_safety = { path = "../../model_safety", default-features = false }
+arrayvec = { version = "0.7", default-features = false }
+
+[features]
+kani = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

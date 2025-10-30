@@ -2,31 +2,25 @@
 
 pub mod initialize;
 pub mod initialize_portfolio;
+pub mod create_portfolio;
+pub mod swap_via_amm;
 pub mod deposit;
 pub mod withdraw;
 pub mod execute_cross_slab;
 pub mod liquidate_user;
 pub mod burn_lp_shares;
 pub mod cancel_lp_orders;
-pub mod register_slab;
-pub mod router_reserve;
-pub mod router_release;
-pub mod router_liquidity;
-pub mod router_seat_init;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
+pub use create_portfolio::*;
+pub use swap_via_amm::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use execute_cross_slab::*;
 pub use liquidate_user::*;
 pub use burn_lp_shares::*;
 pub use cancel_lp_orders::*;
-pub use register_slab::*;
-pub use router_reserve::*;
-pub use router_release::*;
-pub use router_liquidity::*;
-pub use router_seat_init::*;
 
 /// Instruction discriminator (v0 minimal)
 #[repr(u8)]
@@ -48,16 +42,10 @@ pub enum RouterInstruction {
     BurnLpShares = 6,
     /// Cancel Slab LP orders (ONLY way to reduce Slab LP exposure)
     CancelLpOrders = 7,
-    /// Register a slab in the registry (governance only)
-    RegisterSlab = 8,
-    /// Reserve collateral from portfolio into LP seat
-    RouterReserve = 9,
-    /// Release collateral from LP seat back to portfolio
-    RouterRelease = 10,
-    /// Process liquidity operation via matcher adapter
-    RouterLiquidity = 11,
-    /// Initialize LP seat for adapter pattern
-    RouterSeatInit = 12,
+    /// Create portfolio PDA (system create) and initialize
+    CreatePortfolio = 8,
+    /// Route a swap to AMM via CPI
+    SwapViaAmm = 9,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

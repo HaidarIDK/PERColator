@@ -1,0 +1,27 @@
+{
+  "name": "@percolator/cli",
+  "version": "0.2.0",
+  "description": "Rust-based CLI for PERColator DEX (migrated from TypeScript)",
+  "scripts": {
+    "build": "cargo build --release -p percolator-cli",
+    "build:debug": "cargo build -p percolator-cli",
+    "cli": "cargo run --release -p percolator-cli --",
+    "install": "cargo install --path .",
+    "clean": "cargo clean"
+  },
+  "keywords": [
+    "solana",
+    "perpetuals",
+    "dex",
+    "cli",
+    "trading",
+    "rust"
+  ],
+  "author": "Percolator Team",
+  "license": "Apache-2.0",
+  "notes": {
+    "migration": "Migrated from TypeScript stub (410 lines of TODOs) to production Rust CLI",
+    "binary": "After building: ../target/release/perc(.exe on Windows)",
+    "windows": "If OpenSSL build fails, install from https://slproweb.com/products/Win32OpenSSL.html"
+  }
+}
