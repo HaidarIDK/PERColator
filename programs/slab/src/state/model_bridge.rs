@@ -8,10 +8,30 @@
 
 use crate::state::orderbook::{BookArea, Order as ProdOrder, Side as ProdSide};
 use model_safety::orderbook::{
-    self as model, insert_order as model_insert, match_orders as model_match,
-    remove_order as model_remove, Orderbook as ModelBook, Order as ModelOrder, Side as ModelSide,
+    self as model, insert_order as model_insert, insert_order_extended as model_insert_extended,
+    match_orders as model_match, match_orders_with_tif as model_match_with_tif,
+    remove_order as model_remove, Orderbook as ModelBook, Order as ModelOrder,
+    OrderFlags as ModelOrderFlags, Side as ModelSide, SelfTradePrevent as ModelSelfTradePrevent,
+    TimeInForce as ModelTimeInForce,
 };
 use pinocchio::pubkey::Pubkey;
+
+/// Time-in-force policy (matches model_safety)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeInForce {
+    GTC = 0,
+    IOC = 1,
+    FOK = 2,
+}
+
+/// Self-trade prevention policy (matches model_safety)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTradePrevent {
+    None = 0,
+    CancelNewest = 1,
+    CancelOldest = 2,
+    DecrementAndCancel = 3,
+}
 
 /// Convert production Side to model Side
 fn prod_side_to_model(side: ProdSide) -> ModelSide {
@@ -267,6 +287,176 @@ pub fn match_orders_verified(
 pub fn check_spread_invariant_verified(book: &BookArea) -> bool {
     let model_book = prod_book_to_model(book);
     model::check_spread_invariant(&model_book)
+}
+
+//==============================================================================
+// Extended Order Book Features (Tick/Lot, TimeInForce, Post-Only, STPF)
+//==============================================================================
+
+/// Insert order with extended validation (tick/lot, post-only)
+///
+/// Properties verified by Kani:
+/// - O7: Tick size validation
+/// - O8: Lot size and minimum order validation
+/// - O9: Post-only crossing check
+///
+/// # Arguments
+/// * `book` - The production orderbook (mut)
+/// * `owner` - Order owner's Pubkey
+/// * `side` - Buy or Sell
+/// * `price` - Limit price (1e6 scale, must be positive)
+/// * `qty` - Order quantity (1e6 scale, must be positive)
+/// * `timestamp` - Timestamp for FIFO ordering
+/// * `tick_size` - Minimum price increment (0 = no restriction)
+/// * `lot_size` - Minimum quantity increment (0 = no restriction)
+/// * `min_order_size` - Minimum order size (0 = no restriction)
+/// * `post_only` - Reject if order would cross immediately
+/// * `reduce_only` - Can only reduce existing position (not enforced here)
+///
+/// # Returns
+/// * `Ok(order_id)` - The unique order ID
+/// * `Err(&'static str)` - Error message if validation fails
+pub fn insert_order_extended_verified(
+    book: &mut BookArea,
+    owner: Pubkey,
+    side: ProdSide,
+    price: i64,
+    qty: i64,
+    timestamp: u64,
+    tick_size: i64,
+    lot_size: i64,
+    min_order_size: i64,
+    post_only: bool,
+    reduce_only: bool,
+) -> Result<u64, &'static str> {
+    // Convert to model
+    let mut model_book = prod_book_to_model(book);
+
+    // Set market parameters
+    model_book.tick_size = tick_size;
+    model_book.lot_size = lot_size;
+    model_book.min_order_size = min_order_size;
+
+    let owner_id = pubkey_to_u64(&owner);
+    let model_side = prod_side_to_model(side);
+    let flags = ModelOrderFlags {
+        post_only,
+        reduce_only,
+    };
+
+    // Call verified model function
+    let order_id =
+        model_insert_extended(&mut model_book, owner_id, model_side, price, qty, timestamp, flags)
+            .map_err(|e| match e {
+                model::OrderbookError::InvalidTickSize => "Invalid tick size",
+                model::OrderbookError::InvalidLotSize => "Invalid lot size",
+                model::OrderbookError::OrderTooSmall => "Order too small",
+                model::OrderbookError::WouldCross => "Post-only order would cross",
+                model::OrderbookError::BookFull => "Order book full",
+                model::OrderbookError::InvalidPrice => "Invalid price",
+                model::OrderbookError::InvalidQuantity => "Invalid quantity",
+                _ => "Insert order failed",
+            })?;
+
+    // Convert result back to production
+    book.next_order_id = model_book.next_order_id;
+    book.num_bids = model_book.num_bids;
+    book.num_asks = model_book.num_asks;
+
+    // Copy orders back
+    for i in 0..(model_book.num_bids as usize) {
+        book.bids[i] = model_order_to_prod(&model_book.bids[i], owner);
+    }
+    for i in 0..(model_book.num_asks as usize) {
+        book.asks[i] = model_order_to_prod(&model_book.asks[i], owner);
+    }
+
+    Ok(order_id)
+}
+
+/// Match orders with TimeInForce and self-trade prevention
+///
+/// Properties verified by Kani:
+/// - O11: TimeInForce semantics (GTC/IOC/FOK)
+/// - O12: Self-trade prevention
+///
+/// # Arguments
+/// * `book` - The production orderbook (mut)
+/// * `taker_owner` - Taker's Pubkey
+/// * `side` - Buy or Sell
+/// * `qty` - Quantity to match (1e6 scale)
+/// * `limit_px` - Worst acceptable price (1e6 scale)
+/// * `tif` - Time-in-force policy
+/// * `stp` - Self-trade prevention policy
+///
+/// # Returns
+/// * `Ok(MatchResultVerified)` - Match statistics
+/// * `Err(&'static str)` - Error if matching fails
+pub fn match_orders_with_tif_verified(
+    book: &mut BookArea,
+    taker_owner: Pubkey,
+    side: ProdSide,
+    qty: i64,
+    limit_px: i64,
+    tif: TimeInForce,
+    stp: SelfTradePrevent,
+) -> Result<MatchResultVerified, &'static str> {
+    // Convert to model
+    let mut model_book = prod_book_to_model(book);
+    let taker_owner_id = pubkey_to_u64(&taker_owner);
+    let model_side = prod_side_to_model(side);
+
+    // Convert TimeInForce
+    let model_tif = match tif {
+        TimeInForce::GTC => ModelTimeInForce::GTC,
+        TimeInForce::IOC => ModelTimeInForce::IOC,
+        TimeInForce::FOK => ModelTimeInForce::FOK,
+    };
+
+    // Convert SelfTradePrevent
+    let model_stp = match stp {
+        SelfTradePrevent::None => ModelSelfTradePrevent::None,
+        SelfTradePrevent::CancelNewest => ModelSelfTradePrevent::CancelNewest,
+        SelfTradePrevent::CancelOldest => ModelSelfTradePrevent::CancelOldest,
+        SelfTradePrevent::DecrementAndCancel => ModelSelfTradePrevent::DecrementAndCancel,
+    };
+
+    // Call verified model function
+    let match_result = model_match_with_tif(
+        &mut model_book,
+        taker_owner_id,
+        model_side,
+        qty,
+        limit_px,
+        model_tif,
+        model_stp,
+    )
+    .map_err(|e| match e {
+        model::OrderbookError::NoLiquidity => "No liquidity",
+        model::OrderbookError::CannotFillCompletely => "Cannot fill completely (FOK)",
+        model::OrderbookError::SelfTrade => "Self trade detected",
+        model::OrderbookError::Overflow => "Overflow",
+        model::OrderbookError::InvalidQuantity => "Invalid quantity",
+        _ => "Match failed",
+    })?;
+
+    // Convert result back to production
+    book.num_bids = model_book.num_bids;
+    book.num_asks = model_book.num_asks;
+
+    // Copy orders back (we don't have original owners, use default)
+    for i in 0..(model_book.num_bids as usize) {
+        book.bids[i] = model_order_to_prod(&model_book.bids[i], Pubkey::default());
+    }
+    for i in 0..(model_book.num_asks as usize) {
+        book.asks[i] = model_order_to_prod(&model_book.asks[i], Pubkey::default());
+    }
+
+    Ok(MatchResultVerified {
+        filled_qty: match_result.filled_qty,
+        vwap_px: match_result.vwap_px,
+        notional: match_result.notional,
+    })
 }
 
 //==============================================================================
