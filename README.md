@@ -439,15 +439,6 @@ Kani Proofs (crates/proofs/kani/src/)
 - Haircut analysis: All arithmetic operations use verified primitives from `model_safety::math`
 - Crisis: Production GlobalHaircut mathematically equivalent to verified crisis module
 
-### Responsible Disclosure
-
-If you discover a security vulnerability, please email security@percolator.dev with:
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact assessment
-
-Do not file public issues for security vulnerabilities.
-
 ## Technology Stack
 
 - **Language**: Rust (no_std, zero heap allocations)
