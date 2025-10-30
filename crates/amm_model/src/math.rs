@@ -68,8 +68,9 @@ pub fn quote_buy(
     }
 
     // y1 = (x0 * y0) / x1
+    // Round UP to favor the pool (user pays more Y)
     let k = x0.checked_mul(y0).ok_or(AmmError::Overflow)?;
-    let y1 = k / x1;
+    let y1 = (k + x1 - 1) / x1; // Round up
 
     // Δy_gross = y1 - y0
     let dy_gross = y1 - y0;
@@ -79,12 +80,14 @@ pub fn quote_buy(
 
     // Apply fee: Δy_in = Δy_gross / (1 - fee)
     // = Δy_gross * BPS_SCALE / (BPS_SCALE - fee_bps)
+    // Round UP to favor the pool (user pays more)
     let fee_multiplier = BPS_SCALE as i128;
     let fee_divisor = fee_multiplier - fee_bps as i128;
     if fee_divisor <= 0 {
         return Err(AmmError::InvalidAmount);
     }
-    let dy_in = (dy_gross * fee_multiplier) / fee_divisor;
+    let dy_in_raw = dy_gross * fee_multiplier;
+    let dy_in = (dy_in_raw + fee_divisor - 1) / fee_divisor; // Round up
 
     // VWAP = Δy_in / Δx_out (both scaled, so result is scaled)
     let vwap_px = (dy_in * SCALE as i128) / dx;
@@ -159,8 +162,9 @@ pub fn quote_sell(
     let x1 = x0 + dx_net;
 
     // y1 = (x0 * y0) / x1
+    // Round UP to favor the pool (user receives less Y)
     let k = x0.checked_mul(y0).ok_or(AmmError::Overflow)?;
-    let y1 = k / x1;
+    let y1 = (k + x1 - 1) / x1; // Round up
 
     // Δy_out = y0 - y1
     let dy_out = y0 - y1;
