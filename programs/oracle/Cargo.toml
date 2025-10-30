@@ -6,7 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-crate-type = ["cdylib", "lib"]
+# oracle is a library dependency only, not a standalone BPF program
+crate-type = ["lib"]
 name = "percolator_oracle"
 
 [dependencies]
@@ -18,7 +19,8 @@ solana-sdk.workspace = true
 tokio.workspace = true
 
 [features]
-default = []
+default = ["bpf-entrypoint"]
+bpf-entrypoint = []
 test-sbf = []
 
 [lints.rust]

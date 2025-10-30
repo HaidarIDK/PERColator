@@ -23,14 +23,18 @@
 
 #![cfg_attr(target_os = "solana", no_std)]
 
-// Always expose entrypoint for testing
+// Only expose entrypoint when building as standalone BPF program
+// When used as a library dependency, this is excluded to avoid entrypoint conflicts
+#[cfg(feature = "bpf-entrypoint")]
 pub mod entrypoint;
 
 pub mod instructions;
 pub mod state;
 
 // Panic handler for no_std builds (only for Solana BPF)
-#[cfg(all(target_os = "solana", not(test)))]
+// Only define panic handler when building as standalone BPF program
+// When used as a library dependency, this is excluded to avoid conflicts
+#[cfg(all(target_os = "solana", not(test), feature = "bpf-entrypoint"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

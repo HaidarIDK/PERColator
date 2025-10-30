@@ -1436,9 +1436,9 @@ mod funding_bridge_tests {
         apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
 
         // Funding payment = position_size * (new_index - old_index)
-        // = 10 * 1000 = 10,000
+        // = 10_000_000 (scaled) * 1000 = 10,000,000,000 (scaled result)
         // Longs pay, so PnL decreases
-        assert_eq!(portfolio.pnl, 10_000);
+        assert_eq!(portfolio.pnl, 10_000_000_000);
         assert_eq!(portfolio.funding_offsets[0], 1000);
     }
 
@@ -1457,9 +1457,9 @@ mod funding_bridge_tests {
 
         apply_funding_to_position_verified(&mut portfolio, 0, 0, market_cumulative_index);
 
-        // Funding payment = -5 * 2000 = -10,000
+        // Funding payment = -5_000_000 (scaled) * 2000 = -10_000_000_000 (scaled result)
         // Shorts receive, so PnL increases (negative payment = receiving)
-        assert_eq!(portfolio.pnl, -10_000);
+        assert_eq!(portfolio.pnl, -10_000_000_000);
         assert_eq!(portfolio.funding_offsets[0], 2000);
     }
 
@@ -1480,7 +1480,7 @@ mod funding_bridge_tests {
         let pnl_after_first = portfolio.pnl;
         let offset_after_first = portfolio.funding_offsets[0];
 
-        assert_eq!(pnl_after_first, 10_000);
+        assert_eq!(pnl_after_first, 10_000_000_000);
         assert_eq!(offset_after_first, 1000);
 
         // Apply funding second time with SAME index
@@ -1503,17 +1503,17 @@ mod funding_bridge_tests {
 
         // First funding update
         apply_funding_to_position_verified(&mut portfolio, 0, 0, 1000i128);
-        assert_eq!(portfolio.pnl, 10_000);
+        assert_eq!(portfolio.pnl, 10_000_000_000);
         assert_eq!(portfolio.funding_offsets[0], 1000);
 
         // Second funding update (index increased by another 500)
         apply_funding_to_position_verified(&mut portfolio, 0, 0, 1500i128);
-        assert_eq!(portfolio.pnl, 15_000); // 10 * 1500
+        assert_eq!(portfolio.pnl, 15_000_000_000); // 10_000_000 * 1500
         assert_eq!(portfolio.funding_offsets[0], 1500);
 
         // Third funding update (index increased by another 300)
         apply_funding_to_position_verified(&mut portfolio, 0, 0, 1800i128);
-        assert_eq!(portfolio.pnl, 18_000); // 10 * 1800
+        assert_eq!(portfolio.pnl, 18_000_000_000); // 10_000_000 * 1800
         assert_eq!(portfolio.funding_offsets[0], 1800);
     }
 
@@ -1548,9 +1548,9 @@ mod funding_bridge_tests {
         // Index moved from 5000 to 3000 (mark < oracle, shorts pay longs)
         apply_funding_to_position_verified(&mut portfolio, 0, 0, 3000i128);
 
-        // Funding payment = 10 * (3000 - 5000) = 10 * (-2000) = -20,000
+        // Funding payment = 10_000_000 * (3000 - 5000) = 10_000_000 * (-2000) = -20_000_000_000
         // Longs receive (negative payment), so PnL increases
-        assert_eq!(portfolio.pnl, -20_000);
+        assert_eq!(portfolio.pnl, -20_000_000_000);
         assert_eq!(portfolio.funding_offsets[0], 3000);
     }
 
@@ -1604,9 +1604,9 @@ mod funding_bridge_tests {
 
         apply_funding_to_position_verified(&mut portfolio, 0, 0, 2000i128);
 
-        // Funding payment = 5 * 2000 = 10,000
-        // Total PnL = existing 50,000 + funding 10,000 = 60,000
-        assert_eq!(portfolio.pnl, 60_000);
+        // Funding payment = 5_000_000 * 2000 = 10_000_000_000
+        // Total PnL = existing 50_000 + funding 10_000_000_000 = 10_000_050_000
+        assert_eq!(portfolio.pnl, 10_000_050_000);
         assert_eq!(portfolio.funding_offsets[0], 2000);
     }
 }

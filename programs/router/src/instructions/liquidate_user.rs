@@ -355,7 +355,7 @@ mod tests {
             router_cap_per_slab: 1_000_000,
             min_equity_to_quote: 100_000_000,
             oracle_tolerance_bps: 50,
-            _padding2: [0; 8],
+            max_oracle_staleness_secs: 60,
             insurance_params: crate::state::insurance::InsuranceParams::default(),
             insurance_state: crate::state::insurance::InsuranceState::default(),
             pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),
