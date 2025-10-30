@@ -298,15 +298,17 @@ fn a7_round_trip_loses_value() {
     kani::assume(y > 1000 && y < 100_000_000 * SCALE);
     kani::assume(amount > 0 && amount < x / 10);
 
-    // Buy
+    // Buy X with Y (pay cost in Y, receive amount of X)
     if let Ok(buy_result) = quote_buy(x, y, 5, amount, 100) {
-        let cost = buy_result.quote_amount;
+        let cost = buy_result.quote_amount;  // Y tokens paid
 
-        // Sell back (using new reserves)
+        // Sell back the X we just bought (using new reserves)
+        // We received `amount` of X, so sell it back
         if let Ok(sell_result) = quote_sell(buy_result.new_x, buy_result.new_y, 5, amount, 100) {
-            let proceeds = sell_result.quote_amount;
+            let proceeds = sell_result.quote_amount;  // Y tokens received back
 
-            // Should lose money
+            // Should lose money due to fees and slippage
+            // proceeds < cost means we got less Y back than we paid
             assert!(proceeds < cost,
                 "A7: Round-trip should lose value: cost={}, proceeds={}",
                 cost, proceeds);
