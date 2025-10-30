@@ -384,3 +384,225 @@ pub async fn update_funding(
 
     Ok(())
 }
+
+/// Place a limit order on the order book
+///
+/// Calls the PlaceOrder instruction (discriminator = 2) on the slab program.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+/// * `side` - "buy" or "sell"
+/// * `price` - Order price (scaled by 1e6, e.g., 100_000_000 for price 100)
+/// * `qty` - Order quantity (scaled by 1e6, e.g., 1_000_000 for quantity 1.0)
+///
+/// # Returns
+/// * Ok(()) on success, prints order_id from transaction logs
+pub async fn place_order(
+    config: &NetworkConfig,
+    slab_address: String,
+    side: String,
+    price: i64,
+    qty: i64,
+) -> Result<()> {
+    println!("{}", "=== Place Order ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+    println!("{} {}", "Side:".bright_cyan(), side);
+    println!("{} {} ({})", "Price:".bright_cyan(), price, price as f64 / 1_000_000.0);
+    println!("{} {} ({})", "Quantity:".bright_cyan(), qty, qty as f64 / 1_000_000.0);
+
+    // Parse side
+    let side_u8 = match side.to_lowercase().as_str() {
+        "buy" | "bid" => 0u8,
+        "sell" | "ask" => 1u8,
+        _ => anyhow::bail!("Invalid side '{}'. Use 'buy' or 'sell'", side),
+    };
+
+    // Validate inputs
+    if price <= 0 {
+        anyhow::bail!("Price must be > 0");
+    }
+    if qty <= 0 {
+        anyhow::bail!("Quantity must be > 0");
+    }
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+    let authority = &config.keypair;
+
+    // Use slab program ID from config
+    let slab_program_id = config.slab_program_id;
+
+    // Build instruction data:
+    // - Byte 0: discriminator = 2 (PlaceOrder)
+    // - Bytes 1-8: price (i64 little-endian)
+    // - Bytes 9-16: qty (i64 little-endian)
+    // - Byte 17: side (u8)
+    let mut instruction_data = Vec::with_capacity(18);
+    instruction_data.push(2); // PlaceOrder discriminator
+    instruction_data.extend_from_slice(&price.to_le_bytes());
+    instruction_data.extend_from_slice(&qty.to_le_bytes());
+    instruction_data.push(side_u8);
+
+    // Build PlaceOrder instruction
+    // Accounts:
+    // 0. [writable] slab_account
+    // 1. [signer] authority (trader)
+    let instruction = Instruction {
+        program_id: slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),
+            AccountMeta::new_readonly(authority.pubkey(), true),
+        ],
+        data: instruction_data,
+    };
+
+    // Create and send transaction
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&authority.pubkey()),
+        &[authority],
+        recent_blockhash,
+    );
+
+    println!("\n{}", "Sending transaction...".dimmed());
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to send PlaceOrder transaction")?;
+
+    println!("\n{} {}", "✓ Order placed! Signature:".bright_green(), signature);
+    println!("{}", "Note: order_id can be extracted from transaction logs".dimmed());
+
+    Ok(())
+}
+
+/// Cancel an order from the order book
+///
+/// Calls the CancelOrder instruction (discriminator = 3) on the slab program.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+/// * `order_id` - Order ID to cancel
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn cancel_order(
+    config: &NetworkConfig,
+    slab_address: String,
+    order_id: u64,
+) -> Result<()> {
+    println!("{}", "=== Cancel Order ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+    println!("{} {}", "Order ID:".bright_cyan(), order_id);
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+    let authority = &config.keypair;
+
+    // Use slab program ID from config
+    let slab_program_id = config.slab_program_id;
+
+    // Build instruction data:
+    // - Byte 0: discriminator = 3 (CancelOrder)
+    // - Bytes 1-8: order_id (u64 little-endian)
+    let mut instruction_data = Vec::with_capacity(9);
+    instruction_data.push(3); // CancelOrder discriminator
+    instruction_data.extend_from_slice(&order_id.to_le_bytes());
+
+    // Build CancelOrder instruction
+    // Accounts:
+    // 0. [writable] slab_account
+    // 1. [signer] authority (order owner)
+    let instruction = Instruction {
+        program_id: slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),
+            AccountMeta::new_readonly(authority.pubkey(), true),
+        ],
+        data: instruction_data,
+    };
+
+    // Create and send transaction
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&authority.pubkey()),
+        &[authority],
+        recent_blockhash,
+    );
+
+    println!("\n{}", "Sending transaction...".dimmed());
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to send CancelOrder transaction")?;
+
+    println!("\n{} {}", "✓ Order cancelled! Signature:".bright_green(), signature);
+
+    Ok(())
+}
+
+/// Get order book state from a slab
+///
+/// Fetches and displays the current order book state.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn get_orderbook(
+    config: &NetworkConfig,
+    slab_address: String,
+) -> Result<()> {
+    println!("{}", "=== Order Book ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+
+    // Fetch account data
+    let account = rpc_client
+        .get_account(&slab_pubkey)
+        .context("Failed to fetch slab account")?;
+
+    // Verify ownership
+    if account.owner != config.slab_program_id {
+        anyhow::bail!("Account is not owned by slab program");
+    }
+
+    println!("\n{}", "=== Account Info ===".bright_yellow());
+    println!("{} {} bytes", "Data Size:".bright_cyan(), account.data.len());
+    println!("{} {} lamports", "Balance:".bright_cyan(), account.lamports);
+
+    // Note: Full deserialization would require importing slab program types
+    // For now, we just show the account exists and is owned correctly
+    println!("\n{}", "Order book data:".bright_yellow());
+    println!("{}", "  (Full deserialization requires slab program types)".dimmed());
+    println!("{}", "  Account exists and is owned by slab program".bright_green());
+
+    Ok(())
+}

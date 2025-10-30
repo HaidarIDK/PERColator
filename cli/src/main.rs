@@ -283,6 +283,40 @@ enum MatcherCommands {
         #[arg(long)]
         wait_time: Option<u64>,
     },
+
+    /// Place a limit order on the order book
+    PlaceOrder {
+        /// Slab address
+        slab: String,
+
+        /// Side (buy or sell)
+        #[arg(long)]
+        side: String,
+
+        /// Price (scaled by 1e6, e.g., 100_000_000 for price 100)
+        #[arg(long)]
+        price: i64,
+
+        /// Quantity (scaled by 1e6, e.g., 1_000_000 for quantity 1.0)
+        #[arg(long)]
+        qty: i64,
+    },
+
+    /// Cancel an order by ID
+    CancelOrder {
+        /// Slab address
+        slab: String,
+
+        /// Order ID to cancel
+        #[arg(long)]
+        order_id: u64,
+    },
+
+    /// Get order book state
+    GetOrderbook {
+        /// Slab address
+        slab: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -607,6 +641,15 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MatcherCommands::UpdateFunding { slab, oracle_price, wait_time } => {
                     matcher::update_funding(&config, slab, oracle_price, wait_time).await?;
+                }
+                MatcherCommands::PlaceOrder { slab, side, price, qty } => {
+                    matcher::place_order(&config, slab, side, price, qty).await?;
+                }
+                MatcherCommands::CancelOrder { slab, order_id } => {
+                    matcher::cancel_order(&config, slab, order_id).await?;
+                }
+                MatcherCommands::GetOrderbook { slab } => {
+                    matcher::get_orderbook(&config, slab).await?;
                 }
             }
         }
