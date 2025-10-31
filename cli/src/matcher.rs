@@ -571,6 +571,180 @@ pub async fn cancel_order(
     Ok(())
 }
 
+/// Match orders using CommitFill instruction (for testing)
+///
+/// NOTE: This instruction requires router authority. In production, this is called
+/// by the router program via CPI. For testing, initialize the slab with your keypair
+/// as the router_id.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+/// * `side` - "buy" or "sell"
+/// * `qty` - Quantity to match (1e6 scale)
+/// * `limit_px` - Limit price (1e6 scale)
+/// * `time_in_force` - "GTC", "IOC", or "FOK"
+/// * `self_trade_prevention` - "None", "CancelNewest", "CancelOldest", or "DecrementAndCancel"
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn match_order(
+    config: &NetworkConfig,
+    slab_address: String,
+    side: String,
+    qty: i64,
+    limit_px: i64,
+    time_in_force: String,
+    self_trade_prevention: String,
+) -> Result<()> {
+    println!("{}", "=== Match Order (CommitFill) ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+    println!("{} {}", "Side:".bright_cyan(), side);
+    println!("{} {} ({})", "Quantity:".bright_cyan(), qty, qty as f64 / 1_000_000.0);
+    println!("{} {} ({})", "Limit Price:".bright_cyan(), limit_px, limit_px as f64 / 1_000_000.0);
+    println!("{} {}", "Time-in-Force:".bright_cyan(), time_in_force);
+    println!("{} {}", "Self-Trade Prevention:".bright_cyan(), self_trade_prevention);
+
+    // Parse side
+    let side_u8 = match side.to_lowercase().as_str() {
+        "buy" | "bid" => 0u8,
+        "sell" | "ask" => 1u8,
+        _ => anyhow::bail!("Invalid side '{}'. Use 'buy' or 'sell'", side),
+    };
+
+    // Parse time-in-force
+    let tif_u8 = match time_in_force.to_uppercase().as_str() {
+        "GTC" => 0u8,
+        "IOC" => 1u8,
+        "FOK" => 2u8,
+        _ => anyhow::bail!("Invalid time-in-force '{}'. Use 'GTC', 'IOC', or 'FOK'", time_in_force),
+    };
+
+    // Parse self-trade prevention
+    let stp_u8 = match self_trade_prevention.as_str() {
+        "None" => 0u8,
+        "CancelNewest" => 1u8,
+        "CancelOldest" => 2u8,
+        "DecrementAndCancel" => 3u8,
+        _ => anyhow::bail!("Invalid self-trade prevention '{}'. Use 'None', 'CancelNewest', 'CancelOldest', or 'DecrementAndCancel'", self_trade_prevention),
+    };
+
+    // Validate inputs
+    if qty <= 0 {
+        anyhow::bail!("Quantity must be > 0");
+    }
+    if limit_px <= 0 {
+        anyhow::bail!("Limit price must be > 0");
+    }
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+    let authority = &config.keypair;
+
+    // Use slab program ID from config
+    let slab_program_id = config.slab_program_id;
+
+    // Fetch slab account to get current seqno
+    let slab_account = rpc_client
+        .get_account(&slab_pubkey)
+        .context("Failed to fetch slab account")?;
+
+    // Read seqno from slab header (at offset 12 after magic[8] + version[4])
+    if slab_account.data.len() < 16 {
+        anyhow::bail!("Slab account data too small");
+    }
+    let expected_seqno = u32::from_le_bytes([
+        slab_account.data[12],
+        slab_account.data[13],
+        slab_account.data[14],
+        slab_account.data[15],
+    ]);
+
+    println!("{} {}", "Expected Seqno:".bright_cyan(), expected_seqno);
+
+    // Create receipt account (temp keypair)
+    let receipt_keypair = Keypair::new();
+    let receipt_pubkey = receipt_keypair.pubkey();
+
+    println!("{} {}", "Receipt Account:".bright_cyan(), receipt_pubkey);
+
+    // Calculate rent for receipt account (~256 bytes)
+    const RECEIPT_SIZE: usize = 256;
+    let rent = rpc_client
+        .get_minimum_balance_for_rent_exemption(RECEIPT_SIZE)
+        .context("Failed to get rent exemption amount")?;
+
+    // Create receipt account
+    let create_receipt_ix = solana_sdk::system_instruction::create_account(
+        &authority.pubkey(),
+        &receipt_pubkey,
+        rent,
+        RECEIPT_SIZE as u64,
+        &slab_program_id,
+    );
+
+    // Build CommitFill instruction data:
+    // - Byte 0: discriminator = 1 (CommitFill)
+    // - Bytes 1-4: expected_seqno (u32)
+    // - Byte 5: side (u8)
+    // - Bytes 6-13: qty (i64)
+    // - Bytes 14-21: limit_px (i64)
+    // - Byte 22: time_in_force (u8, optional)
+    // - Byte 23: self_trade_prevention (u8, optional)
+    let mut instruction_data = Vec::with_capacity(24);
+    instruction_data.push(1); // CommitFill discriminator
+    instruction_data.extend_from_slice(&expected_seqno.to_le_bytes());
+    instruction_data.push(side_u8);
+    instruction_data.extend_from_slice(&qty.to_le_bytes());
+    instruction_data.extend_from_slice(&limit_px.to_le_bytes());
+    instruction_data.push(tif_u8);
+    instruction_data.push(stp_u8);
+
+    // Build CommitFill instruction
+    // Accounts:
+    // 0. [writable] slab_account
+    // 1. [writable] receipt_account
+    // 2. [signer] router_signer (authority in test mode)
+    // 3. taker_owner (authority in test mode)
+    let commit_fill_ix = Instruction {
+        program_id: slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),
+            AccountMeta::new(receipt_pubkey, false),
+            AccountMeta::new_readonly(authority.pubkey(), true),
+            AccountMeta::new_readonly(authority.pubkey(), false), // taker_owner
+        ],
+        data: instruction_data,
+    };
+
+    // Create and send transaction
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[create_receipt_ix, commit_fill_ix],
+        Some(&authority.pubkey()),
+        &[authority, &receipt_keypair],
+        recent_blockhash,
+    );
+
+    println!("\n{}", "Sending transaction...".dimmed());
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to send CommitFill transaction")?;
+
+    println!("\n{} {}", "✓ Match executed! Signature:".bright_green(), signature);
+    println!("{}", "Note: Fill details written to receipt account".dimmed());
+
+    Ok(())
+}
+
 /// Get order book state from a slab
 ///
 /// Fetches and displays the current order book state.
