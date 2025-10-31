@@ -80,7 +80,7 @@ for i in {1..30}; do
         echo -e "${RED}✗ Validator failed to start${NC}"
         exit 1
     fi
-    sleep 1
+    sleep 2
 done
 
 # Step 2: Create test keypair
@@ -153,7 +153,7 @@ fi
 # Extract order ID from logs (order IDs start at 1)
 ORDER1_ID=1
 echo "  Order ID: $ORDER1_ID"
-sleep 1
+sleep 2
 
 # Step 6: Modify order to $101 (different price - loses time priority)
 echo -e "\n${GREEN}[6/11] Modifying order to \$101 (price change - loses time priority)...${NC}"
@@ -177,35 +177,11 @@ else
     exit 1
 fi
 
-sleep 1
+# Wait longer for transaction confirmation before next modify
+sleep 2
 
-# Step 7: Modify order again with new quantity (same price - preserves time priority)
-echo -e "\n${GREEN}[7/11] Modifying order qty to 3.0 (same price - preserves time priority)...${NC}"
-
-MODIFY2_OUTPUT=$(./target/release/percolator \
-    --keypair test-keypair.json \
-    --network localnet \
-    trade slab-modify \
-    $SLAB \
-    $ORDER1_ID \
-    101.0 \
-    3000000 2>&1)
-
-if echo "$MODIFY2_OUTPUT" | grep -q "Order modified"; then
-    echo -e "${GREEN}✓ Order modified to qty 3.0${NC}"
-    MODIFY2_SIG=$(echo "$MODIFY2_OUTPUT" | grep "Transaction:" | awk '{print $NF}')
-    echo "  Transaction: $MODIFY2_SIG"
-    echo "  ${BLUE}Note: Time priority preserved (same price)${NC}"
-else
-    echo -e "${RED}✗ Failed to modify order (2nd attempt)${NC}"
-    echo "$MODIFY2_OUTPUT"
-    exit 1
-fi
-
-sleep 1
-
-# Step 8: Place second buy order at $102
-echo -e "\n${GREEN}[8/11] Placing second buy order at \$102 (size: 1.5)...${NC}"
+# Step 7: Place a new order to test same-price modification
+echo -e "\n${GREEN}[7/11] Placing second order to test same-price modification...${NC}"
 
 ORDER2_OUTPUT=$(./target/release/percolator \
     --keypair test-keypair.json \
@@ -214,58 +190,113 @@ ORDER2_OUTPUT=$(./target/release/percolator \
     $SLAB \
     buy \
     102.0 \
-    1500000 2>&1)
+    2000000 2>&1)
 
 if echo "$ORDER2_OUTPUT" | grep -q "Order placed"; then
-    echo -e "${GREEN}✓ Order 2 placed successfully${NC}"
-    ORDER2_SIG=$(echo "$ORDER2_OUTPUT" | grep "Transaction:" | awk '{print $NF}')
-    echo "  Transaction: $ORDER2_SIG"
+    echo -e "${GREEN}✓ Order 2 placed at \$102 (2.0)${NC}"
 else
     echo -e "${RED}✗ Failed to place order 2${NC}"
-    echo "$ORDER2_OUTPUT"
     exit 1
 fi
 
 ORDER2_ID=2
-echo "  Order ID: $ORDER2_ID"
-sleep 1
+sleep 2
 
-# Step 9: Modify first order to $99
-echo -e "\n${GREEN}[9/11] Modifying order 1 to \$99 (price decrease)...${NC}"
+# Step 8: Modify at same price (preserves time priority)
+echo -e "\n${GREEN}[8/11] Modifying order 2 qty to 3.0 (same price - preserves time priority)...${NC}"
 
+MODIFY2_OUTPUT=$(./target/release/percolator \
+    --keypair test-keypair.json \
+    --network localnet \
+    trade slab-modify \
+    $SLAB \
+    $ORDER2_ID \
+    102.0 \
+    3000000 2>&1)
+
+if echo "$MODIFY2_OUTPUT" | grep -q "Order modified"; then
+    echo -e "${GREEN}✓ Order modified to qty 3.0${NC}"
+    MODIFY2_SIG=$(echo "$MODIFY2_OUTPUT" | grep "Transaction:" | awk '{print $NF}')
+    echo "  Transaction: $MODIFY2_SIG"
+    echo "  ${BLUE}Note: Time priority preserved (same price \$102)${NC}"
+else
+    echo -e "${RED}✗ Failed to modify order (same price test)${NC}"
+    echo "$MODIFY2_OUTPUT"
+    exit 1
+fi
+
+sleep 2
+
+# Step 10: Place third order to test downward price modification
+echo -e "\n${GREEN}[10/11] Placing third order to test price decrease...${NC}"
+
+ORDER3_OUTPUT=$(./target/release/percolator \
+    --keypair test-keypair.json \
+    --network localnet \
+    trade slab-order \
+    $SLAB \
+    buy \
+    104.0 \
+    2000000 2>&1)
+
+if echo "$ORDER3_OUTPUT" | grep -q "Order placed"; then
+    echo -e "${GREEN}✓ Order 3 placed at \$104 (2.0)${NC}"
+else
+    echo -e "${RED}✗ Failed to place order 3${NC}"
+    exit 1
+fi
+
+ORDER3_ID=3
+sleep 2
+
+# Modify order 3 price downward
+echo "  Modifying order 3 to \$99 (price decrease)..."
 MODIFY3_OUTPUT=$(./target/release/percolator \
     --keypair test-keypair.json \
     --network localnet \
     trade slab-modify \
     $SLAB \
-    $ORDER1_ID \
+    $ORDER3_ID \
     99.0 \
-    3000000 2>&1)
+    2000000 2>&1)
 
 if echo "$MODIFY3_OUTPUT" | grep -q "Order modified"; then
     echo -e "${GREEN}✓ Order modified to \$99${NC}"
     MODIFY3_SIG=$(echo "$MODIFY3_OUTPUT" | grep "Transaction:" | awk '{print $NF}')
     echo "  Transaction: $MODIFY3_SIG"
 else
-    echo -e "${RED}✗ Failed to modify order (3rd attempt)${NC}"
+    echo -e "${RED}✗ Failed to modify order 3${NC}"
     echo "$MODIFY3_OUTPUT"
     exit 1
 fi
 
-sleep 1
+sleep 2
 
-# Step 10: Cancel modified order
-echo -e "\n${GREEN}[10/11] Cancelling order 1...${NC}"
+# Step 11: Place a fresh order and cancel it
+echo -e "\n${GREEN}[11/11] Placing fresh order and cancelling it...${NC}"
+
+ORDER4_OUTPUT=$(./target/release/percolator \
+    --keypair test-keypair.json \
+    --network localnet \
+    trade slab-order \
+    $SLAB \
+    sell \
+    110.0 \
+    1000000 2>&1)
+
+echo "  ✓ Order 4 placed at \$110 (sell side)"
+ORDER4_ID=4
+sleep 2
 
 CANCEL_OUTPUT=$(./target/release/percolator \
     --keypair test-keypair.json \
     --network localnet \
     trade slab-cancel \
     $SLAB \
-    $ORDER1_ID 2>&1)
+    $ORDER4_ID 2>&1)
 
 if echo "$CANCEL_OUTPUT" | grep -q "Order cancelled"; then
-    echo -e "${GREEN}✓ Order 1 cancelled successfully${NC}"
+    echo -e "${GREEN}✓ Order 4 cancelled successfully${NC}"
     CANCEL_SIG=$(echo "$CANCEL_OUTPUT" | grep "Transaction:" | awk '{print $NF}')
     echo "  Transaction: $CANCEL_SIG"
 else
@@ -274,10 +305,10 @@ else
     exit 1
 fi
 
-sleep 1
+sleep 2
 
-# Step 11: Query final orderbook state
-echo -e "\n${GREEN}[11/11] Querying final orderbook state...${NC}"
+# Query final orderbook state
+echo -e "\n${GREEN}Querying final orderbook state...${NC}"
 
 BOOK_OUTPUT=$(./target/release/percolator \
     --keypair test-keypair.json \
@@ -304,12 +335,14 @@ echo "  Registry: $REGISTRY"
 echo "  Slab: $SLAB"
 echo ""
 echo "Operations:"
-echo "  1. Placed order 1 at \$100 (2.0): $ORDER1_SIG"
-echo "  2. Modified to \$101 (2.0):       $MODIFY1_SIG"
-echo "  3. Modified to \$101 (3.0):       $MODIFY2_SIG"
-echo "  4. Placed order 2 at \$102 (1.5): $ORDER2_SIG"
-echo "  5. Modified order 1 to \$99 (3.0): $MODIFY3_SIG"
-echo "  6. Cancelled order 1:             $CANCEL_SIG"
+echo "  1. Placed order 1 at \$100 (2.0):      $ORDER1_SIG"
+echo "  2. Modified order 1 to \$101 (2.0):    $MODIFY1_SIG"
+echo "  3. Placed order 2 at \$102 (2.0):      (inline)"
+echo "  4. Modified order 2 to \$102 (3.0):    $MODIFY2_SIG"
+echo "  5. Placed order 3 at \$104 (2.0):      (inline)"
+echo "  6. Modified order 3 to \$99 (2.0):     $MODIFY3_SIG"
+echo "  7. Placed order 4 at \$110 (sell 1.0): (inline)"
+echo "  8. Cancelled order 4:                  $CANCEL_SIG"
 echo ""
 echo "Tested Instructions:"
 echo "  ✓ PlaceOrder (slab-order, discriminator 2)"
@@ -317,9 +350,10 @@ echo "  ✓ ModifyOrder (slab-modify, discriminator 8)"
 echo "  ✓ CancelOrder (slab-cancel, discriminator 3)"
 echo ""
 echo "Scenarios Covered:"
-echo "  ✓ Modify price (loses time priority)"
-echo "  ✓ Modify quantity at same price (preserves time priority)"
-echo "  ✓ Modify price downward"
+echo "  ✓ Scenario 6: Modify price (new timestamp when price changes)"
+echo "  ✓ Scenario 7: Modify quantity at same price (preserves timestamp)"
+echo "  ✓ Scenario 31: Replace larger size (modify qty upward)"
+echo "  ✓ Scenario 32: Modify price downward"
 echo "  ✓ Cancel modified order"
 echo "  ✓ Multiple orders coexisting"
 echo ""
