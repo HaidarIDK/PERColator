@@ -66,3 +66,8 @@ desktop.ini
 tests/e2e/test-ledger/
 test-ledger/
 target/
+
+# Devnet keypairs (never commit these!)
+# FORK-SAFE: All devnet setup artifacts stay here - won't conflict with upstream
+keypairs/
+keypairs/**
