@@ -51,7 +51,7 @@
 | 22 | Seqno TOCTOU | ✅ CommitFill | ✅ Yes | ✅ Tested | Seqno validation works |
 | 23 | Dust orders | ✅ Enforced | ✅ Yes | ✅ Tested | Min order size validated, O8 |
 | 24 | Best price updates | ✅ Yes | ✅ Yes | Can test | After sweep |
-| 25 | Halt/resume | ❌ Not impl | ❌ No | Future | No halt mechanism |
+| 25 | Halt/resume | ✅ Implemented | ✅ Yes | ✅ Tested | HaltTrading/ResumeTrading instructions |
 | 26 | Post-only + STPF | ✅ Implemented | ✅ Yes | ✅ Tested | Both flags work together |
 | 27 | Large sweep order | ✅ CommitFill | ✅ Yes | Can test | Multi-trade matching |
 | 28 | Time priority tie | ✅ order_id | ✅ Yes | Can test | Monotonic order_id |
@@ -68,7 +68,7 @@
 | 39 | Large sweep rounding | ✅ Yes | ✅ Yes | ✅ Tested | Fixed-point math verified |
 | 40 | Queue compaction | N/A | N/A | N/A | Array-based, no compaction needed |
 
-## Testable Scenarios Today (29/40) - 72.5% ✅
+## Testable Scenarios Today (30/40) - 75% ✅
 
 These can be tested with current slab implementation:
 
@@ -90,10 +90,11 @@ These can be tested with current slab implementation:
 15. ✅ **Tick size enforcement** - Validated by Property O7
 16. ✅ **Lot/min enforcement** - Validated by Property O8
 
-### Risk Controls (4 scenarios)
+### Risk Controls (5 scenarios)
 13. ✅ **STPF cancel newest** - SelfTradePrevent::CancelNewest (O12)
 14. ✅ **STPF decrement** - SelfTradePrevent::DecrementAndCancel (O12)
 23. ✅ **Dust orders** - Min order size enforcement (O8)
+25. ✅ **Halt/resume trading** - HaltTrading/ResumeTrading instructions
 26. ✅ **Post-only + STPF** - Combined flags
 
 ### Matching Engine (6 scenarios)
@@ -122,6 +123,8 @@ pub enum SlabInstruction {
     PlaceOrder = 2,      // Add resting limit order
     CancelOrder = 3,     // Remove order
     UpdateFunding = 5,   // Funding rate update
+    HaltTrading = 6,     // Halt all trading (LP owner only)
+    ResumeTrading = 7,   // Resume trading (LP owner only)
 }
 ```
 
@@ -289,13 +292,12 @@ The slab program is deployed and working:
 **Features NOT YET IMPLEMENTED ❌**
 - Order replace/modify
 - Price bands/crossing protection
-- Halt/resume mechanism
 - Auction mode
 
-**CLI testing: 29/40 scenarios testable today (72.5%)**
-- ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook)
-- ✅ Four E2E test suites passing (simple, extended, matching, comprehensive)
-- ✅ Core + Advanced + Edge case scenarios tested
-- 🚀 From 13/40 (33%) to 29/40 (72.5%) - **123% improvement!**
+**CLI testing: 30/40 scenarios testable today (75%)**
+- ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading)
+- ✅ Five E2E test suites passing (simple, extended, matching, comprehensive, halt/resume)
+- ✅ Core + Advanced + Edge case + Safety scenarios tested
+- 🚀 From 13/40 (33%) to 30/40 (75%) - **131% improvement!**
 
 The foundation is solid with formal verification. All major order book features are implemented, tested, and working!
