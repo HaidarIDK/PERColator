@@ -582,9 +582,8 @@ fn process_halt_trading_inner(_program_id: &Pubkey, accounts: &[AccountInfo], _d
     // Validate slab is writable
     validate_writable(slab_account)?;
 
-    // Borrow slab data
-    let slab_data = &mut borrow_account_data_mut(slab_account)?;
-    let slab = SlabState::from_bytes_mut(slab_data)?;
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
 
     // Process halt trading
     process_halt_trading(slab, authority_account.key())?;
@@ -614,9 +613,8 @@ fn process_resume_trading_inner(_program_id: &Pubkey, accounts: &[AccountInfo], 
     // Validate slab is writable
     validate_writable(slab_account)?;
 
-    // Borrow slab data
-    let slab_data = &mut borrow_account_data_mut(slab_account)?;
-    let slab = SlabState::from_bytes_mut(slab_data)?;
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
 
     // Process resume trading
     process_resume_trading(slab, authority_account.key())?;
