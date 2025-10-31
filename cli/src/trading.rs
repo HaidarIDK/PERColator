@@ -578,3 +578,92 @@ pub async fn cancel_slab_order(
 
     Ok(())
 }
+
+/// Modify an existing slab order (change price and/or quantity)
+pub async fn modify_slab_order(
+    config: &NetworkConfig,
+    slab: String,
+    order_id: u64,
+    new_price: f64,
+    new_size: u64,
+) -> Result<()> {
+    println!("{}", "=== Modify Slab Order ===".bright_green().bold());
+    println!("{} {}", "Slab:".bright_cyan(), slab);
+    println!("{} {}", "Order ID:".bright_cyan(), order_id);
+    println!("{} {}", "New Price:".bright_cyan(), new_price);
+    println!("{} {}", "New Size:".bright_cyan(), new_size);
+
+    // Parse slab pubkey
+    let slab_pubkey = Pubkey::from_str(&slab).context("Invalid slab pubkey")?;
+
+    // Convert price and size to fixed-point (1e6 scale)
+    let price_fixed = (new_price * 1_000_000.0) as i64;
+    let qty_fixed = new_size as i64;
+
+    // Validation
+    if price_fixed <= 0 {
+        return Err(anyhow!("Price must be positive"));
+    }
+    if qty_fixed <= 0 {
+        return Err(anyhow!("Size must be positive"));
+    }
+
+    println!("\n{}", "Building ModifyOrder instruction...".dimmed());
+    println!("{} {} (1e6 scale)", "New Price (fixed):".bright_cyan(), price_fixed);
+    println!("{} {} (1e6 scale)", "New Qty (fixed):".bright_cyan(), qty_fixed);
+
+    // Build instruction data: discriminator (1) + order_id (8) + new_price (8) + new_qty (8) = 25 bytes
+    let mut instruction_data = Vec::with_capacity(25);
+    instruction_data.push(8u8); // ModifyOrder discriminator
+    instruction_data.extend_from_slice(&order_id.to_le_bytes());
+    instruction_data.extend_from_slice(&price_fixed.to_le_bytes());
+    instruction_data.extend_from_slice(&qty_fixed.to_le_bytes());
+
+    // Build account list
+    // 0. [writable] Slab account
+    // 1. [signer] Order owner
+    let user_pubkey = config.pubkey();
+    let accounts = vec![
+        AccountMeta::new(slab_pubkey, false),
+        AccountMeta::new_readonly(user_pubkey, true),
+    ];
+
+    let modify_order_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts,
+        data: instruction_data,
+    };
+
+    // Build and send transaction
+    let rpc_client = client::create_rpc_client(config);
+    println!("{}", "Sending transaction...".dimmed());
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[modify_order_ix],
+        Some(&user_pubkey),
+        &[&config.keypair],
+        recent_blockhash,
+    );
+
+    match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(signature) => {
+            println!("\n{} Order modified!", "✓".green().bold());
+            println!("{} {}", "Transaction:".bright_cyan(), signature);
+            println!("{} {}", "Order ID:".bright_cyan(), order_id);
+            println!("{} {:.2}", "New Price:".bright_cyan(), new_price);
+            println!("{} {}", "New Size:".bright_cyan(), new_size);
+            println!("\n{}", "Note: Time priority preserved if price unchanged".dimmed());
+        }
+        Err(e) => {
+            println!("\n{} Modification failed: {}", "✗".red().bold(), e);
+            println!("\n{}", "Common causes:".bright_yellow());
+            println!("  {} Order ID not found", "•".dimmed());
+            println!("  {} Not the order owner", "•".dimmed());
+            println!("  {} Invalid price or quantity", "•".dimmed());
+            println!("  {} Trading is halted", "•".dimmed());
+            return Err(anyhow!("Modify transaction failed: {}", e));
+        }
+    }
+
+    Ok(())
+}

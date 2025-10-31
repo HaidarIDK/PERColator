@@ -458,6 +458,21 @@ enum TradeCommands {
         order_id: u64,
     },
 
+    /// Modify a slab order (change price and/or size)
+    SlabModify {
+        /// Slab address
+        slab: String,
+
+        /// Order ID
+        order_id: u64,
+
+        /// New order price
+        price: f64,
+
+        /// New order size
+        size: u64,
+    },
+
     /// List open orders
     Orders {
         /// Optional user address (defaults to CLI keypair)
@@ -737,6 +752,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TradeCommands::SlabCancel { slab, order_id } => {
                     trading::cancel_slab_order(&config, slab, order_id).await?;
+                }
+                TradeCommands::SlabModify { slab, order_id, price, size } => {
+                    trading::modify_slab_order(&config, slab, order_id, price, size).await?;
                 }
                 TradeCommands::Orders { user } => {
                     trading::list_orders(&config, user).await?;
