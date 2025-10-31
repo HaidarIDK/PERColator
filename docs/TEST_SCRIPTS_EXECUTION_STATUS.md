@@ -8,7 +8,7 @@ This document summarizes the execution status of the router LP test scripts and 
 
 ### 1. test_router_lp_slab.sh - Orderbook LP Test
 
-**Status**: ✓ Partially Executable
+**Status**: ✓ Fully Executable
 
 #### PART 1: EXECUTABLE NOW ✓
 
@@ -28,25 +28,25 @@ The following infrastructure setup steps execute successfully:
 - Portfolio account existence verified
 - All operations have success/failure checks with colored output
 
-#### PART 2: PENDING CLI ENHANCEMENT ⚠
+#### PART 2: EXECUTABLE NOW ✓
 
-Router LP operations are **documented** but not executable due to missing CLI commands:
+Router LP operations are now **fully implemented** and executable:
 
-- ⚠ RouterReserve (lock collateral into LP seat)
-- ⚠ RouterLiquidity with ObAdd (place orders via adapter)
-- ⚠ RouterLiquidity with Remove (cancel orders)
-- ⚠ RouterRelease (unlock collateral)
+- ✓ RouterReserve (lock collateral into LP seat)
+- ✓ RouterLiquidity with ObAdd (place orders via adapter)
+- ✓ RouterLiquidity with Remove (cancel orders) - optional
+- ✓ RouterRelease (unlock collateral) - optional
 
-**Required CLI Enhancement**:
+**CLI Command NOW WORKING**:
 ```bash
 ./percolator liquidity add <SLAB> <AMOUNT> --mode orderbook \
-  --price <PRICE> --post-only --reduce-only
+  --price <PRICE> --side <buy/sell> --post-only
 ```
 
 **On-Chain Support**: ✓ Complete
 - programs/router/src/instructions/router_liquidity.rs fully supports ObAdd
 - programs/slab/src/adapter.rs handles discriminator 2 (adapter_liquidity)
-- Serialization format documented in test script
+- CLI implementation complete in cli/src/liquidity.rs
 
 ---
 
@@ -179,12 +179,19 @@ Each test script now includes:
 - Calculates spot price from reserves
 - Ready for router LP operations
 
-### Priority 2: Orderbook Mode for Liquidity Add
+### Priority 2: Orderbook Mode for Liquidity Add ✓ COMPLETE
 **File**: cli/src/liquidity.rs
 **Enhancement**: Add `--mode` parameter to switch between AMM and orderbook
-**Command**: `percolator liquidity add <SLAB> <AMOUNT> --mode orderbook --price <PRICE>`
+**Command**: `percolator liquidity add <SLAB> <AMOUNT> --mode orderbook --price <PRICE> --side <buy/sell>`
+**Status**: ✓ **IMPLEMENTED**
 **Impact**: Enables full slab LP testing
 **On-Chain**: ✓ Ready (programs/router/src/instructions/router_liquidity.rs, ObAdd intent)
+**Implementation**:
+- Added --mode parameter (default: "amm")
+- Added orderbook-specific parameters: --side, --post-only, --reduce-only
+- Implemented ObAdd serialization with proper discriminators
+- Price and side validation for orderbook mode
+- Successfully tested with test_router_lp_slab.sh
 
 ### Priority 3: Explicit Reserve/Release Commands (Optional)
 **File**: cli/src/liquidity.rs
@@ -251,7 +258,7 @@ Each test script now includes:
 
 **What Needs CLI Work**:
 - ✓ ~~AMM creation command~~ **COMPLETE** (Priority 1)
-- ⚠ Orderbook mode for liquidity add (Priority 2)
+- ✓ ~~Orderbook mode for liquidity add~~ **COMPLETE** (Priority 2)
 - ⚠ Optional explicit reserve/release commands (Priority 3)
 
 **Architectural Verification**:

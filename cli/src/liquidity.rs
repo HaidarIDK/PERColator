@@ -73,17 +73,39 @@ fn derive_registry_pda(program_id: &Pubkey) -> (Pubkey, u8) {
 /// This executes a two-step process:
 /// 1. RouterReserve: Lock collateral from portfolio into LP seat
 /// 2. RouterLiquidity: Execute LP add operation via matcher adapter
+///
+/// Supports two modes:
+/// - AMM mode (default): Adds continuous liquidity with AmmAdd intent
+/// - Orderbook mode: Places discrete orders with ObAdd intent
 pub async fn add_liquidity(
     config: &NetworkConfig,
     matcher: String,
     amount: u64,
     price: Option<f64>,
+    mode: String,
+    side: Option<String>,
+    post_only: bool,
+    reduce_only: bool,
+    lower_price: Option<f64>,
+    upper_price: Option<f64>,
 ) -> Result<()> {
     println!("{}", "=== Add Liquidity ===".bright_green().bold());
     println!("{} {}", "Matcher:".bright_cyan(), matcher);
     println!("{} {}", "Amount:".bright_cyan(), amount);
+    println!("{} {}", "Mode:".bright_cyan(), mode);
     if let Some(p) = price {
         println!("{} {}", "Price:".bright_cyan(), p);
+    }
+    if mode == "orderbook" {
+        if let Some(s) = &side {
+            println!("{} {}", "Side:".bright_cyan(), s);
+        }
+        if post_only {
+            println!("{} {}", "Post Only:".bright_cyan(), "yes");
+        }
+        if reduce_only {
+            println!("{} {}", "Reduce Only:".bright_cyan(), "yes");
+        }
     }
 
     // Parse matcher state pubkey
@@ -161,15 +183,68 @@ pub async fn add_liquidity(
     liquidity_data.extend_from_slice(&200u16.to_le_bytes()); // oracle_bound_bps = 2%
     liquidity_data.extend_from_slice(&[0u8; 2]); // padding
 
-    // LiquidityIntent::AmmAdd (simplified)
-    // Variant discriminator + fields
+    // LiquidityIntent: serialize based on mode
     // In production, use proper Borsh serialization
-    liquidity_data.push(0u8); // AmmAdd variant discriminator
-    liquidity_data.extend_from_slice(&0u128.to_le_bytes()); // lower_px_q64 (placeholder)
-    liquidity_data.extend_from_slice(&u128::MAX.to_le_bytes()); // upper_px_q64 (placeholder)
-    liquidity_data.extend_from_slice(&base_amount_q64.to_le_bytes()); // quote_notional_q64
-    liquidity_data.extend_from_slice(&0u32.to_le_bytes()); // curve_id
-    liquidity_data.extend_from_slice(&30u16.to_le_bytes()); // fee_bps = 0.3%
+    if mode == "orderbook" {
+        // LiquidityIntent::ObAdd (discriminator 2)
+        // Format: [intent_disc(1), orders_count(4), order_data..., post_only(1), reduce_only(1)]
+        liquidity_data.push(2u8); // ObAdd variant discriminator
+
+        // Validate required parameters
+        let price_value = price.ok_or_else(|| anyhow!("--price is required for orderbook mode"))?;
+        let side_str = side.as_ref().ok_or_else(|| anyhow!("--side is required for orderbook mode (buy/sell)"))?;
+
+        // Parse side
+        let side_byte = match side_str.to_lowercase().as_str() {
+            "buy" | "bid" => 0u8,
+            "sell" | "ask" => 1u8,
+            _ => return Err(anyhow!("Invalid side: {}. Use 'buy' or 'sell'", side_str)),
+        };
+
+        // Convert price to Q64 (simplified as Q32 for demo)
+        let price_q64: u128 = ((price_value * (1u64 << 32) as f64) as u128);
+        let qty_q64: u128 = base_amount_q64; // Use the amount as quantity
+        let tif_slots: u32 = 1000; // Default time-in-force: 1000 slots
+
+        // Orders count: 1 order
+        liquidity_data.extend_from_slice(&1u32.to_le_bytes());
+
+        // Order data
+        liquidity_data.push(side_byte);
+        liquidity_data.extend_from_slice(&price_q64.to_le_bytes());
+        liquidity_data.extend_from_slice(&qty_q64.to_le_bytes());
+        liquidity_data.extend_from_slice(&tif_slots.to_le_bytes());
+
+        // Post-only and reduce-only flags
+        liquidity_data.push(post_only as u8);
+        liquidity_data.push(reduce_only as u8);
+
+        println!("{}", format!("Order: {} {} @ {} (TIF: {} slots)",
+            if side_byte == 0 { "BUY" } else { "SELL" },
+            amount,
+            price_value,
+            tif_slots
+        ).dimmed());
+    } else {
+        // LiquidityIntent::AmmAdd (discriminator 0)
+        liquidity_data.push(0u8); // AmmAdd variant discriminator
+
+        // Use provided price bounds or defaults
+        let lower_px = lower_price.unwrap_or(0.0);
+        let upper_px = upper_price.unwrap_or(f64::MAX);
+        let lower_px_q64: u128 = ((lower_px * (1u64 << 32) as f64) as u128);
+        let upper_px_q64: u128 = if upper_px == f64::MAX {
+            u128::MAX
+        } else {
+            ((upper_px * (1u64 << 32) as f64) as u128)
+        };
+
+        liquidity_data.extend_from_slice(&lower_px_q64.to_le_bytes()); // lower_px_q64
+        liquidity_data.extend_from_slice(&upper_px_q64.to_le_bytes()); // upper_px_q64
+        liquidity_data.extend_from_slice(&base_amount_q64.to_le_bytes()); // quote_notional_q64
+        liquidity_data.extend_from_slice(&0u32.to_le_bytes()); // curve_id
+        liquidity_data.extend_from_slice(&30u16.to_le_bytes()); // fee_bps = 0.3%
+    }
 
     let liquidity_accounts = vec![
         AccountMeta::new(portfolio_pda, false),

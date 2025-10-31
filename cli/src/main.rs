@@ -382,8 +382,33 @@ enum LiquidityCommands {
         /// Amount to add (in base currency)
         amount: u64,
 
-        /// Price for the liquidity
+        /// Price for the liquidity (required for orderbook mode)
+        #[arg(long)]
         price: Option<f64>,
+
+        /// LP mode: amm (default) or orderbook
+        #[arg(long, default_value = "amm")]
+        mode: String,
+
+        /// Order side for orderbook mode (buy/sell)
+        #[arg(long)]
+        side: Option<String>,
+
+        /// Post-only flag for orderbook mode
+        #[arg(long)]
+        post_only: bool,
+
+        /// Reduce-only flag for orderbook mode
+        #[arg(long)]
+        reduce_only: bool,
+
+        /// Lower price for AMM range (AMM mode only)
+        #[arg(long)]
+        lower_price: Option<f64>,
+
+        /// Upper price for AMM range (AMM mode only)
+        #[arg(long)]
+        upper_price: Option<f64>,
     },
 
     /// Remove liquidity from a matcher
@@ -755,8 +780,29 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Liquidity { command } => {
             match command {
-                LiquidityCommands::Add { matcher, amount, price } => {
-                    liquidity::add_liquidity(&config, matcher, amount, price).await?;
+                LiquidityCommands::Add {
+                    matcher,
+                    amount,
+                    price,
+                    mode,
+                    side,
+                    post_only,
+                    reduce_only,
+                    lower_price,
+                    upper_price,
+                } => {
+                    liquidity::add_liquidity(
+                        &config,
+                        matcher,
+                        amount,
+                        price,
+                        mode,
+                        side,
+                        post_only,
+                        reduce_only,
+                        lower_price,
+                        upper_price,
+                    ).await?;
                 }
                 LiquidityCommands::Remove { matcher, amount } => {
                     liquidity::remove_liquidity(&config, matcher, amount).await?;
