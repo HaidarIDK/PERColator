@@ -363,6 +363,16 @@ pub fn process_execute_cross_slab(
         total_notional = total_notional.saturating_add(notional);
     }
 
+    // Insurance fee accrual (accounting only in v0)
+    // NOTE: This updates insurance_state.vault_balance but does not transfer lamports.
+    // The insurance vault PDA holds a pool of lamports that backs this accounting balance.
+    // The insurance authority can manually reconcile via TopUpInsurance/WithdrawInsurance.
+    //
+    // For real-time lamport transfers on every trade:
+    // 1. Add insurance_vault account to instruction accounts
+    // 2. Deduct accrual from user's collateral or fee pool
+    // 3. Transfer accrual lamports to insurance_vault PDA
+    // 4. Ensure insurance_vault.lamports() stays in sync with insurance_state.vault_balance
     if total_notional > 0 {
         let accrual = registry.insurance_state.accrue_from_fill(
             total_notional,

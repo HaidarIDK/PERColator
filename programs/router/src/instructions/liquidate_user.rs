@@ -678,6 +678,16 @@ pub fn process_liquidate_user(
             event_notional = event_notional.saturating_add(notional);
         }
 
+        // Insurance bad debt payout (accounting only in v0)
+        // NOTE: This updates insurance_state.vault_balance and portfolio.equity but does not transfer lamports.
+        // The insurance vault PDA holds a pool of lamports that backs the accounting balance.
+        // The insurance authority can manually reconcile via TopUpInsurance/WithdrawInsurance.
+        //
+        // For real-time lamport transfers during liquidation:
+        // 1. Add insurance_vault account to instruction accounts
+        // 2. Transfer payout lamports from insurance_vault PDA to portfolio_account
+        // 3. Ensure insurance_vault.lamports() stays in sync with insurance_state.vault_balance
+        // 4. The payout increases portfolio.equity, so actual lamports should back this
         let (payout, uncovered) = registry.insurance_state.settle_bad_debt(
             bad_debt,
             event_notional,

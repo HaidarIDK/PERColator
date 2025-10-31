@@ -26,6 +26,9 @@ pub const AUTHORITY_SEED: &[u8] = b"authority";
 /// Seed prefix for router signer PDA (used for matcher CPIs)
 pub const ROUTER_SIGNER_SEED: &[u8] = b"router_signer";
 
+/// Seed prefix for insurance vault
+pub const INSURANCE_VAULT_SEED: &[u8] = b"insurance_vault";
+
 /// Derive router authority PDA
 ///
 /// This PDA is used as the router's signing authority for CPIs to slabs.
@@ -52,6 +55,20 @@ pub fn derive_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
 /// * `(Pubkey, u8)` - The derived PDA and its bump seed
 pub fn derive_router_signer_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     find_program_address(&[ROUTER_SIGNER_SEED], program_id)
+}
+
+/// Derive insurance vault PDA
+///
+/// This PDA holds the insurance fund's lamports and is controlled by the program.
+/// Lamports are transferred to/from this vault during insurance operations.
+///
+/// # Arguments
+/// * `program_id` - The router program ID
+///
+/// # Returns
+/// * `(Pubkey, u8)` - The derived PDA and its bump seed
+pub fn derive_insurance_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    find_program_address(&[INSURANCE_VAULT_SEED], program_id)
 }
 
 /// Derive vault PDA for a given mint

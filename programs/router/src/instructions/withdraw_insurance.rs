@@ -1,5 +1,6 @@
 //! WithdrawInsurance instruction - withdraw surplus from insurance fund
 
+use crate::pda::derive_insurance_vault_pda;
 use crate::state::SlabRegistry;
 use percolator_common::*;
 use pinocchio::{
@@ -16,21 +17,33 @@ use pinocchio::{
 /// # Security Checks
 /// - Verifies insurance_authority is signer
 /// - Verifies insurance_authority matches registry.insurance_authority
+/// - Verifies insurance_vault matches derived PDA
 /// - Ensures no uncovered bad debt exists
 /// - Ensures sufficient vault balance
 ///
 /// # Arguments
 /// * `registry_account` - The registry account (writable)
 /// * `insurance_authority` - The insurance authority (signer, writable for receiving funds)
+/// * `insurance_vault` - The insurance vault PDA (writable)
+/// * `program_id` - The router program ID (for PDA verification)
 /// * `amount` - Amount to withdraw (lamports)
 pub fn process_withdraw_insurance(
     registry_account: &AccountInfo,
     insurance_authority: &AccountInfo,
+    insurance_vault: &AccountInfo,
+    program_id: &Pubkey,
     amount: u128,
 ) -> Result<(), PercolatorError> {
     // SECURITY: Verify insurance_authority is signer
     if !insurance_authority.is_signer() {
         msg!("Error: Insurance authority must be a signer");
+        return Err(PercolatorError::Unauthorized);
+    }
+
+    // SECURITY: Verify insurance_vault matches derived PDA
+    let (expected_vault, _bump) = derive_insurance_vault_pda(program_id);
+    if insurance_vault.key() != &expected_vault {
+        msg!("Error: Invalid insurance vault PDA");
         return Err(PercolatorError::Unauthorized);
     }
 
@@ -51,8 +64,16 @@ pub fn process_withdraw_insurance(
             PercolatorError::InsufficientFunds
         })?;
 
-    // TODO: Transfer lamports from insurance vault PDA to insurance_authority
-    // For now, just update the state (actual transfer requires vault PDA implementation)
+    // Transfer lamports from insurance vault PDA to insurance_authority
+    let amount_u64 = u64::try_from(amount).map_err(|_| {
+        msg!("Error: Amount exceeds u64 max");
+        PercolatorError::InvalidQuantity
+    })?;
+
+    unsafe {
+        *insurance_vault.borrow_mut_lamports_unchecked() -= amount_u64;
+        *insurance_authority.borrow_mut_lamports_unchecked() += amount_u64;
+    }
 
     msg!("Insurance withdrawal successful");
     Ok(())

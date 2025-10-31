@@ -850,21 +850,24 @@ fn process_router_seat_init_inner(program_id: &Pubkey, accounts: &[AccountInfo],
 /// Expected accounts:
 /// 0. `[writable]` Registry account
 /// 1. `[signer, writable]` Insurance authority
+/// 2. `[writable]` Insurance vault PDA
 ///
 /// Expected data layout (16 bytes):
 /// - amount: u128 (16 bytes, lamports)
-fn process_withdraw_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: WithdrawInsurance instruction requires at least 2 accounts");
+fn process_withdraw_insurance_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 3 {
+        msg!("Error: WithdrawInsurance instruction requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
     let registry_account = &accounts[0];
     let insurance_authority = &accounts[1];
+    let insurance_vault = &accounts[2];
 
     // Validate accounts
     validate_writable(registry_account)?;
     validate_writable(insurance_authority)?;
+    validate_writable(insurance_vault)?;
 
     // Parse instruction data
     if data.len() < 16 {
@@ -879,6 +882,8 @@ fn process_withdraw_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInf
     process_withdraw_insurance(
         registry_account,
         insurance_authority,
+        insurance_vault,
+        program_id,
         amount,
     )?;
 
@@ -891,21 +896,24 @@ fn process_withdraw_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInf
 /// Expected accounts:
 /// 0. `[writable]` Registry account
 /// 1. `[signer, writable]` Insurance authority
+/// 2. `[writable]` Insurance vault PDA
 ///
 /// Expected data layout (16 bytes):
 /// - amount: u128 (16 bytes, lamports)
-fn process_topup_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: TopUpInsurance instruction requires at least 2 accounts");
+fn process_topup_insurance_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 3 {
+        msg!("Error: TopUpInsurance instruction requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
     let registry_account = &accounts[0];
     let insurance_authority = &accounts[1];
+    let insurance_vault = &accounts[2];
 
     // Validate accounts
     validate_writable(registry_account)?;
     validate_writable(insurance_authority)?;
+    validate_writable(insurance_vault)?;
 
     // Parse instruction data
     if data.len() < 16 {
@@ -920,6 +928,8 @@ fn process_topup_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInfo],
     process_topup_insurance(
         registry_account,
         insurance_authority,
+        insurance_vault,
+        program_id,
         amount,
     )?;
 
