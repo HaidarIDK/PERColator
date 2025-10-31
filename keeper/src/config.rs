@@ -16,6 +16,9 @@ pub struct Config {
     /// Router program ID
     pub router_program: Pubkey,
 
+    /// Collateral mint (e.g., USDC)
+    pub collateral_mint: Pubkey,
+
     /// Keeper wallet keypair path
     pub keypair_path: String,
 
@@ -53,6 +56,9 @@ impl Config {
             rpc_url: "https://api.devnet.solana.com".to_string(),
             ws_url: "wss://api.devnet.solana.com".to_string(),
             router_program: Pubkey::from_str("RoutR1VdCpHqj89WEMJhb6TkGT9cPfr1rVjhM3e2YQr")
+                .unwrap(),
+            // Devnet USDC mint
+            collateral_mint: Pubkey::from_str("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")
                 .unwrap(),
             keypair_path: "~/.config/solana/id.json".to_string(),
             poll_interval_secs: 1,

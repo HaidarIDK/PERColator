@@ -80,6 +80,11 @@ async fn process_liquidations(
     config: &Config,
     keeper: &Keypair,
 ) -> Result<()> {
+    // Update health queue with latest portfolio data
+    if let Err(e) = update_health_queue(queue, client, config).await {
+        log::warn!("Failed to update health queue: {}", e);
+    }
+
     // Get liquidatable users
     let liquidatable = queue.get_liquidatable(config.liquidation_threshold);
 
@@ -138,22 +143,63 @@ fn execute_liquidation(
     portfolio: &Pubkey,
     is_preliq: bool,
 ) -> Result<String> {
-    // For v0, this is a stub
-    // In production, this would:
-    // 1. Fetch recent blockhash
-    // 2. Get registry and vault addresses
-    // 3. Build liquidation transaction
-    // 4. Submit to cluster
-    // 5. Wait for confirmation
-
     log::debug!(
-        "Would execute {} liquidation for portfolio {}",
+        "Executing {} liquidation for portfolio {}",
         if is_preliq { "pre" } else { "hard" },
         portfolio
     );
 
-    // Stub: return fake signature
-    Ok("stub_signature".to_string())
+    // Derive PDAs
+    let (registry, _) = tx_builder::derive_registry(&config.router_program);
+    let (vault, _) = tx_builder::derive_vault(&config.collateral_mint, &config.router_program);
+    let (router_authority, _) = tx_builder::derive_router_authority(&config.router_program);
+
+    // Get current timestamp
+    let current_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Fetch recent blockhash
+    let recent_blockhash = client
+        .get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    // For v0, we submit with empty oracle/slab/amm lists
+    // TODO: In production, fetch portfolio data and include relevant oracles/slabs/amms
+    let oracle_accounts = vec![];
+    let slab_accounts = vec![];
+    let receipt_accounts = vec![];
+    let amm_accounts = vec![];
+
+    // Build transaction
+    let transaction = tx_builder::build_liquidation_transaction(
+        &config.router_program,
+        portfolio,
+        &registry,
+        &vault,
+        &router_authority,
+        keeper,
+        is_preliq,
+        current_ts,
+        &oracle_accounts,
+        &slab_accounts,
+        &receipt_accounts,
+        &amm_accounts,
+        recent_blockhash,
+    )?;
+
+    // Submit transaction
+    let signature = client
+        .send_and_confirm_transaction(&transaction)
+        .context("Failed to send liquidation transaction")?;
+
+    log::info!(
+        "Liquidation transaction confirmed: {}",
+        signature
+    );
+
+    Ok(signature.to_string())
 }
 
 /// Load keeper keypair from file
@@ -177,33 +223,90 @@ fn load_keypair(path: &str) -> Result<Keypair> {
     Ok(keypair)
 }
 
-/// Fetch portfolio accounts and update health queue (stub for v0)
-#[allow(dead_code)]
+/// Fetch portfolio accounts and update health queue
 async fn update_health_queue(
     queue: &mut HealthQueue,
     client: &RpcClient,
-    _config: &Config,
+    config: &Config,
 ) -> Result<()> {
-    // For v0, this is a stub
-    // In production, this would:
-    // 1. Query all portfolio accounts via getProgramAccounts
-    // 2. Fetch oracle prices
-    // 3. Calculate health for each portfolio
-    // 4. Update queue
+    use solana_account_decoder::UiAccountEncoding;
+    use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 
-    log::debug!("Health queue update (stub)");
+    log::debug!("Updating health queue from on-chain data");
 
-    // Example: add a dummy user for testing
-    let dummy_user = UserHealth {
-        user: Pubkey::new_unique(),
-        portfolio: Pubkey::new_unique(),
-        health: -5_000_000, // Below MM
-        equity: 95_000_000,
-        mm: 100_000_000,
-        last_update: 0,
+    // Query all portfolio accounts from the router program
+    // Portfolio accounts are discriminated by the first 8 bytes (anchor discriminator)
+    // For now, we'll fetch all accounts and filter in code
+
+    let config_filter = RpcProgramAccountsConfig {
+        filters: None, // TODO: Add discriminator filter for Portfolio accounts
+        account_config: RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64),
+            ..Default::default()
+        },
+        with_context: Some(false),
+        sort_results: None,
     };
 
-    queue.push(dummy_user);
+    let accounts = client
+        .get_program_accounts_with_config(&config.router_program, config_filter)
+        .context("Failed to fetch portfolio accounts")?;
+
+    log::debug!("Fetched {} accounts from router program", accounts.len());
+
+    let current_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Parse each account and update health queue
+    for (pubkey, account) in accounts {
+        // Try to parse as portfolio
+        match health::parse_portfolio(&account.data) {
+            Ok(portfolio) => {
+                // Calculate health: equity - MM
+                let mm_i128 = portfolio.mm as i128;
+                let health = portfolio.equity.saturating_sub(mm_i128);
+
+                // Extract user from portfolio (first 32 bytes after router_id)
+                let user = if account.data.len() >= 64 {
+                    Pubkey::try_from(&account.data[32..64])
+                        .unwrap_or_else(|_| Pubkey::default())
+                } else {
+                    Pubkey::default()
+                };
+
+                let user_health = UserHealth {
+                    user,
+                    portfolio: pubkey,
+                    health,
+                    equity: portfolio.equity,
+                    mm: portfolio.mm,
+                    last_update: current_ts,
+                };
+
+                // Update or insert into queue
+                queue.push(user_health);
+
+                log::trace!(
+                    "Updated portfolio {} (health: {}, equity: {}, mm: {})",
+                    pubkey,
+                    health as f64 / 1e6,
+                    portfolio.equity as f64 / 1e6,
+                    portfolio.mm as f64 / 1e6
+                );
+            }
+            Err(e) => {
+                // Not a portfolio account or invalid format
+                log::trace!("Skipped account {} (not portfolio): {}", pubkey, e);
+            }
+        }
+    }
+
+    log::debug!(
+        "Health queue updated: {} portfolios tracked",
+        queue.len()
+    );
 
     Ok(())
 }

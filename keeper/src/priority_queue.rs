@@ -76,7 +76,7 @@ impl HealthQueue {
     }
 
     /// Update existing user health
-    pub fn update(&mut self, user: &Pubkey, new_health: UserHealth) {
+    pub fn update(&mut self, _user: &Pubkey, new_health: UserHealth) {
         self.push(new_health);
     }
 

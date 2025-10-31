@@ -270,7 +270,7 @@ pub fn parse_portfolio(data: &[u8]) -> Result<Portfolio> {
     const LP_BUCKET_SIZE: usize = 256;  // Approximate
     offset += 32 * LP_BUCKET_SIZE;
 
-    let lp_bucket_count = if offset + 2 <= data.len() {
+    let _lp_bucket_count = if offset + 2 <= data.len() {
         u16::from_le_bytes([data[offset], data[offset + 1]])
     } else {
         0
