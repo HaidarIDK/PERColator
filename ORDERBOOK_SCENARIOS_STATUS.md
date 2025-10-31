@@ -17,13 +17,14 @@
 - ❌ Auction mode not implemented
 
 **Recent Updates:**
+- QuoteCache snapshot consistency implemented (Scenario 21)
 - ModifyOrder instruction implemented (discriminator 8)
 - Properties O7-O12 added to verified model
 - Extended PlaceOrder with post_only/reduce_only flags
 - Extended CommitFill with TimeInForce and SelfTradePrevent
 - CLI commands updated with all new parameters
 - E2E test suites created and passing
-- **Improvement: 162% (from 13 baseline to 34 scenarios)**
+- **Improvement: 169% (from 13 baseline to 35 scenarios)**
 
 ## Scenario Coverage Matrix
 
@@ -49,7 +50,7 @@
 | 18 | Multi-level depth | ✅ Yes | ✅ Yes | ✅ Tested | BookArea supports 19 levels |
 | 19 | FIFO under partials | ✅ Verified | ✅ Yes | ✅ Tested | Price-time priority |
 | 20 | Marketable limit | ✅ CommitFill | ✅ Yes | ✅ Tested | Crosses then rests |
-| 21 | Snapshot consistency | ⚠️ Partial | ⚠️ Partial | Future | QuoteCache exists |
+| 21 | Snapshot consistency | ✅ Implemented | ✅ Yes | ✅ Tested | QuoteCache updated on all book changes |
 | 22 | Seqno TOCTOU | ✅ CommitFill | ✅ Yes | ✅ Tested | Seqno validation works |
 | 23 | Dust orders | ✅ Enforced | ✅ Yes | ✅ Tested | Min order size validated, O8 |
 | 24 | Best price updates | ✅ Yes | ✅ Yes | ✅ Tested | After sweep |
@@ -70,7 +71,7 @@
 | 39 | Large sweep rounding | ✅ Yes | ✅ Yes | ✅ Tested | Fixed-point math verified |
 | 40 | Queue compaction | N/A | N/A | N/A | Array-based, no compaction needed |
 
-## Testable Scenarios Today (34/40) - 85% ✅
+## Testable Scenarios Today (35/40) - 87.5% ✅
 
 These can be tested with current slab implementation:
 
@@ -312,7 +313,7 @@ The slab program is deployed and working:
 - Price bands/crossing protection
 - Auction mode
 
-**CLI testing: 34/34 scenarios tested (100%) 🎉**
+**CLI testing: 35/35 scenarios tested (100%) 🎉**
 - ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order, update-funding)
 - ✅ Comprehensive test suite with 11 functional tests passing:
 
