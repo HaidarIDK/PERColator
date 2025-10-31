@@ -3,6 +3,30 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
+/// LP bucket type
+#[derive(Debug, Clone)]
+pub enum LpBucketType {
+    Slab {
+        reserved_base: u128,
+        reserved_quote: u128,
+        open_order_count: u16,
+    },
+    Amm {
+        lp_shares: u64,
+        share_price_cached: i64,
+        last_update_ts: u64,
+    },
+}
+
+/// LP bucket information for keeper monitoring
+#[derive(Debug, Clone)]
+pub struct LpBucket {
+    pub venue_id: [u8; 32], // Pubkey bytes
+    pub bucket_type: LpBucketType,
+    pub im: u128,
+    pub mm: u128,
+}
+
 /// Portfolio state (simplified mirror of on-chain state)
 #[derive(Debug, Clone)]
 pub struct Portfolio {
@@ -11,6 +35,7 @@ pub struct Portfolio {
     pub mm: u128,
     pub exposures: Vec<(u16, u16, i64)>, // (slab_idx, instrument_idx, qty)
     pub exposure_count: u16,
+    pub lp_buckets: Vec<LpBucket>, // LP positions
 }
 
 /// Calculate health: equity - MM
@@ -76,6 +101,57 @@ pub fn calculate_mm(
     portfolio.mm
 }
 
+/// Determine if portfolio needs LP liquidation
+///
+/// Returns true if:
+/// - Principal liquidation alone would be insufficient (equity still < MM)
+/// - Portfolio has active LP buckets
+pub fn needs_lp_liquidation(portfolio: &Portfolio) -> bool {
+    // Check if portfolio has any LP positions
+    if portfolio.lp_buckets.is_empty() {
+        return false;
+    }
+
+    // If equity is below MM and we have LP buckets, we may need LP liquidation
+    // This is a simplified check - production would estimate principal liquidation proceeds
+    portfolio.equity < (portfolio.mm as i128)
+}
+
+/// Get LP liquidation priority
+///
+/// Returns buckets in liquidation priority order:
+/// 1. Slab LP (higher priority - easier to unwind)
+/// 2. AMM LP (lower priority - last resort due to staleness concerns)
+pub fn get_lp_liquidation_priority(portfolio: &Portfolio) -> (Vec<&LpBucket>, Vec<&LpBucket>) {
+    let mut slab_buckets = Vec::new();
+    let mut amm_buckets = Vec::new();
+
+    for bucket in &portfolio.lp_buckets {
+        match bucket.bucket_type {
+            LpBucketType::Slab { .. } => slab_buckets.push(bucket),
+            LpBucketType::Amm { .. } => amm_buckets.push(bucket),
+        }
+    }
+
+    (slab_buckets, amm_buckets)
+}
+
+/// Check if AMM LP bucket has stale price
+///
+/// Returns true if the AMM price update is older than max_staleness_secs
+pub fn is_amm_price_stale(
+    bucket: &LpBucket,
+    current_timestamp: u64,
+    max_staleness_secs: u64,
+) -> bool {
+    if let LpBucketType::Amm { last_update_ts, .. } = bucket.bucket_type {
+        let age = current_timestamp.saturating_sub(last_update_ts);
+        age > max_staleness_secs
+    } else {
+        false
+    }
+}
+
 /// Parse portfolio from account data
 pub fn parse_portfolio(data: &[u8]) -> Result<Portfolio> {
     // This is a simplified parser for v0
@@ -92,6 +168,7 @@ pub fn parse_portfolio(data: &[u8]) -> Result<Portfolio> {
         mm: 0,
         exposures: Vec::new(),
         exposure_count: 0,
+        lp_buckets: Vec::new(),
     })
 }
 
@@ -107,6 +184,7 @@ mod tests {
             mm: 100_000_000,    // $100
             exposures: vec![],
             exposure_count: 0,
+            lp_buckets: vec![],
         };
 
         let oracle_prices = HashMap::new();
@@ -124,6 +202,7 @@ mod tests {
             mm: 100_000_000,     // $100
             exposures: vec![],
             exposure_count: 0,
+            lp_buckets: vec![],
         };
 
         let oracle_prices = HashMap::new();
@@ -148,6 +227,7 @@ mod tests {
                 (1, 1, -5_000_000),  // Short 5 units at instrument 1
             ],
             exposure_count: 2,
+            lp_buckets: vec![],
         };
 
         let mut oracle_prices = HashMap::new();
@@ -171,6 +251,7 @@ mod tests {
             mm: 100_000_000,
             exposures: vec![],
             exposure_count: 0,
+            lp_buckets: vec![],
         };
 
         let oracle_prices = HashMap::new();
@@ -187,11 +268,110 @@ mod tests {
             mm: 90_000_000,
             exposures: vec![],
             exposure_count: 0,
+            lp_buckets: vec![],
         };
 
         let oracle_prices = HashMap::new();
         let mm = calculate_mm(&portfolio, &oracle_prices);
 
         assert_eq!(mm, 90_000_000);
+    }
+
+    #[test]
+    fn test_needs_lp_liquidation_no_buckets() {
+        let portfolio = Portfolio {
+            equity: 95_000_000, // Below MM
+            im: 110_000_000,
+            mm: 100_000_000,
+            exposures: vec![],
+            exposure_count: 0,
+            lp_buckets: vec![], // No LP positions
+        };
+
+        assert!(!needs_lp_liquidation(&portfolio));
+    }
+
+    #[test]
+    fn test_needs_lp_liquidation_with_buckets() {
+        let slab_bucket = LpBucket {
+            venue_id: [0u8; 32],
+            bucket_type: LpBucketType::Slab {
+                reserved_base: 50_000_000,
+                reserved_quote: 50_000_000,
+                open_order_count: 5,
+            },
+            im: 10_000_000,
+            mm: 8_000_000,
+        };
+
+        let portfolio = Portfolio {
+            equity: 95_000_000, // Below MM
+            im: 110_000_000,
+            mm: 100_000_000,
+            exposures: vec![],
+            exposure_count: 0,
+            lp_buckets: vec![slab_bucket],
+        };
+
+        assert!(needs_lp_liquidation(&portfolio));
+    }
+
+    #[test]
+    fn test_get_lp_liquidation_priority() {
+        let slab_bucket = LpBucket {
+            venue_id: [1u8; 32],
+            bucket_type: LpBucketType::Slab {
+                reserved_base: 50_000_000,
+                reserved_quote: 50_000_000,
+                open_order_count: 5,
+            },
+            im: 10_000_000,
+            mm: 8_000_000,
+        };
+
+        let amm_bucket = LpBucket {
+            venue_id: [2u8; 32],
+            bucket_type: LpBucketType::Amm {
+                lp_shares: 1000,
+                share_price_cached: 100_000_000,
+                last_update_ts: 1234567890,
+            },
+            im: 20_000_000,
+            mm: 15_000_000,
+        };
+
+        let portfolio = Portfolio {
+            equity: 95_000_000,
+            im: 110_000_000,
+            mm: 100_000_000,
+            exposures: vec![],
+            exposure_count: 0,
+            lp_buckets: vec![slab_bucket, amm_bucket],
+        };
+
+        let (slab_buckets, amm_buckets) = get_lp_liquidation_priority(&portfolio);
+
+        assert_eq!(slab_buckets.len(), 1);
+        assert_eq!(amm_buckets.len(), 1);
+    }
+
+    #[test]
+    fn test_is_amm_price_stale() {
+        let amm_bucket = LpBucket {
+            venue_id: [0u8; 32],
+            bucket_type: LpBucketType::Amm {
+                lp_shares: 1000,
+                share_price_cached: 100_000_000,
+                last_update_ts: 1000,
+            },
+            im: 20_000_000,
+            mm: 15_000_000,
+        };
+
+        // Price is 100 seconds old, max staleness is 60 seconds
+        assert!(is_amm_price_stale(&amm_bucket, 1100, 60));
+
+        // Price is 50 seconds old, max staleness is 60 seconds
+        assert!(!is_amm_price_stale(&amm_bucket, 1050, 60));
     }
 }

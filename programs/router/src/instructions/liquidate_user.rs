@@ -4,6 +4,15 @@ use crate::state::{Portfolio, SlabRegistry, Vault};
 use percolator_common::*;
 use pinocchio::{account_info::AccountInfo, msg};
 
+/// Helper to convert verification errors from KANI verified functions
+///
+/// KANI verified functions return `Result<T, &'static str>` but production
+/// code expects `Result<T, PercolatorError>`. This helper performs the conversion.
+#[inline]
+fn convert_verification_error<T>(result: Result<T, &'static str>) -> Result<T, PercolatorError> {
+    result.map_err(|_e| PercolatorError::Overflow)
+}
+
 /// Liquidation mode based on health
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiquidationMode {
@@ -37,6 +46,245 @@ pub fn determine_mode(health: i128, preliq_buffer: i128) -> Option<LiquidationMo
     }
 }
 
+/// Calculate remaining deficit after liquidation attempts
+///
+/// Returns the amount of deficit still remaining (MM - equity).
+/// If equity >= MM, returns 0 (portfolio is healthy).
+fn calculate_remaining_deficit(
+    portfolio: &Portfolio,
+    _registry: &SlabRegistry,
+) -> Result<i128, PercolatorError> {
+    let equity = portfolio.equity;
+    let total_mm = portfolio.mm as i128;
+
+    if equity >= total_mm {
+        Ok(0) // Healthy
+    } else {
+        Ok(total_mm - equity) // Deficit amount
+    }
+}
+
+/// Liquidate Slab LP buckets to restore health
+///
+/// Iterates through active Slab LP buckets and cancels orders to free collateral.
+/// Uses verified proportional margin reduction (LP8-LP10).
+///
+/// Returns the total value freed from Slab LP liquidation.
+fn liquidate_slab_lp_buckets(
+    portfolio: &mut Portfolio,
+    target_deficit: i128,
+) -> Result<i128, PercolatorError> {
+    use crate::state::model_bridge::proportional_margin_reduction_verified;
+
+    let mut total_freed = 0i128;
+    const RATIO_SCALE: u128 = 1_000_000_000; // 1e9 for precision
+
+    msg!("LP Liquidation: Starting Slab LP liquidation");
+
+    // Iterate through LP buckets
+    for (idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+        if !bucket.active {
+            continue;
+        }
+
+        // Skip non-Slab buckets
+        if bucket.slab.is_none() {
+            continue;
+        }
+
+        if let Some(slab_lp) = &mut bucket.slab {
+            let order_count = slab_lp.open_order_count as usize;
+            if order_count == 0 {
+                continue;
+            }
+
+            msg!("LP Liquidation: Processing Slab bucket");
+
+            // For v0, assume all orders are cancelled and all collateral is freed
+            // In production, this would need CPI to slab program to actually cancel orders
+            let freed_base = slab_lp.reserved_base;
+            let freed_quote = slab_lp.reserved_quote;
+
+            // Calculate freed value (simplified - in production needs proper valuation)
+            let freed_value = (freed_base.saturating_add(freed_quote) / 1_000_000) as i128;
+
+            // Calculate remaining ratio using verified logic
+            let remaining_base = slab_lp.reserved_base.saturating_sub(freed_base);
+            let remaining_quote = slab_lp.reserved_quote.saturating_sub(freed_quote);
+
+            let base_ratio = if slab_lp.reserved_base > 0 {
+                (remaining_base * RATIO_SCALE) / slab_lp.reserved_base
+            } else {
+                RATIO_SCALE
+            };
+
+            let quote_ratio = if slab_lp.reserved_quote > 0 {
+                (remaining_quote * RATIO_SCALE) / slab_lp.reserved_quote
+            } else {
+                RATIO_SCALE
+            };
+
+            let remaining_ratio = base_ratio.min(quote_ratio);
+
+            // Apply proportional margin reduction using KANI verified function (LP8-LP10)
+            bucket.im = convert_verification_error(
+                proportional_margin_reduction_verified(bucket.im, remaining_ratio)
+            )?;
+            bucket.mm = convert_verification_error(
+                proportional_margin_reduction_verified(bucket.mm, remaining_ratio)
+            )?;
+
+            // Update reservations
+            slab_lp.reserved_base = 0;
+            slab_lp.reserved_quote = 0;
+            slab_lp.open_order_count = 0;
+
+            // Clear order IDs
+            slab_lp.open_order_ids = [0; 8];
+
+            // Update portfolio equity with freed collateral
+            portfolio.equity = portfolio.equity.saturating_add(freed_value);
+
+            total_freed = total_freed.saturating_add(freed_value);
+
+            msg!("LP Liquidation: Freed collateral from Slab bucket");
+
+            // Mark bucket inactive if empty
+            if slab_lp.open_order_count == 0 {
+                bucket.active = false;
+                msg!("LP Liquidation: Bucket marked inactive");
+            }
+
+            // Check if we've freed enough
+            if total_freed >= target_deficit {
+                msg!("LP Liquidation: Target deficit reached");
+                break;
+            }
+        }
+    }
+
+    msg!("LP Liquidation: Slab LP liquidation complete");
+    Ok(total_freed)
+}
+
+/// Liquidate AMM LP buckets to restore health
+///
+/// Burns LP shares to recover underlying assets.
+/// Uses verified redemption value calculation (LP6-LP7) and
+/// proportional margin reduction (LP8-LP10).
+///
+/// Requires fresh AMM prices (staleness guard).
+///
+/// Returns the total value freed from AMM LP liquidation.
+fn liquidate_amm_lp_buckets(
+    portfolio: &mut Portfolio,
+    target_deficit: i128,
+    current_ts: u64,
+    max_staleness_seconds: u64,
+) -> Result<i128, PercolatorError> {
+    use crate::state::model_bridge::{
+        calculate_redemption_value_verified,
+        proportional_margin_reduction_verified,
+    };
+
+    let mut total_freed = 0i128;
+
+    msg!("LP Liquidation: Starting AMM LP liquidation");
+
+    // Iterate through LP buckets
+    for (_idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+        if !bucket.active {
+            continue;
+        }
+
+        // Skip non-AMM buckets
+        if bucket.amm.is_none() {
+            continue;
+        }
+
+        if let Some(amm_lp) = &mut bucket.amm {
+            if amm_lp.lp_shares == 0 {
+                continue;
+            }
+
+            msg!("LP Liquidation: Processing AMM bucket");
+
+            // SAFETY TRIPWIRE: Staleness guard
+            let price_age = current_ts.saturating_sub(amm_lp.last_update_ts);
+            if price_age > max_staleness_seconds {
+                msg!("Warning: AMM price stale, skipping bucket");
+                continue;
+            }
+
+            // Calculate redemption value using KANI verified function (LP6-LP7)
+            // Convert lp_shares from u64 to u128 and share_price_cached from i64 to u64
+            let shares_u128 = amm_lp.lp_shares as u128;
+            let share_price_u64 = amm_lp.share_price_cached.max(0) as u64;
+            let redemption_value = convert_verification_error(
+                calculate_redemption_value_verified(shares_u128, share_price_u64)
+            )?;
+
+            msg!("LP Liquidation: Calculated redemption value");
+
+            // Burn all shares
+            let shares_to_burn = amm_lp.lp_shares;
+
+            // Apply proportional margin reduction using KANI verified function (LP8-LP10)
+            // ratio_remaining = 0 since we're burning all shares
+            let ratio_remaining = 0u128;
+            bucket.im = convert_verification_error(
+                proportional_margin_reduction_verified(bucket.im, ratio_remaining)
+            )?;
+            bucket.mm = convert_verification_error(
+                proportional_margin_reduction_verified(bucket.mm, ratio_remaining)
+            )?;
+
+            // Update bucket state
+            amm_lp.lp_shares = 0;
+            // share_price_cached and last_update_ts remain for historical tracking
+
+            // Update portfolio equity with redemption value
+            portfolio.equity = portfolio.equity.saturating_add(redemption_value);
+
+            total_freed = total_freed.saturating_add(redemption_value);
+
+            msg!("LP Liquidation: Burned shares and freed value");
+
+            // Mark bucket inactive
+            bucket.active = false;
+            msg!("LP Liquidation: Bucket marked inactive");
+
+            // Check if we've freed enough
+            if total_freed >= target_deficit {
+                msg!("LP Liquidation: Target deficit reached");
+                break;
+            }
+        }
+    }
+
+    msg!("LP Liquidation: AMM LP liquidation complete");
+    Ok(total_freed)
+}
+
+/// Enhanced liquidation that handles principal and LP positions
+///
+/// Liquidation Priority:
+/// 1. Principal positions - lowest market impact
+/// 2. Slab LP positions - no slippage, frees reserved collateral
+/// 3. AMM LP positions - potential slippage, requires fresh prices
+///
+/// Safety Mechanisms:
+/// - Uses KANI verified functions for all LP operations (LP1-LP10)
+/// - Staleness guard for AMM prices
+/// - Rate limiting in PreLiquidation mode
+/// - Bad debt socialization via insurance fund
+///
+/// Accounts Required:
+/// - Portfolio, Registry, Clock (standard)
+/// - Slab accounts (principal + LP)
+/// - Oracle accounts (principal)
+/// - AMM accounts (LP only, if needed)
+///
 /// Process liquidate user instruction
 ///
 /// This instruction liquidates an undercollateralized user by executing
@@ -231,7 +479,60 @@ pub fn process_liquidate_user(
         &oracle_accounts[..plan.split_count],
         plan.get_splits(),
     )?;
-    msg!("Liquidate: Execution complete via cross-slab logic");
+    msg!("Liquidate: Principal liquidation complete via cross-slab logic");
+
+    // Step 6.5: Check if LP liquidation is needed
+    let remaining_deficit = calculate_remaining_deficit(portfolio, registry)?;
+
+    if remaining_deficit > 0 {
+        msg!("LP Liquidation: Principal insufficient, starting LP liquidation");
+
+        // Step 6.6: Liquidate Slab LP positions (priority 2)
+        let slab_freed = liquidate_slab_lp_buckets(portfolio, remaining_deficit)?;
+
+        if slab_freed > 0 {
+            msg!("LP Liquidation: Slab LP freed collateral");
+
+            // Recalculate portfolio margin after Slab LP liquidation
+            portfolio.mm = portfolio.calculate_total_mm();
+            portfolio.im = portfolio.calculate_total_im();
+        }
+
+        // Check again after Slab LP liquidation
+        let remaining_deficit_after_slab = calculate_remaining_deficit(portfolio, registry)?;
+
+        if remaining_deficit_after_slab > 0 {
+            msg!("LP Liquidation: Still underwater, starting AMM LP liquidation");
+
+            // Step 6.7: Liquidate AMM LP positions (priority 3 - last resort)
+            let amm_freed = liquidate_amm_lp_buckets(
+                portfolio,
+                remaining_deficit_after_slab,
+                current_ts,
+                registry.max_oracle_staleness_secs.max(0) as u64,
+            )?;
+
+            if amm_freed > 0 {
+                msg!("LP Liquidation: AMM LP freed collateral");
+
+                // Recalculate portfolio margin after AMM LP liquidation
+                portfolio.mm = portfolio.calculate_total_mm();
+                portfolio.im = portfolio.calculate_total_im();
+            }
+        } else {
+            msg!("LP Liquidation: Portfolio restored after Slab LP");
+        }
+
+        // Final health check
+        let final_deficit = calculate_remaining_deficit(portfolio, registry)?;
+        if final_deficit > 0 {
+            msg!("LP Liquidation: Warning - still underwater");
+        } else {
+            msg!("LP Liquidation: Portfolio restored to health");
+        }
+    } else {
+        msg!("LP Liquidation: Principal sufficient, no LP needed");
+    }
 
     // Step 7: Update portfolio health and timestamp
     portfolio.health = portfolio.equity.saturating_sub(portfolio.mm as i128);
@@ -405,5 +706,233 @@ mod tests {
         // Slab with misaligned mark price should be excluded
         let misaligned_mark = 1_010_000;  // 1.0% diff
         assert!(!validate_oracle_alignment(misaligned_mark, oracle_price, tolerance_bps));
+    }
+
+    // =========================================================================
+    // LP Liquidation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_calculate_remaining_deficit_healthy() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, SlabRegistry};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 110_000_000; // $110
+        portfolio.mm = 100_000_000;     // $100
+
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+
+        let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
+        assert_eq!(deficit, 0); // No deficit
+    }
+
+    #[test]
+    fn test_calculate_remaining_deficit_underwater() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, SlabRegistry};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;  // $95
+        portfolio.mm = 100_000_000;     // $100
+
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+
+        let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
+        assert_eq!(deficit, 5_000_000); // $5 deficit
+    }
+
+    #[test]
+    fn test_calculate_remaining_deficit_exact_mm() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, SlabRegistry};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 100_000_000; // $100
+        portfolio.mm = 100_000_000;     // $100
+
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+
+        let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
+        assert_eq!(deficit, 0); // Exactly at MM, no deficit
+    }
+
+    #[test]
+    fn test_liquidate_slab_lp_buckets_no_buckets() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::Portfolio;
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;
+        portfolio.mm = 100_000_000;
+
+        let target_deficit = 5_000_000;
+        let freed = liquidate_slab_lp_buckets(&mut portfolio, target_deficit).unwrap();
+
+        assert_eq!(freed, 0); // No buckets to liquidate
+    }
+
+    #[test]
+    fn test_liquidate_slab_lp_buckets_with_slab_lp() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, LpBucket, VenueId};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;
+        portfolio.mm = 100_000_000;
+
+        // Add a Slab LP bucket
+        let venue_id = VenueId::new_slab(Pubkey::default());
+        let mut bucket = LpBucket::new_slab(venue_id);
+
+        // Set up the slab LP with some reserved collateral
+        if let Some(ref mut slab) = bucket.slab {
+            slab.reserved_base = 50_000_000;
+            slab.reserved_quote = 50_000_000;
+            slab.open_order_count = 5;
+        }
+
+        bucket.active = true;
+        bucket.im = 10_000_000;
+        bucket.mm = 8_000_000;
+
+        portfolio.lp_buckets[0] = bucket;
+        portfolio.lp_bucket_count = 1;
+
+        let target_deficit = 5_000_000;
+        let freed = liquidate_slab_lp_buckets(&mut portfolio, target_deficit).unwrap();
+
+        // Should have freed collateral
+        assert!(freed > 0);
+        // Bucket should be marked inactive
+        assert!(!portfolio.lp_buckets[0].active);
+    }
+
+    #[test]
+    fn test_liquidate_amm_lp_buckets_no_buckets() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::Portfolio;
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;
+        portfolio.mm = 100_000_000;
+
+        let target_deficit = 5_000_000;
+        let current_ts = 1000;
+        let max_staleness = 60;
+
+        let freed = liquidate_amm_lp_buckets(
+            &mut portfolio,
+            target_deficit,
+            current_ts,
+            max_staleness,
+        ).unwrap();
+
+        assert_eq!(freed, 0); // No buckets to liquidate
+    }
+
+    #[test]
+    fn test_liquidate_amm_lp_buckets_with_amm_lp() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, LpBucket, VenueId};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;
+        portfolio.mm = 100_000_000;
+
+        // Add an AMM LP bucket
+        let venue_id = VenueId::new_amm(Pubkey::default());
+        let mut bucket = LpBucket::new_amm(
+            venue_id,
+            1000,           // lp_shares
+            100_000_000,    // share_price ($100)
+            950,            // last_update_ts (fresh)
+        );
+        bucket.active = true;
+        bucket.im = 15_000_000;
+        bucket.mm = 12_000_000;
+
+        portfolio.lp_buckets[0] = bucket;
+        portfolio.lp_bucket_count = 1;
+
+        let target_deficit = 5_000_000;
+        let current_ts = 1000;  // 50 seconds after update
+        let max_staleness = 60; // Allow up to 60 seconds
+
+        let freed = liquidate_amm_lp_buckets(
+            &mut portfolio,
+            target_deficit,
+            current_ts,
+            max_staleness,
+        ).unwrap();
+
+        // Should have freed some collateral
+        assert!(freed > 0);
+        // Bucket should be marked inactive
+        assert!(!portfolio.lp_buckets[0].active);
+        // Shares should be burned
+        assert_eq!(portfolio.lp_buckets[0].amm.as_ref().unwrap().lp_shares, 0);
+    }
+
+    #[test]
+    fn test_liquidate_amm_lp_buckets_stale_price_skipped() {
+        use pinocchio::pubkey::Pubkey;
+        use crate::state::{Portfolio, LpBucket, VenueId};
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.equity = 95_000_000;
+        portfolio.mm = 100_000_000;
+
+        // Add an AMM LP bucket with stale price
+        let venue_id = VenueId::new_amm(Pubkey::default());
+        let mut bucket = LpBucket::new_amm(
+            venue_id,
+            1000,           // lp_shares
+            100_000_000,    // share_price ($100)
+            900,            // last_update_ts (stale)
+        );
+        bucket.active = true;
+        bucket.im = 15_000_000;
+        bucket.mm = 12_000_000;
+
+        portfolio.lp_buckets[0] = bucket;
+        portfolio.lp_bucket_count = 1;
+
+        let target_deficit = 5_000_000;
+        let current_ts = 1000;  // 100 seconds after update
+        let max_staleness = 60; // Only allow up to 60 seconds
+
+        let freed = liquidate_amm_lp_buckets(
+            &mut portfolio,
+            target_deficit,
+            current_ts,
+            max_staleness,
+        ).unwrap();
+
+        // Should skip stale bucket
+        assert_eq!(freed, 0);
+        // Bucket should still be active (not liquidated)
+        assert!(portfolio.lp_buckets[0].active);
+    }
+
+    #[test]
+    fn test_proportional_margin_reduction() {
+        use crate::state::model_bridge::proportional_margin_reduction_verified;
+
+        // Test 100% ratio (no reduction)
+        let initial_margin = 100_000_000;
+        let ratio_100 = 1_000_000; // 100% in scaled units
+        let result = proportional_margin_reduction_verified(initial_margin, ratio_100).unwrap();
+        assert_eq!(result, initial_margin);
+
+        // Test 50% ratio
+        let ratio_50 = 500_000; // 50% in scaled units
+        let result = proportional_margin_reduction_verified(initial_margin, ratio_50).unwrap();
+        assert_eq!(result, 50_000_000);
+
+        // Test 0% ratio (full liquidation)
+        let ratio_0 = 0;
+        let result = proportional_margin_reduction_verified(initial_margin, ratio_0).unwrap();
+        assert_eq!(result, 0);
     }
 }
