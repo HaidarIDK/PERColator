@@ -10,9 +10,9 @@ use crate::state::orderbook::{BookArea, Order as ProdOrder, Side as ProdSide};
 use model_safety::orderbook::{
     self as model, insert_order as model_insert, insert_order_extended as model_insert_extended,
     match_orders as model_match, match_orders_with_tif as model_match_with_tif,
-    remove_order as model_remove, Orderbook as ModelBook, Order as ModelOrder,
-    OrderFlags as ModelOrderFlags, Side as ModelSide, SelfTradePrevent as ModelSelfTradePrevent,
-    TimeInForce as ModelTimeInForce,
+    modify_order as model_modify, remove_order as model_remove, Orderbook as ModelBook,
+    Order as ModelOrder, OrderbookError, OrderFlags as ModelOrderFlags, Side as ModelSide,
+    SelfTradePrevent as ModelSelfTradePrevent, TimeInForce as ModelTimeInForce,
 };
 use pinocchio::pubkey::Pubkey;
 
@@ -204,6 +204,51 @@ pub fn remove_order_verified(book: &mut BookArea, order_id: u64) -> Result<ProdO
 
     // Create production order from model order
     Ok(model_order_to_prod(&model_order, Pubkey::default()))
+}
+
+/// Modify an existing order using formally verified logic
+///
+/// Properties:
+/// - Same price: preserves timestamp (keeps time priority)
+/// - Different price: uses new timestamp (loses priority)
+/// - All validation (tick/lot/min) enforced
+///
+/// # Arguments
+/// * `book` - The production orderbook (mut)
+/// * `order_id` - The order to modify
+/// * `new_price` - New price (1e6 scale, positive)
+/// * `new_qty` - New quantity (1e6 scale, positive)
+/// * `new_timestamp` - Timestamp for price changes
+///
+/// # Returns
+/// * `Ok(())` on success
+/// * `Err(OrderbookError)` if validation fails or order not found
+pub fn modify_order_verified(
+    book: &mut BookArea,
+    order_id: u64,
+    new_price: i64,
+    new_qty: i64,
+    new_timestamp: u64,
+) -> Result<(), OrderbookError> {
+    // Convert to model
+    let mut model_book = prod_book_to_model(book);
+
+    // Call verified model function
+    model_modify(&mut model_book, order_id, new_price, new_qty, new_timestamp)?;
+
+    // Convert result back to production
+    book.num_bids = model_book.num_bids;
+    book.num_asks = model_book.num_asks;
+
+    // Copy orders back (use default Pubkey since we don't have it in model)
+    for i in 0..(model_book.num_bids as usize) {
+        book.bids[i] = model_order_to_prod(&model_book.bids[i], Pubkey::default());
+    }
+    for i in 0..(model_book.num_asks as usize) {
+        book.asks[i] = model_order_to_prod(&model_book.asks[i], Pubkey::default());
+    }
+
+    Ok(())
 }
 
 /// Match result from verified matching

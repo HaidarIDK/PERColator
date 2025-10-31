@@ -5,6 +5,7 @@ pub mod cancel_order;
 pub mod update_funding;
 pub mod halt_trading;
 pub mod resume_trading;
+pub mod modify_order;
 
 pub use initialize::*;
 pub use commit_fill::*;
@@ -13,6 +14,7 @@ pub use cancel_order::*;
 pub use update_funding::*;
 pub use halt_trading::*;
 pub use resume_trading::*;
+pub use modify_order::*;
 
 /// Instruction discriminator
 #[repr(u8)]
@@ -33,4 +35,6 @@ pub enum SlabInstruction {
     HaltTrading = 6,
     /// Resume trading (LP owner only)
     ResumeTrading = 7,
+    /// Modify order (change price/qty while preserving order_id)
+    ModifyOrder = 8,
 }

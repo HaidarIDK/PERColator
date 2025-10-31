@@ -9,7 +9,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding, process_halt_trading, process_resume_trading}};
+use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding, process_halt_trading, process_resume_trading, process_modify_order}};
 use crate::state::{SlabState, Side as OrderSide};
 use crate::state::model_bridge::{TimeInForce, SelfTradePrevent};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
@@ -46,6 +46,7 @@ pub fn process_instruction(
         5 => SlabInstruction::UpdateFunding,
         6 => SlabInstruction::HaltTrading,
         7 => SlabInstruction::ResumeTrading,
+        8 => SlabInstruction::ModifyOrder,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -81,6 +82,10 @@ pub fn process_instruction(
         SlabInstruction::ResumeTrading => {
             msg!("Instruction: ResumeTrading");
             process_resume_trading_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::ModifyOrder => {
+            msg!("Instruction: ModifyOrder");
+            process_modify_order_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -620,5 +625,47 @@ fn process_resume_trading_inner(_program_id: &Pubkey, accounts: &[AccountInfo], 
     process_resume_trading(slab, authority_account.key())?;
 
     msg!("Resume trading completed successfully");
+    Ok(())
+}
+
+/// Process modify_order instruction
+///
+/// Accounts expected:
+/// 0. `[writable]` Slab account
+/// 1. `[signer]` Order owner
+///
+/// Data layout:
+/// - order_id: u64 (8 bytes)
+/// - new_price: i64 (8 bytes)
+/// - new_qty: i64 (8 bytes)
+fn process_modify_order_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    // Validate accounts
+    if accounts.len() < 2 {
+        msg!("Error: Missing required accounts");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+
+    let slab_account = &accounts[0];
+    let owner_account = &accounts[1];
+
+    // Validate owner is signer
+    validate_signer(owner_account)?;
+
+    // Validate slab is writable
+    validate_writable(slab_account)?;
+
+    // Parse instruction data
+    let mut reader = InstructionReader::new(data);
+    let order_id = reader.read_u64()?;
+    let new_price = reader.read_i64()?;
+    let new_qty = reader.read_i64()?;
+
+    // Borrow slab state mutably
+    let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };
+
+    // Process modify order
+    process_modify_order(slab, owner_account.key(), order_id, new_price, new_qty)?;
+
+    msg!("Modify order completed successfully");
     Ok(())
 }
