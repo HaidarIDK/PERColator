@@ -36,17 +36,18 @@ pub fn process_instruction(
     let instruction = match discriminator {
         0 => SlabInstruction::Initialize,
         1 => SlabInstruction::CommitFill,
-        2 => SlabInstruction::PlaceOrder,
-        3 => SlabInstruction::CancelOrder,
-        4 => {
+        2 => {
             // Adapter liquidity - handle separately (doesn't use SlabInstruction enum)
+            // This is the ONLY way for router to add/remove LP liquidity in a margin DEX
             msg!("Instruction: AdapterLiquidity");
             return process_adapter_liquidity_inner(accounts, &instruction_data[1..]);
         }
+        3 => SlabInstruction::PlaceOrder,   // Testing only - deprecated for margin DEX
+        4 => SlabInstruction::CancelOrder,  // Testing only - deprecated for margin DEX
         5 => SlabInstruction::UpdateFunding,
         6 => SlabInstruction::HaltTrading,
         7 => SlabInstruction::ResumeTrading,
-        8 => SlabInstruction::ModifyOrder,
+        8 => SlabInstruction::ModifyOrder,  // Testing only - deprecated for margin DEX
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());

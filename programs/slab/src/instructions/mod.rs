@@ -22,19 +22,19 @@ pub use modify_order::*;
 pub enum SlabInstruction {
     /// Initialize slab
     Initialize = 0,
-    /// Commit fill (v0 - single instruction for fills)
+    /// Commit fill (router only - match orders)
     CommitFill = 1,
-    /// Place order (v1 - add resting limit order)
-    PlaceOrder = 2,
-    /// Cancel order (v1 - remove resting limit order)
-    CancelOrder = 3,
-    // Note: Discriminator 4 is used for adapter_liquidity (not in this enum)
+    // Note: Discriminator 2 is adapter_liquidity (router LP operations - not in this enum)
+    /// Place order (TESTING ONLY - deprecated for margin DEX, use adapter_liquidity disc 2)
+    PlaceOrder = 3,
+    /// Cancel order (TESTING ONLY - deprecated for margin DEX, use adapter_liquidity disc 2)
+    CancelOrder = 4,
     /// Update funding rate (periodic crank)
     UpdateFunding = 5,
     /// Halt trading (LP owner only)
     HaltTrading = 6,
     /// Resume trading (LP owner only)
     ResumeTrading = 7,
-    /// Modify order (change price/qty while preserving order_id)
+    /// Modify order (TESTING ONLY - change price/qty while preserving order_id)
     ModifyOrder = 8,
 }

@@ -447,14 +447,14 @@ pub async fn place_order(
     let slab_program_id = config.slab_program_id;
 
     // Build instruction data:
-    // - Byte 0: discriminator = 2 (PlaceOrder)
+    // - Byte 0: discriminator = 3 (PlaceOrder - TESTING ONLY, use router LP for production)
     // - Byte 1: side (u8)
     // - Bytes 2-9: price (i64 little-endian)
     // - Bytes 10-17: qty (i64 little-endian)
     // - Byte 18: post_only (u8, optional)
     // - Byte 19: reduce_only (u8, optional)
     let mut instruction_data = Vec::with_capacity(20);
-    instruction_data.push(2); // PlaceOrder discriminator
+    instruction_data.push(3); // PlaceOrder discriminator (testing only)
     instruction_data.push(side_u8);
     instruction_data.extend_from_slice(&price.to_le_bytes());
     instruction_data.extend_from_slice(&qty.to_le_bytes());
@@ -530,10 +530,10 @@ pub async fn cancel_order(
     let slab_program_id = config.slab_program_id;
 
     // Build instruction data:
-    // - Byte 0: discriminator = 3 (CancelOrder)
+    // - Byte 0: discriminator = 4 (CancelOrder - TESTING ONLY, use router LP for production)
     // - Bytes 1-8: order_id (u64 little-endian)
     let mut instruction_data = Vec::with_capacity(9);
-    instruction_data.push(3); // CancelOrder discriminator
+    instruction_data.push(4); // CancelOrder discriminator (testing only)
     instruction_data.extend_from_slice(&order_id.to_le_bytes());
 
     // Build CancelOrder instruction
