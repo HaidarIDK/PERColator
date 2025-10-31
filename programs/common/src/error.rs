@@ -54,6 +54,8 @@ pub enum PercolatorError {
     CannotFillCompletely = 218,
     SelfTrade = 219,
     TradingHalted = 220,
+    PriceBandViolation = 221,      // Scenario 17: Price exceeds band from best bid/ask
+    OracleBandViolation = 222,     // Scenario 37: Price exceeds band from oracle price
 
     // Matching errors (300-399)
     InvalidSide = 300,

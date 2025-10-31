@@ -56,8 +56,19 @@ pub struct SlabHeader {
     pub bump: u8,
     /// Trading halted flag (1 = halted, 0 = active)
     pub is_halted: u8,
-    /// Padding
-    pub _padding: [u8; 2],
+
+    /// Price band from best bid/ask (basis points, 0 = disabled)
+    /// Prevents orders from crossing too far from market (Scenario 17)
+    /// Example: 500 = 5% max deviation from best bid/ask
+    pub price_band_bps: u16,
+
+    /// Oracle price band (basis points, 0 = disabled)
+    /// Prevents orders too far from oracle/mark price (Scenario 37)
+    /// Example: 1000 = 10% max deviation from oracle price
+    pub oracle_band_bps: u16,
+
+    /// Padding for future use
+    pub _padding: [u8; 4],
 }
 
 impl SlabHeader {
@@ -103,7 +114,9 @@ impl SlabHeader {
             off_receipt_area,
             bump,
             is_halted: 0,              // Trading active by default
-            _padding: [0; 2],
+            price_band_bps: 0,         // Price bands disabled by default
+            oracle_band_bps: 0,        // Oracle bands disabled by default
+            _padding: [0; 4],
         }
     }
 

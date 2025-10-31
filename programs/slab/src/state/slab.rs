@@ -1,6 +1,6 @@
 //! Slab state - v1 orderbook implementation
 
-use super::{BookArea, SlabHeader, QuoteCache};
+use super::{BookArea, SlabHeader, QuoteCache, Side};
 
 /// Main slab state - v0 minimal structure (~4KB)
 /// Layout: Header (256B) + QuoteCache (256B) + BookArea (3KB)
@@ -60,6 +60,84 @@ impl SlabState {
 
         // Update quote cache with current seqno
         self.quote_cache.update(self.header.seqno, &best_bids, &best_asks);
+    }
+
+    /// Validate price against price bands (Scenario 17: Crossing protection)
+    ///
+    /// Checks if order price is within acceptable range from best bid/ask.
+    /// Prevents fat-finger errors and extreme price deviations.
+    ///
+    /// # Arguments
+    /// * `side` - Order side (Buy or Sell)
+    /// * `price` - Order price to validate
+    ///
+    /// # Returns
+    /// * Ok(()) if price is within bands or bands are disabled
+    /// * Err("Price outside allowed band") if price violates band
+    pub fn validate_price_band(&self, side: Side, price: i64) -> Result<(), &'static str> {
+        // Skip if price bands are disabled
+        if self.header.price_band_bps == 0 {
+            return Ok(());
+        }
+
+        use Side::*;
+        match side {
+            Buy => {
+                // For buy orders, check against best ask
+                if self.book.num_asks > 0 {
+                    let best_ask = self.book.asks[0].price;
+                    // Max buy price = best_ask * (1 + band_bps/10000)
+                    let max_price = (best_ask as i128 * (10_000 + self.header.price_band_bps as i128) / 10_000) as i64;
+                    if price > max_price {
+                        return Err("Buy price exceeds price band above best ask");
+                    }
+                }
+            }
+            Sell => {
+                // For sell orders, check against best bid
+                if self.book.num_bids > 0 {
+                    let best_bid = self.book.bids[0].price;
+                    // Min sell price = best_bid * (1 - band_bps/10000)
+                    let min_price = (best_bid as i128 * (10_000 - self.header.price_band_bps as i128) / 10_000) as i64;
+                    if price < min_price {
+                        return Err("Sell price below price band under best bid");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate price against oracle price bands (Scenario 37: Oracle bands)
+    ///
+    /// Checks if order price is within acceptable range from oracle/mark price.
+    /// Acts as circuit breaker when market deviates too far from fair value.
+    ///
+    /// # Arguments
+    /// * `price` - Order price to validate
+    ///
+    /// # Returns
+    /// * Ok(()) if price is within oracle bands or bands are disabled
+    /// * Err("Price outside oracle band") if price violates band
+    pub fn validate_oracle_band(&self, price: i64) -> Result<(), &'static str> {
+        // Skip if oracle bands are disabled
+        if self.header.oracle_band_bps == 0 {
+            return Ok(());
+        }
+
+        let oracle_price = self.header.mark_px;
+
+        // Calculate allowed range: oracle_price ± (oracle_price * band_bps / 10000)
+        let band_amount = (oracle_price as i128 * self.header.oracle_band_bps as i128 / 10_000) as i64;
+        let min_price = oracle_price - band_amount;
+        let max_price = oracle_price + band_amount;
+
+        if price < min_price || price > max_price {
+            return Err("Price outside oracle price band");
+        }
+
+        Ok(())
     }
 }
 

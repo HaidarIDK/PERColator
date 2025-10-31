@@ -55,6 +55,18 @@ pub fn process_place_order(
         return Err(PercolatorError::InvalidQuantity);
     }
 
+    // Scenario 17: Validate price bands (crossing protection)
+    slab.validate_price_band(side, price).map_err(|_| {
+        msg!("Error: Price outside allowed band from best bid/ask");
+        PercolatorError::PriceBandViolation
+    })?;
+
+    // Scenario 37: Validate oracle price bands
+    slab.validate_oracle_band(price).map_err(|_| {
+        msg!("Error: Price outside oracle price band");
+        PercolatorError::OracleBandViolation
+    })?;
+
     // Get current timestamp from Clock sysvar
     // In BPF, this would use get_clock_sysvar(); for testing we use a default
     let timestamp = Clock::get().map(|c| c.unix_timestamp as u64).unwrap_or(0);
