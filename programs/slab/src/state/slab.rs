@@ -26,6 +26,41 @@ impl SlabState {
             book: BookArea::new(),
         }
     }
+
+    /// Refresh quote cache from current orderbook state
+    ///
+    /// This should be called after any operation that modifies the orderbook
+    /// (PlaceOrder, CancelOrder, ModifyOrder, CommitFill)  to ensure the
+    /// quote cache snapshot stays consistent.
+    ///
+    /// Scenario 21: Snapshot consistency - QuoteCache provides router-readable
+    /// snapshot of best 4 bid/ask levels with seqno versioning
+    pub fn refresh_quote_cache(&mut self) {
+        use percolator_common::QuoteLevel;
+
+        // Extract top 4 bids (already sorted descending by price)
+        let mut best_bids = [QuoteLevel::default(); 4];
+        for i in 0..4.min(self.book.num_bids as usize) {
+            let order = &self.book.bids[i];
+            best_bids[i] = QuoteLevel {
+                px: order.price,
+                avail_qty: order.qty,
+            };
+        }
+
+        // Extract top 4 asks (already sorted ascending by price)
+        let mut best_asks = [QuoteLevel::default(); 4];
+        for i in 0..4.min(self.book.num_asks as usize) {
+            let order = &self.book.asks[i];
+            best_asks[i] = QuoteLevel {
+                px: order.price,
+                avail_qty: order.qty,
+            };
+        }
+
+        // Update quote cache with current seqno
+        self.quote_cache.update(self.header.seqno, &best_bids, &best_asks);
+    }
 }
 
 #[cfg(test)]

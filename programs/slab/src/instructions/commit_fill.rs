@@ -127,6 +127,9 @@ pub fn process_commit_fill(
     // Increment seqno (book changed - orders were filled/removed)
     slab.header.increment_seqno();
 
+    // Refresh quote cache to maintain snapshot consistency (Scenario 21)
+    slab.refresh_quote_cache();
+
     msg!("CommitFill executed successfully");
     Ok(())
 }

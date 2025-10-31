@@ -51,6 +51,9 @@ pub fn process_cancel_order(
     // Increment seqno (book state changed)
     slab.header.increment_seqno();
 
+    // Refresh quote cache to maintain snapshot consistency (Scenario 21)
+    slab.refresh_quote_cache();
+
     msg!("CancelOrder executed");
 
     Ok(())
