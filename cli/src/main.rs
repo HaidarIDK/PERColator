@@ -325,6 +325,32 @@ enum MatcherCommands {
         /// Slab address
         slab: String,
     },
+
+    /// Match an incoming order against the order book (CommitFill)
+    MatchOrder {
+        /// Slab address
+        slab: String,
+
+        /// Side (buy or sell)
+        #[arg(long)]
+        side: String,
+
+        /// Quantity (scaled by 1e6)
+        #[arg(long)]
+        qty: i64,
+
+        /// Limit price (scaled by 1e6)
+        #[arg(long)]
+        limit_price: i64,
+
+        /// Time-in-force (GTC, IOC, FOK)
+        #[arg(long, default_value = "GTC")]
+        time_in_force: String,
+
+        /// Self-trade prevention (None, CancelNewest, CancelOldest, DecrementAndCancel)
+        #[arg(long, default_value = "None")]
+        self_trade_prevention: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -658,6 +684,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MatcherCommands::GetOrderbook { slab } => {
                     matcher::get_orderbook(&config, slab).await?;
+                }
+                MatcherCommands::MatchOrder { slab, side, qty, limit_price, time_in_force, self_trade_prevention } => {
+                    matcher::match_order(&config, slab, side, qty, limit_price, time_in_force, self_trade_prevention).await?;
                 }
             }
         }
