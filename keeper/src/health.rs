@@ -153,22 +153,140 @@ pub fn is_amm_price_stale(
 }
 
 /// Parse portfolio from account data
+///
+/// Portfolio struct layout (repr(C)):
+/// - router_id: Pubkey (32)
+/// - user: Pubkey (32)
+/// - equity: i128 (16)
+/// - im: u128 (16)
+/// - mm: u128 (16)
+/// - free_collateral: i128 (16)
+/// - last_mark_ts: u64 (8)
+/// - exposure_count: u16 (2)
+/// - bump: u8 (1)
+/// - _padding: [u8; 5] (5)
+/// - health: i128 (16)
+/// - last_liquidation_ts: u64 (8)
+/// - cooldown_seconds: u64 (8)
+/// - _padding2: [u8; 8] (8)
+/// - principal: i128 (16)
+/// - pnl: i128 (16)
+/// - vested_pnl: i128 (16)
+/// - last_slot: u64 (8)
+/// - pnl_index_checkpoint: i128 (16)
+/// - _padding4: [u8; 8] (8)
+/// - exposures: [(u16, u16, i64); 256] (256 * 10 = 2560)
+/// - funding_offsets: [i128; 256] (256 * 16 = 4096)
+/// - lp_buckets: [LpBucket; 32] (32 * bucket_size)
+/// - lp_bucket_count: u16 (2)
+/// - _padding3: [u8; 6] (6)
 pub fn parse_portfolio(data: &[u8]) -> Result<Portfolio> {
-    // This is a simplified parser for v0
-    // In production, this would use proper deserialization
+    // Minimum required size: header fields before exposures array
+    const MIN_SIZE: usize = 32 + 32 + 16 + 16 + 16 + 16 + 8 + 2 + 1 + 5 + 16 + 8 + 8 + 8 + 16 + 16 + 16 + 8 + 16 + 8;
 
-    if data.len() < 1024 {
-        anyhow::bail!("Portfolio account data too small");
+    if data.len() < MIN_SIZE {
+        anyhow::bail!("Portfolio account data too small: {} < {}", data.len(), MIN_SIZE);
     }
 
-    // For v0 stub, return dummy portfolio
+    let mut offset = 0;
+
+    // Skip router_id (32) and user (32)
+    offset += 64;
+
+    // Read equity (i128 at offset 64)
+    let equity = i128::from_le_bytes(
+        data[offset..offset + 16]
+            .try_into()
+            .context("Failed to read equity")?
+    );
+    offset += 16;
+
+    // Read im (u128 at offset 80)
+    let im = u128::from_le_bytes(
+        data[offset..offset + 16]
+            .try_into()
+            .context("Failed to read im")?
+    );
+    offset += 16;
+
+    // Read mm (u128 at offset 96)
+    let mm = u128::from_le_bytes(
+        data[offset..offset + 16]
+            .try_into()
+            .context("Failed to read mm")?
+    );
+    offset += 16;
+
+    // Skip free_collateral (16), last_mark_ts (8)
+    offset += 24;
+
+    // Read exposure_count (u16 at offset 136)
+    let exposure_count = u16::from_le_bytes(
+        data[offset..offset + 2]
+            .try_into()
+            .context("Failed to read exposure_count")?
+    );
+    offset += 2;
+
+    // Skip bump (1), _padding (5), health (16), last_liquidation_ts (8),
+    // cooldown_seconds (8), _padding2 (8), principal (16), pnl (16),
+    // vested_pnl (16), last_slot (8), pnl_index_checkpoint (16), _padding4 (8)
+    offset += 1 + 5 + 16 + 8 + 8 + 8 + 16 + 16 + 16 + 8 + 16 + 8;  // = 130 bytes
+
+    // Now at offset 268 - start of exposures array
+    // exposures: [(u16, u16, i64); 256] - each entry is 10 bytes
+    let mut exposures = Vec::new();
+    for i in 0..(exposure_count as usize).min(256) {
+        let expo_offset = offset + (i * 10);
+        if expo_offset + 10 > data.len() {
+            break;
+        }
+
+        let slab_idx = u16::from_le_bytes([data[expo_offset], data[expo_offset + 1]]);
+        let instrument_idx = u16::from_le_bytes([data[expo_offset + 2], data[expo_offset + 3]]);
+        let qty = i64::from_le_bytes(
+            data[expo_offset + 4..expo_offset + 12]
+                .try_into()
+                .context("Failed to read exposure qty")?
+        );
+
+        if qty != 0 {
+            exposures.push((slab_idx, instrument_idx, qty));
+        }
+    }
+    offset += 256 * 10;  // Skip all exposures
+
+    // Skip funding_offsets: [i128; 256] (256 * 16 = 4096)
+    offset += 256 * 16;
+
+    // Now at lp_buckets array
+    // Parse LP buckets (simplified for v0 - just get count)
+    // LpBucket is large (~200+ bytes each), so for v0 we'll just get the count
+    // and skip detailed parsing
+
+    // Fast-forward to lp_bucket_count field
+    // Each LpBucket is sizeof(LpBucket), typically ~256 bytes
+    // We need to skip 32 buckets to get to lp_bucket_count
+    const LP_BUCKET_SIZE: usize = 256;  // Approximate
+    offset += 32 * LP_BUCKET_SIZE;
+
+    let lp_bucket_count = if offset + 2 <= data.len() {
+        u16::from_le_bytes([data[offset], data[offset + 1]])
+    } else {
+        0
+    };
+
+    // For v0, we don't parse individual LP buckets in the keeper
+    // The keeper just checks if lp_bucket_count > 0 to know if LP liquidation is needed
+    // TODO: Add full LP bucket parsing for detailed monitoring
+
     Ok(Portfolio {
-        equity: 0,
-        im: 0,
-        mm: 0,
-        exposures: Vec::new(),
-        exposure_count: 0,
-        lp_buckets: Vec::new(),
+        equity,
+        im,
+        mm,
+        exposures,
+        exposure_count,
+        lp_buckets: Vec::new(),  // TODO: Parse actual LP buckets
     })
 }
 
