@@ -2,6 +2,8 @@ name: Build for Devnet
 
 on:
   workflow_dispatch:  # Manual trigger
+  push:
+    branches: [percolator-v2]  # Auto-build on your branch
 
 jobs:
   build-programs:
