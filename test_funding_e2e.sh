@@ -70,9 +70,9 @@ cleanup
 # Step 1: Start localnet validator
 echo -e "${GREEN}[1/10]${NC} Starting localnet validator..."
 solana-test-validator \
-    --bpf-program Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS target/deploy/percolator_router.so \
-    --bpf-program 7gUX8cKNEgSZ9Fg6X5BGDTKaK4qsaZLqvMadGkePmHjH target/deploy/percolator_slab.so \
-    --bpf-program AMMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx target/deploy/percolator_amm.so \
+    --bpf-program 7NUzsomCpwX1MMVHSLDo8tmcCDpUTXiWb1SWa94BpANf target/deploy/percolator_router.so \
+    --bpf-program CmJKuXjspb84yaaoWFSujVgzaXktCw4jwaxzdbRbrJ8g target/deploy/percolator_slab.so \
+    --bpf-program C9PdrHtZfDe24iFpuwtv4FHd7mPUnq52feFiKFNYLFvy target/deploy/percolator_amm.so \
     --reset \
     --quiet \
     &
