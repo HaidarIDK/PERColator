@@ -17,6 +17,7 @@ mod trading;
 mod margin;
 mod liquidation;
 mod insurance;
+mod amm;
 mod crisis;
 mod keeper;
 mod tests;
@@ -107,6 +108,12 @@ enum Commands {
     Liquidity {
         #[command(subcommand)]
         command: LiquidityCommands,
+    },
+
+    /// AMM operations
+    Amm {
+        #[command(subcommand)]
+        command: AmmCommands,
     },
 
     /// Trading operations
@@ -393,6 +400,29 @@ enum LiquidityCommands {
         /// Optional user address (defaults to CLI keypair)
         user: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AmmCommands {
+    /// Create a new AMM pool
+    Create {
+        /// Registry address
+        registry: String,
+
+        /// Trading pair symbol (e.g., "BTC-USD")
+        symbol: String,
+
+        /// Initial X reserve (base)
+        #[arg(long)]
+        x_reserve: u64,
+
+        /// Initial Y reserve (quote)
+        #[arg(long)]
+        y_reserve: u64,
+    },
+
+    /// List AMM pools (placeholder)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -733,6 +763,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 LiquidityCommands::Show { user } => {
                     liquidity::show_positions(&config, user).await?;
+                }
+            }
+        }
+        Commands::Amm { command } => {
+            match command {
+                AmmCommands::Create { registry, symbol, x_reserve, y_reserve } => {
+                    amm::create_amm(&config, registry, symbol, x_reserve, y_reserve).await?;
+                }
+                AmmCommands::List => {
+                    amm::list_amms(&config).await?;
                 }
             }
         }

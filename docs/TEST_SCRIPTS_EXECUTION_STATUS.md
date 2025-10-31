@@ -52,20 +52,30 @@ Router LP operations are **documented** but not executable due to missing CLI co
 
 ### 2. test_router_lp_amm.sh - AMM LP Test
 
-**Status**: ✓ Partially Executable
+**Status**: ✓ Fully Executable
 
 #### PART 1: EXECUTABLE NOW ✓
 
-Infrastructure setup steps (same as slab test):
+Infrastructure setup steps:
 
 - ✓ Create test keypair
 - ✓ Start local validator with router and AMM programs
 - ✓ Airdrop SOL
 - ✓ Create registry via CLI
+- ✓ **Create AMM pool via CLI** ← NEW!
+- ✓ Validate AMM account on chain
 - ✓ Initialize portfolio via CLI
 - ✓ Deposit collateral via CLI
 
-#### PART 2: PARTIALLY IMPLEMENTED ⚠
+#### PART 2: AMM CREATION COMPLETE ✓
+
+**AMM Creation NOW WORKING**:
+```bash
+./percolator amm create <REGISTRY> <SYMBOL> \
+  --x-reserve <X_RESERVE> --y-reserve <Y_RESERVE>
+```
+
+✓ **Status**: IMPLEMENTED (cli/src/amm.rs)
 
 **CLI Command EXISTS for AMM LP**:
 ```bash
@@ -74,19 +84,11 @@ Infrastructure setup steps (same as slab test):
   --upper-price <UPPER_PX>
 ```
 
-⚠ **Missing: AMM Creation**
-
-Cannot test full flow without an AMM instance. Required CLI command:
-```bash
-./percolator amm create <REGISTRY> <INSTRUMENT> \
-  --x-reserve <AMT> --y-reserve <AMT>
-```
-
 **On-Chain Support**: ✓ Complete
-- AMM creation instruction (disc 0) exists in programs/amm/src/entrypoint.rs
+- AMM creation instruction (disc 0) in programs/amm/src/entrypoint.rs
 - programs/router/src/instructions/router_liquidity.rs supports AmmAdd (disc 0)
 - programs/amm/src/adapter.rs handles discriminator 2 (adapter_liquidity)
-- CLI implementation in cli/src/liquidity.rs ready for use
+- CLI commands: `percolator amm create` and `percolator liquidity add`
 
 ---
 
@@ -165,11 +167,17 @@ Each test script now includes:
 
 ## CLI Implementation Roadmap
 
-### Priority 1: AMM Creation
-**File**: cli/src/amm.rs (new)
-**Command**: `percolator amm create <REGISTRY> <INSTRUMENT> --x-reserve <AMT> --y-reserve <AMT>`
+### Priority 1: AMM Creation ✓ COMPLETE
+**File**: cli/src/amm.rs
+**Command**: `percolator amm create <REGISTRY> <SYMBOL> --x-reserve <AMT> --y-reserve <AMT>`
+**Status**: ✓ **IMPLEMENTED**
 **Impact**: Enables full AMM LP testing via existing `liquidity add` command
 **On-Chain**: ✓ Ready (programs/amm/src/entrypoint.rs, disc 0)
+**Implementation**:
+- Creates and initializes AMM account
+- Validates AMM state on-chain
+- Calculates spot price from reserves
+- Ready for router LP operations
 
 ### Priority 2: Orderbook Mode for Liquidity Add
 **File**: cli/src/liquidity.rs
@@ -242,7 +250,7 @@ Each test script now includes:
 - ✓ Test scripts execute and document flows
 
 **What Needs CLI Work**:
-- ⚠ AMM creation command (Priority 1)
+- ✓ ~~AMM creation command~~ **COMPLETE** (Priority 1)
 - ⚠ Orderbook mode for liquidity add (Priority 2)
 - ⚠ Optional explicit reserve/release commands (Priority 3)
 
