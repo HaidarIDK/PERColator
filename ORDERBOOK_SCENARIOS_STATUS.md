@@ -31,8 +31,8 @@
 |---|----------|--------------|--------------|--------|-------|
 | 1 | Basic add & best bid/ask | ✅ PlaceOrder | ✅ Yes | ✅ Tested | Core functionality |
 | 2 | Price-time priority | ✅ Verified | ✅ Yes | ✅ Tested | Kani proof O1 |
-| 3 | Partial fill | ✅ CommitFill | ✅ Yes | Can test | Match logic exists |
-| 4 | Walk the book | ✅ CommitFill | ✅ Yes | Can test | Multi-level matching |
+| 3 | Partial fill | ✅ CommitFill | ✅ Yes | ✅ Tested | Match logic exists |
+| 4 | Walk the book | ✅ CommitFill | ✅ Yes | ✅ Tested | Multi-level matching |
 | 5 | Cancel order by id | ✅ CancelOrder | ✅ Yes | ✅ Tested | Instruction #3 |
 | 6 | Replace preserves time | ✅ ModifyOrder | ✅ Yes | ✅ Tested | Same price keeps timestamp |
 | 7 | Replace new price | ✅ ModifyOrder | ✅ Yes | ✅ Tested | New price gets new timestamp |
@@ -47,21 +47,21 @@
 | 16 | Lot/min notional | ✅ Enforced | ✅ Yes | ✅ Tested | Validated in PlaceOrder, O8 |
 | 17 | Crossing protection | ❌ Not impl | ❌ No | Future | No price band logic |
 | 18 | Multi-level depth | ✅ Yes | ✅ Yes | ✅ Tested | BookArea supports 19 levels |
-| 19 | FIFO under partials | ✅ Verified | ✅ Yes | Can test | Price-time priority |
-| 20 | Marketable limit | ✅ CommitFill | ✅ Yes | Can test | Crosses then rests |
+| 19 | FIFO under partials | ✅ Verified | ✅ Yes | ✅ Tested | Price-time priority |
+| 20 | Marketable limit | ✅ CommitFill | ✅ Yes | ✅ Tested | Crosses then rests |
 | 21 | Snapshot consistency | ⚠️ Partial | ⚠️ Partial | Future | QuoteCache exists |
 | 22 | Seqno TOCTOU | ✅ CommitFill | ✅ Yes | ✅ Tested | Seqno validation works |
 | 23 | Dust orders | ✅ Enforced | ✅ Yes | ✅ Tested | Min order size validated, O8 |
 | 24 | Best price updates | ✅ Yes | ✅ Yes | ✅ Tested | After sweep |
 | 25 | Halt/resume | ✅ Implemented | ✅ Yes | ✅ Tested | HaltTrading/ResumeTrading instructions |
 | 26 | Post-only + STPF | ✅ Implemented | ✅ Yes | ✅ Tested | Both flags work together |
-| 27 | Large sweep order | ✅ CommitFill | ✅ Yes | Can test | Multi-trade matching |
+| 27 | Large sweep order | ✅ CommitFill | ✅ Yes | ✅ Tested | Multi-trade matching |
 | 28 | Time priority tie | ✅ order_id | ✅ Yes | ✅ Tested | Monotonic order_id |
-| 29 | Maker/taker fees | ✅ CommitFill | ✅ Yes | Can test | Fee calculation exists |
+| 29 | Maker/taker fees | ✅ CommitFill | ✅ Yes | ✅ Tested | Fee calculation exists |
 | 30 | Invalid quantities | ✅ Validated | ✅ Yes | ✅ Tested | Zero/negative/invalid rejected |
 | 31 | Replace larger size | ✅ ModifyOrder | ✅ Yes | ✅ Tested | Modify qty upward |
 | 32 | Replace smaller | ✅ ModifyOrder | ✅ Yes | ✅ Tested | Modify qty downward |
-| 33 | Crossing + remainder | ✅ CommitFill | ✅ Yes | Can test | Match then rest |
+| 33 | Crossing + remainder | ✅ CommitFill | ✅ Yes | ✅ Tested | Match then rest |
 | 34 | Queue consistency | ✅ Verified | ✅ Yes | ✅ Tested | Array-based,  no pointers |
 | 35 | Opening auction | ❌ Not impl | ❌ No | Future | No auction mode |
 | 36 | Router margin hook | ✅ Router | ❌ No | Future | Need margin checking |
@@ -312,15 +312,16 @@ The slab program is deployed and working:
 - Price bands/crossing protection
 - Auction mode
 
-**CLI testing: 27/34 scenarios tested (79%)**
+**CLI testing: 34/34 scenarios tested (100%) 🎉**
 - ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order)
-- ✅ Five E2E test suites passing:
+- ✅ Six E2E test suites passing:
   - test_core_scenarios.sh (scenarios 1, 2, 5, 18, 24, 28)
   - test_modify_order.sh (scenarios 6, 7, 31, 32)
   - test_orderbook_extended.sh (scenarios 8, 9, 12, 15, 16)
   - test_matching_engine.sh (scenarios 10, 11, 13, 14, 26)
+  - test_matching_scenarios.sh (scenarios 3, 4, 19, 20, 27, 29, 33)
   - test_orderbook_comprehensive.sh (scenarios 22, 23, 25, 30, 34, 38, 39)
 - ✅ Core + Advanced + Edge case + Safety scenarios tested
-- 🚀 From 13/40 (33%) baseline to 34/40 (85%) implemented, 27/34 (79%) tested
+- 🚀 From 13/40 (33%) baseline to 34/40 (85%) implemented, **34/34 (100%) tested**
 
 The foundation is solid with formal verification. All major order book features are implemented, tested, and working!
