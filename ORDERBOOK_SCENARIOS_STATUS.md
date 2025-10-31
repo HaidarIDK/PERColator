@@ -13,10 +13,11 @@
 - ✅ Tick/lot/min enforcement active
 - ✅ Reduce-only implemented
 - ✅ Replace/modify orders implemented (ModifyOrder instruction)
-- ❌ Crossing protection (price bands) not implemented
+- ✅ Crossing protection (price bands) implemented
 - ❌ Auction mode not implemented
 
 **Recent Updates:**
+- Price bands implemented (Scenarios 17 & 37)
 - QuoteCache snapshot consistency implemented (Scenario 21)
 - ModifyOrder instruction implemented (discriminator 8)
 - Properties O7-O12 added to verified model
@@ -24,7 +25,7 @@
 - Extended CommitFill with TimeInForce and SelfTradePrevent
 - CLI commands updated with all new parameters
 - E2E test suites created and passing
-- **Improvement: 169% (from 13 baseline to 35 scenarios)**
+- **Improvement: 185% (from 13 baseline to 37 scenarios)**
 
 ## Scenario Coverage Matrix
 
@@ -46,7 +47,7 @@
 | 14 | STPF decrement | ✅ Implemented | ✅ Yes | ✅ Tested | SelfTradePrevent::DecrementAndCancel, O12 |
 | 15 | Tick size enforcement | ✅ Enforced | ✅ Yes | ✅ Tested | Validated in PlaceOrder, O7 |
 | 16 | Lot/min notional | ✅ Enforced | ✅ Yes | ✅ Tested | Validated in PlaceOrder, O8 |
-| 17 | Crossing protection | ❌ Not impl | ❌ No | Future | No price band logic |
+| 17 | Crossing protection | ✅ Implemented | ✅ Yes | ✅ Tested | Price bands from best bid/ask |
 | 18 | Multi-level depth | ✅ Yes | ✅ Yes | ✅ Tested | BookArea supports 19 levels |
 | 19 | FIFO under partials | ✅ Verified | ✅ Yes | ✅ Tested | Price-time priority |
 | 20 | Marketable limit | ✅ CommitFill | ✅ Yes | ✅ Tested | Crosses then rests |
@@ -66,12 +67,12 @@
 | 34 | Queue consistency | ✅ Verified | ✅ Yes | ✅ Tested | Array-based,  no pointers |
 | 35 | Opening auction | ❌ Not impl | ❌ No | Future | No auction mode |
 | 36 | Router margin hook | ✅ Router | ❌ No | Future | Need margin checking |
-| 37 | Oracle band | ❌ Not impl | ❌ No | Future | No price band |
+| 37 | Oracle band | ✅ Implemented | ✅ Yes | ✅ Tested | Price bands from oracle/mark price |
 | 38 | Concurrent stress | ✅ Limited | ✅ Yes | ✅ Tested | 15/19 orders placed |
 | 39 | Large sweep rounding | ✅ Yes | ✅ Yes | ✅ Tested | Fixed-point math verified |
 | 40 | Queue compaction | N/A | N/A | N/A | Array-based, no compaction needed |
 
-## Testable Scenarios Today (35/40) - 87.5% ✅
+## Testable Scenarios Today (37/40) - 92.5% ✅
 
 These can be tested with current slab implementation:
 
@@ -309,11 +310,10 @@ The slab program is deployed and working:
 - Tick/lot/minimum size validation
 
 **Features NOT YET IMPLEMENTED ❌**
-- Order replace/modify
-- Price bands/crossing protection
-- Auction mode
+- Auction mode (Scenario 35)
+- Router margin checking (Scenario 36 - requires router implementation)
 
-**CLI testing: 35/35 scenarios tested (100%) 🎉**
+**CLI testing: 37/37 scenarios tested (100%) 🎉**
 - ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order, update-funding)
 - ✅ Comprehensive test suite with 11 functional tests passing:
 
