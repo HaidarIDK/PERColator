@@ -405,14 +405,16 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
 /// 4..4+N. `[]` Oracle accounts (N = num_oracles)
 /// 4+N..4+N+M. `[writable]` Slab accounts (M = num_slabs)
 /// 4+N+M..4+N+2M. `[writable]` Receipt PDAs (M = num_slabs)
+/// 4+N+2M..4+N+2M+K. `[writable]` AMM accounts (K = num_amms)
 ///
 /// Instruction data layout:
 /// - num_oracles: u8 (1 byte)
 /// - num_slabs: u8 (1 byte)
+/// - num_amms: u8 (1 byte)
 /// - is_preliq: u8 (1 byte, 0 = auto, 1 = force pre-liq)
 /// - current_ts: u64 (8 bytes, Unix timestamp)
 ///
-/// Total size: 11 bytes
+/// Total size: 12 bytes
 fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 4 {
         msg!("Error: LiquidateUser requires at least 4 accounts");
@@ -438,7 +440,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
     let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
 
     // Parse instruction data
-    if data.len() < 11 {
+    if data.len() < 12 {
         msg!("Error: Instruction data too short");
         return Err(PercolatorError::InvalidInstruction.into());
     }
@@ -446,11 +448,12 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
     let mut reader = InstructionReader::new(data);
     let num_oracles = reader.read_u8()? as usize;
     let num_slabs = reader.read_u8()? as usize;
+    let num_amms = reader.read_u8()? as usize;
     let is_preliq = reader.read_u8()? != 0;
     let current_ts = reader.read_u64()?;
 
     // Verify we have enough accounts
-    let required_accounts = 4 + num_oracles + num_slabs * 2;
+    let required_accounts = 4 + num_oracles + num_slabs * 2 + num_amms;
     if accounts.len() < required_accounts {
         msg!("Error: Insufficient accounts for LiquidateUser");
         return Err(PercolatorError::InvalidInstruction.into());
@@ -460,6 +463,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
     let oracle_accounts = &accounts[4..4 + num_oracles];
     let slab_accounts = &accounts[4 + num_oracles..4 + num_oracles + num_slabs];
     let receipt_accounts = &accounts[4 + num_oracles + num_slabs..4 + num_oracles + num_slabs * 2];
+    let amm_accounts = &accounts[4 + num_oracles + num_slabs * 2..4 + num_oracles + num_slabs * 2 + num_amms];
 
     // Call the instruction handler
     process_liquidate_user(
@@ -470,6 +474,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
         oracle_accounts,
         slab_accounts,
         receipt_accounts,
+        amm_accounts,
         is_preliq,
         current_ts,
     )?;

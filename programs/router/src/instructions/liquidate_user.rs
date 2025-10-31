@@ -410,8 +410,9 @@ fn liquidate_amm_lp_buckets(
 /// * `vault` - Collateral vault
 /// * `router_authority` - Router authority PDA (for CPI signing)
 /// * `oracle_accounts` - Oracle price feed accounts (for price validation)
-/// * `slab_accounts` - Array of slab accounts to execute on
+/// * `slab_accounts` - Array of slab accounts to execute on (principal + LP)
 /// * `receipt_accounts` - Array of receipt PDAs (one per slab)
+/// * `amm_accounts` - Array of AMM accounts (for LP liquidation)
 /// * `is_preliq` - Force pre-liquidation mode (if false, auto-determine)
 /// * `current_ts` - Current timestamp (for rate limiting)
 ///
@@ -428,6 +429,7 @@ pub fn process_liquidate_user(
     oracle_accounts: &[AccountInfo],
     slab_accounts: &[AccountInfo],
     receipt_accounts: &[AccountInfo],
+    amm_accounts: &[AccountInfo],
     is_preliq: bool,
     current_ts: u64,
 ) -> Result<(), PercolatorError> {
@@ -627,15 +629,12 @@ pub fn process_liquidate_user(
             msg!("LP Liquidation: Still underwater, starting AMM LP liquidation");
 
             // Step 6.7: Liquidate AMM LP positions (priority 3 - last resort)
-            // For v0, use empty slice (no AMM accounts provided in signature yet)
-            // TODO: Add amm_accounts parameter to process_liquidate_user in production
-            let empty_amm_accounts: &[AccountInfo] = &[];
             let amm_freed = liquidate_amm_lp_buckets(
                 portfolio,
                 remaining_deficit_after_slab,
                 current_ts,
                 registry.max_oracle_staleness_secs.max(0) as u64,
-                empty_amm_accounts,
+                amm_accounts,
                 router_authority,
                 registry.bump,
             )?;
