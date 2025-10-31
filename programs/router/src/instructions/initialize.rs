@@ -11,12 +11,12 @@ use pinocchio::{
 
 /// Process initialize instruction for registry
 ///
-/// Initializes the slab registry account with governance authority.
+/// Initializes the slab registry account with governance authority and insurance authority.
 /// The account must be created externally using create_account_with_seed before calling this instruction.
 ///
 /// # Security Checks
 /// - Verifies registry account is derived from payer with correct seed
-/// - Verifies governance pubkey is valid
+/// - Verifies governance and insurance_authority pubkeys are valid
 /// - Prevents double initialization
 /// - Validates account ownership and size
 ///
@@ -25,11 +25,13 @@ use pinocchio::{
 /// * `registry_account` - The registry account (created with seed "registry")
 /// * `payer` - Account paying for rent (also base for seed derivation)
 /// * `governance` - The governance authority pubkey
+/// * `insurance_authority` - The insurance withdrawal authority pubkey
 pub fn process_initialize_registry(
     program_id: &Pubkey,
     registry_account: &AccountInfo,
     payer: &AccountInfo,
     governance: &Pubkey,
+    insurance_authority: &Pubkey,
 ) -> Result<(), PercolatorError> {
     // Derive the authority PDA that will be stored in the registry
     let (authority_pda, bump) = derive_registry_pda(program_id);
@@ -51,6 +53,12 @@ pub fn process_initialize_registry(
     // SECURITY: Verify governance pubkey is valid (not zero/default)
     if governance == &Pubkey::default() {
         msg!("Error: Invalid governance pubkey");
+        return Err(PercolatorError::InvalidAccount);
+    }
+
+    // SECURITY: Verify insurance_authority pubkey is valid (not zero/default)
+    if insurance_authority == &Pubkey::default() {
+        msg!("Error: Invalid insurance_authority pubkey");
         return Err(PercolatorError::InvalidAccount);
     }
 
@@ -92,7 +100,7 @@ pub fn process_initialize_registry(
     // Store the authority PDA in the registry for future authority checks
     let registry = unsafe { borrow_account_data_mut::<SlabRegistry>(registry_account)? };
 
-    registry.initialize_in_place(authority_pda, *governance, bump);
+    registry.initialize_in_place(authority_pda, *governance, *insurance_authority, bump);
 
     msg!("Registry initialized successfully");
     Ok(())

@@ -15,12 +15,14 @@ mod tests {
         // Basic struct test - verifies SlabRegistry can be instantiated
         let router_id = Pubkey::default();
         let governance = Pubkey::from([1; 32]);
+        let insurance_authority = Pubkey::from([2; 32]);
         let bump = 255;
 
-        let registry = SlabRegistry::new(router_id, governance, bump);
+        let registry = SlabRegistry::new(router_id, governance, insurance_authority, bump);
 
         assert_eq!(registry.router_id, router_id);
         assert_eq!(registry.governance, governance);
+        assert_eq!(registry.insurance_authority, insurance_authority);
         assert_eq!(registry.bump, bump);
     }
 

@@ -839,7 +839,7 @@ mod tests {
         portfolio.equity = 110_000_000; // $110
         portfolio.mm = 100_000_000;     // $100
 
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
         assert_eq!(deficit, 0); // No deficit
@@ -854,7 +854,7 @@ mod tests {
         portfolio.equity = 95_000_000;  // $95
         portfolio.mm = 100_000_000;     // $100
 
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
         assert_eq!(deficit, 5_000_000); // $5 deficit
@@ -869,7 +869,7 @@ mod tests {
         portfolio.equity = 100_000_000; // $100
         portfolio.mm = 100_000_000;     // $100
 
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let deficit = calculate_remaining_deficit(&portfolio, &registry).unwrap();
         assert_eq!(deficit, 0); // Exactly at MM, no deficit

@@ -26,6 +26,7 @@ pub async fn initialize_exchange(
     _insurance_fund: u64,
     _maintenance_margin: u16,
     _initial_margin: u16,
+    insurance_authority: Option<Pubkey>,
 ) -> Result<()> {
     println!("{}", "=== Initialize Exchange ===".bright_green().bold());
     println!("{} {}", "Network:".bright_cyan(), config.network);
@@ -94,10 +95,17 @@ pub async fn initialize_exchange(
         &config.router_program_id,         // Owner (router program)
     );
 
-    // Build instruction data: [discriminator (0u8), governance_pubkey (32 bytes)]
-    let mut instruction_data = Vec::with_capacity(33);
+    // Build instruction data: [discriminator (0u8), governance_pubkey (32 bytes), insurance_authority (32 bytes)]
+    let mut instruction_data = Vec::with_capacity(65);
     instruction_data.push(0u8); // RouterInstruction::Initialize discriminator
     instruction_data.extend_from_slice(&payer.pubkey().to_bytes()); // governance = payer for now
+
+    // Insurance authority (defaults to payer if not provided)
+    let insurance_auth = insurance_authority.unwrap_or(payer.pubkey());
+    instruction_data.extend_from_slice(&insurance_auth.to_bytes());
+
+    println!("{} {}", "Governance:".bright_cyan(), payer.pubkey());
+    println!("{} {}", "Insurance Authority:".bright_cyan(), insurance_auth);
 
     // INSTRUCTION 2: Initialize the created account
     let initialize_ix = Instruction {

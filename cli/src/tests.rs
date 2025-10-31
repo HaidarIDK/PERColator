@@ -648,6 +648,7 @@ async fn test_registry_init(config: &NetworkConfig) -> Result<()> {
         LAMPORTS_PER_SOL,
         500,
         1000,
+        None, // insurance_authority defaults to payer
     ).await?;
 
     Ok(())

@@ -13,6 +13,8 @@ pub mod router_reserve;
 pub mod router_release;
 pub mod router_liquidity;
 pub mod router_seat_init;
+pub mod withdraw_insurance;
+pub mod topup_insurance;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
@@ -27,6 +29,8 @@ pub use router_reserve::*;
 pub use router_release::*;
 pub use router_liquidity::*;
 pub use router_seat_init::*;
+pub use withdraw_insurance::*;
+pub use topup_insurance::*;
 
 /// Instruction discriminator (v0 minimal)
 #[repr(u8)]
@@ -57,6 +61,10 @@ pub enum RouterInstruction {
     RouterLiquidity = 11,
     /// Initialize LP seat for adapter pattern
     RouterSeatInit = 12,
+    /// Withdraw surplus from insurance fund
+    WithdrawInsurance = 13,
+    /// Top up insurance fund
+    TopUpInsurance = 14,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

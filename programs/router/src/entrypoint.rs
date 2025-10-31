@@ -8,7 +8,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init, process_withdraw_insurance, process_topup_insurance};
 use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
@@ -41,6 +41,8 @@ pub fn process_instruction(
         10 => RouterInstruction::RouterRelease,
         11 => RouterInstruction::RouterLiquidity,
         12 => RouterInstruction::RouterSeatInit,
+        13 => RouterInstruction::WithdrawInsurance,
+        14 => RouterInstruction::TopUpInsurance,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -98,6 +100,14 @@ pub fn process_instruction(
             msg!("Instruction: RouterSeatInit");
             process_router_seat_init_inner(program_id, accounts, &instruction_data[1..])
         }
+        RouterInstruction::WithdrawInsurance => {
+            msg!("Instruction: WithdrawInsurance");
+            process_withdraw_insurance_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::TopUpInsurance => {
+            msg!("Instruction: TopUpInsurance");
+            process_topup_insurance_inner(program_id, accounts, &instruction_data[1..])
+        }
     }
 }
 
@@ -109,8 +119,9 @@ pub fn process_instruction(
 /// 0. `[writable]` Registry account (PDA, must be pre-created)
 /// 1. `[signer, writable]` Payer account
 ///
-/// Expected data layout (32 bytes):
+/// Expected data layout (64 bytes):
 /// - governance: Pubkey (32 bytes)
+/// - insurance_authority: Pubkey (32 bytes)
 fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 2 {
         msg!("Error: Initialize instruction requires at least 2 accounts");
@@ -124,13 +135,15 @@ fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data:
     validate_writable(registry_account)?;
     validate_writable(payer_account)?;
 
-    // Parse instruction data - governance pubkey
+    // Parse instruction data - governance and insurance_authority pubkeys
     let mut reader = InstructionReader::new(data);
     let governance_bytes = reader.read_bytes::<32>()?;
     let governance = Pubkey::from(governance_bytes);
+    let insurance_authority_bytes = reader.read_bytes::<32>()?;
+    let insurance_authority = Pubkey::from(insurance_authority_bytes);
 
     // Call the initialization logic
-    process_initialize_registry(program_id, registry_account, payer_account, &governance)?;
+    process_initialize_registry(program_id, registry_account, payer_account, &governance, &insurance_authority)?;
 
     msg!("Router initialized successfully");
     Ok(())
@@ -829,5 +842,87 @@ fn process_router_seat_init_inner(program_id: &Pubkey, accounts: &[AccountInfo],
     )?;
 
     msg!("RouterSeatInit processed successfully");
+    Ok(())
+}
+
+/// Process withdraw_insurance instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Registry account
+/// 1. `[signer, writable]` Insurance authority
+///
+/// Expected data layout (16 bytes):
+/// - amount: u128 (16 bytes, lamports)
+fn process_withdraw_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: WithdrawInsurance instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let registry_account = &accounts[0];
+    let insurance_authority = &accounts[1];
+
+    // Validate accounts
+    validate_writable(registry_account)?;
+    validate_writable(insurance_authority)?;
+
+    // Parse instruction data
+    if data.len() < 16 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let amount = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_withdraw_insurance(
+        registry_account,
+        insurance_authority,
+        amount,
+    )?;
+
+    msg!("WithdrawInsurance processed successfully");
+    Ok(())
+}
+
+/// Process topup_insurance instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Registry account
+/// 1. `[signer, writable]` Insurance authority
+///
+/// Expected data layout (16 bytes):
+/// - amount: u128 (16 bytes, lamports)
+fn process_topup_insurance_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: TopUpInsurance instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let registry_account = &accounts[0];
+    let insurance_authority = &accounts[1];
+
+    // Validate accounts
+    validate_writable(registry_account)?;
+    validate_writable(insurance_authority)?;
+
+    // Parse instruction data
+    if data.len() < 16 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let amount = reader.read_u128()?;
+
+    // Call the instruction handler
+    process_topup_insurance(
+        registry_account,
+        insurance_authority,
+        amount,
+    )?;
+
+    msg!("TopUpInsurance processed successfully");
     Ok(())
 }

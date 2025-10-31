@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_portfolio_to_account_positive_values() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.pnl_vesting_params.tau_slots = 10_000;
         registry.mmr = 50_000; // 5%
 
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_portfolio_to_account_negative_principal() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.pnl_vesting_params.tau_slots = 10_000;
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn test_portfolios_to_state() {
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let mut p1 = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
         p1.principal = 100_000_000;
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_check_conservation_holds() {
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let mut p1 = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
         p1.principal = 100_000_000;
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_check_conservation_fails() {
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let mut p1 = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
         p1.principal = 100_000_000;
@@ -757,7 +757,7 @@ mod tests {
     /// to production tests. Add this pattern to all state-mutating tests.
     #[test]
     fn test_conservation_example_deposit_withdraw() {
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         // Initial state: User deposits 100M
         let mut p1 = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -814,7 +814,7 @@ mod tests {
     /// - Result: Must be blocked or limited to maintain margin
     #[test]
     fn test_l13_withdrawal_margin_safety() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.mmr = 100_000; // 10% maintenance margin (100k bps)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -877,7 +877,7 @@ mod tests {
     /// so withdrawal is only limited by vesting/throttling.
     #[test]
     fn test_l13_withdrawal_no_position_safe() {
-        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
         portfolio.principal = 100_000_000;  // $100
@@ -911,7 +911,7 @@ mod tests {
     fn test_l13_withdrawal_scaled_arithmetic() {
         use model_safety::math::{mul_u128, div_u128, sub_u128};
 
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.mmr = 100_000; // 10% maintenance margin
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -974,7 +974,7 @@ mod tests {
     /// to violate margin.
     #[test]
     fn test_l13_multiple_withdrawals_margin_safety() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.mmr = 100_000; // 10% maintenance margin
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1249,7 +1249,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_portfolio_to_deposit_account() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = (1i128 << 32) / 2; // 50% unlocked (Q32.32)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1268,7 +1268,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_get_max_withdrawable_verified_basic() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = 1i128 << 32; // Fully unlocked (Q32.32)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1287,7 +1287,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_get_max_withdrawable_verified_with_vesting_throttle() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = (1i128 << 32) / 2; // 50% unlocked (Q32.32)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1305,7 +1305,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_apply_deposit_verified_success() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
         portfolio.principal = 100_000_000;
         portfolio.equity = 100_000_000;
@@ -1331,7 +1331,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_apply_withdraw_verified_success() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = 1i128 << 32; // Fully unlocked (Q32.32)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1356,7 +1356,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_apply_withdraw_verified_exceeds_max() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = 0; // Nothing unlocked
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
@@ -1384,7 +1384,7 @@ mod deposit_withdraw_bridge_tests {
 
     #[test]
     fn test_apply_withdraw_verified_margin_safety() {
-        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
+        let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), Pubkey::default(), 0);
         registry.warmup_state.unlocked_frac = 1i128 << 32; // 100% unlocked (Q32.32)
 
         let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);

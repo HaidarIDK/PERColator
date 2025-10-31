@@ -13,6 +13,8 @@ pub struct SlabRegistry {
     pub router_id: Pubkey,
     /// Governance authority (can update registry)
     pub governance: Pubkey,
+    /// Insurance withdrawal authority (can withdraw insurance surplus and top-up)
+    pub insurance_authority: Pubkey,
     /// Bump seed
     pub bump: u8,
     /// Padding
@@ -69,9 +71,10 @@ impl SlabRegistry {
     ///
     /// This method initializes the registry fields directly without creating
     /// a large temporary struct on the stack (which would exceed BPF's 4KB limit).
-    pub fn initialize_in_place(&mut self, router_id: Pubkey, governance: Pubkey, bump: u8) {
+    pub fn initialize_in_place(&mut self, router_id: Pubkey, governance: Pubkey, insurance_authority: Pubkey, bump: u8) {
         self.router_id = router_id;
         self.governance = governance;
+        self.insurance_authority = insurance_authority;
         self.bump = bump;
         self._padding = [0; 7];
 
@@ -104,10 +107,11 @@ impl SlabRegistry {
     /// Initialize new registry (for tests only - uses stack)
     /// Excluded from BPF builds to avoid stack overflow
     #[cfg(all(test, not(target_os = "solana")))]
-    pub fn new(router_id: Pubkey, governance: Pubkey, bump: u8) -> Self {
+    pub fn new(router_id: Pubkey, governance: Pubkey, insurance_authority: Pubkey, bump: u8) -> Self {
         Self {
             router_id,
             governance,
+            insurance_authority,
             bump,
             _padding: [0; 7],
             imr: 500,
