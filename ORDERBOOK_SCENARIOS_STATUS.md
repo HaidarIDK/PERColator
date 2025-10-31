@@ -1,20 +1,27 @@
 # Order Book Test Scenarios Status
 
-## Implementation Summary
+## Implementation Summary (UPDATED 2025-10-31)
 
 **Slab Program Status:**
-- ✅ Basic limit orders (GTC only)
+- ✅ Basic limit orders (GTC/IOC/FOK all supported)
 - ✅ Price-time priority (formally verified)
 - ✅ Cancel orders
-- ✅ Order matching (via CommitFill)
-- ⚠️ IOC/FOK defined but not enforced
-- ❌ Post-only not implemented
-- ❌ Self-trade prevention not implemented
-- ❌ Tick/lot enforcement not active
+- ✅ Order matching (via CommitFill with TIF+STP)
+- ✅ IOC/FOK enforced (TimeInForce parameter)
+- ✅ Post-only implemented and tested
+- ✅ Self-trade prevention implemented (4 policies)
+- ✅ Tick/lot/min enforcement active
+- ✅ Reduce-only implemented
 - ❌ Replace/modify orders not implemented
-- ❌ Reduce-only not implemented
-- ❌ Crossing protection not implemented
+- ❌ Crossing protection (price bands) not implemented
 - ❌ Auction mode not implemented
+
+**Recent Updates:**
+- Properties O7-O12 added to verified model
+- Extended PlaceOrder with post_only/reduce_only flags
+- Extended CommitFill with TimeInForce and SelfTradePrevent
+- CLI commands updated with all new parameters
+- E2E test suites created and passing
 
 ## Scenario Coverage Matrix
 
@@ -27,25 +34,25 @@
 | 5 | Cancel order by id | ✅ CancelOrder | ✅ Yes | Can test | Instruction #3 |
 | 6 | Replace preserves time | ❌ Not impl | ❌ No | Future | Need modify instruction |
 | 7 | Replace new price | ❌ Not impl | ❌ No | Future | Need modify instruction |
-| 8 | Post-only reject | ❌ Not impl | ❌ No | Future | Need order type support |
-| 9 | Post-only adjust | ❌ Not impl | ❌ No | Future | Need order type support |
-| 10 | IOC partial | ⚠️ Defined | ❌ No | Future | TimeInForce exists, not enforced |
-| 11 | FOK all-or-nothing | ⚠️ Defined | ❌ No | Future | TimeInForce exists, not enforced |
-| 12 | Reduce-only | ❌ Not impl | ❌ No | Future | Need reduce-only flag |
-| 13 | STPF cancel newest | ❌ Not impl | ❌ No | Future | No self-trade prevention |
-| 14 | STPF decrement | ❌ Not impl | ❌ No | Future | No self-trade prevention |
-| 15 | Tick size enforcement | ⚠️ Stored | ❌ No | Partial | Not enforced in PlaceOrder |
-| 16 | Lot/min notional | ⚠️ Stored | ❌ No | Partial | Not enforced |
+| 8 | Post-only reject | ✅ Implemented | ✅ Yes | Can test | --post-only flag, verified O9 |
+| 9 | Post-only adjust | ✅ Implemented | ✅ Yes | Can test | Post-only prevents crossing |
+| 10 | IOC partial | ✅ Implemented | ✅ Yes | Can test | TimeInForce::IOC, verified O11 |
+| 11 | FOK all-or-nothing | ✅ Implemented | ✅ Yes | Can test | TimeInForce::FOK, verified O11 |
+| 12 | Reduce-only | ✅ Implemented | ✅ Yes | Can test | --reduce-only flag |
+| 13 | STPF cancel newest | ✅ Implemented | ✅ Yes | Can test | SelfTradePrevent::CancelNewest, O12 |
+| 14 | STPF decrement | ✅ Implemented | ✅ Yes | Can test | SelfTradePrevent::DecrementAndCancel, O12 |
+| 15 | Tick size enforcement | ✅ Enforced | ✅ Yes | Can test | Validated in PlaceOrder, O7 |
+| 16 | Lot/min notional | ✅ Enforced | ✅ Yes | Can test | Validated in PlaceOrder, O8 |
 | 17 | Crossing protection | ❌ Not impl | ❌ No | Future | No price band logic |
 | 18 | Multi-level depth | ✅ Yes | ✅ Yes | Can test | BookArea supports 19 levels |
 | 19 | FIFO under partials | ✅ Verified | ✅ Yes | Can test | Price-time priority |
 | 20 | Marketable limit | ✅ CommitFill | ✅ Yes | Can test | Crosses then rests |
 | 21 | Snapshot consistency | ⚠️ Partial | ⚠️ Partial | Future | QuoteCache exists |
 | 22 | Seqno TOCTOU | ✅ CommitFill | ⚠️ Partial | Can test | Seqno validation exists |
-| 23 | Dust orders | ⚠️ Partial | ❌ No | Future | No min size enforcement |
+| 23 | Dust orders | ✅ Enforced | ✅ Yes | Can test | Min order size validated, O8 |
 | 24 | Best price updates | ✅ Yes | ✅ Yes | Can test | After sweep |
 | 25 | Halt/resume | ❌ Not impl | ❌ No | Future | No halt mechanism |
-| 26 | Post-only + STPF | ❌ Not impl | ❌ No | Future | Neither implemented |
+| 26 | Post-only + STPF | ✅ Implemented | ✅ Yes | Can test | Both flags work together |
 | 27 | Large sweep order | ✅ CommitFill | ✅ Yes | Can test | Multi-trade matching |
 | 28 | Time priority tie | ✅ order_id | ✅ Yes | Can test | Monotonic order_id |
 | 29 | Maker/taker fees | ✅ CommitFill | ✅ Yes | Can test | Fee calculation exists |
@@ -61,7 +68,7 @@
 | 39 | Large sweep rounding | ✅ Yes | ✅ Yes | Can test | Fixed-point math |
 | 40 | Queue compaction | N/A | N/A | N/A | Array-based, no compaction needed |
 
-## Testable Scenarios Today (13/40)
+## Testable Scenarios Today (24/40)
 
 These can be tested with current slab implementation:
 
@@ -73,6 +80,21 @@ These can be tested with current slab implementation:
 5. ✅ **Cancel order** - CancelOrder instruction
 18. ✅ **Multi-level depth** - Up to 19 bids/asks
 24. ✅ **Best price updates** - After matching
+
+### Advanced Order Types (7 scenarios) **NEW!**
+8. ✅ **Post-only reject** - --post-only flag (Property O9)
+9. ✅ **Post-only adjust** - Post-only prevents crossing
+10. ✅ **IOC partial** - TimeInForce::IOC (Property O11)
+11. ✅ **FOK all-or-nothing** - TimeInForce::FOK (Property O11)
+12. ✅ **Reduce-only** - --reduce-only flag
+15. ✅ **Tick size enforcement** - Validated by Property O7
+16. ✅ **Lot/min enforcement** - Validated by Property O8
+
+### Risk Controls (4 scenarios) **NEW!**
+13. ✅ **STPF cancel newest** - SelfTradePrevent::CancelNewest (O12)
+14. ✅ **STPF decrement** - SelfTradePrevent::DecrementAndCancel (O12)
+23. ✅ **Dust orders** - Min order size enforcement (O8)
+26. ✅ **Post-only + STPF** - Combined flags
 
 ### Matching Engine (6 scenarios)
 19. ✅ **FIFO integrity** - Price-time priority under partials
@@ -245,16 +267,28 @@ The slab program is deployed and working:
 ## Conclusion
 
 **Order book core: PRODUCTION READY ✅**
-- Price-time priority formally verified
-- Matching engine proven correct (O1-O6)
-- Basic operations (place, cancel, match) working
+- Price-time priority formally verified (Properties O1-O6)
+- Extended order book features verified (Properties O7-O12)
+- Matching engine proven correct with TIF and STP
+- All core operations working and tested
 
-**Advanced features: NOT YET IMPLEMENTED ❌**
-- IOC/FOK, post-only, STPF, reduce-only, replace, price bands, auction
+**Advanced features: IMPLEMENTED AND TESTED ✅**
+- IOC/FOK enforcement (TimeInForce)
+- Post-only orders (crossing prevention)
+- Self-trade prevention (4 policies)
+- Reduce-only orders
+- Tick/lot/minimum size validation
 
-**CLI testing: 13/40 scenarios testable today**
-- Need 3 CLI commands (place-order, cancel-order, get-orderbook)
-- Then can test all core order book functionality
-- Advanced features require BPF implementation first
+**Features NOT YET IMPLEMENTED ❌**
+- Order replace/modify
+- Price bands/crossing protection
+- Halt/resume mechanism
+- Auction mode
 
-The foundation is solid with formal verification. Adding CLI commands would enable comprehensive testing of the working features.
+**CLI testing: 24/40 scenarios testable today (60%)**
+- ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook)
+- ✅ E2E test suites passing
+- ✅ Core + Advanced features tested
+- 🚀 From 13/40 (33%) to 24/40 (60%) - **85% improvement!**
+
+The foundation is solid with formal verification. All major order book features are implemented, tested, and working!
