@@ -36,15 +36,15 @@
 | 5 | Cancel order by id | ✅ CancelOrder | ✅ Yes | ✅ Tested | Instruction #3 |
 | 6 | Replace preserves time | ✅ ModifyOrder | ✅ Yes | ✅ Tested | Same price keeps timestamp |
 | 7 | Replace new price | ✅ ModifyOrder | ✅ Yes | ✅ Tested | New price gets new timestamp |
-| 8 | Post-only reject | ✅ Implemented | ✅ Yes | Can test | --post-only flag, verified O9 |
-| 9 | Post-only adjust | ✅ Implemented | ✅ Yes | Can test | Post-only prevents crossing |
+| 8 | Post-only reject | ✅ Implemented | ✅ Yes | ✅ Tested | --post-only flag, verified O9 |
+| 9 | Post-only adjust | ✅ Implemented | ✅ Yes | ✅ Tested | Post-only prevents crossing |
 | 10 | IOC partial | ✅ Implemented | ✅ Yes | ✅ Tested | TimeInForce::IOC, verified O11 |
 | 11 | FOK all-or-nothing | ✅ Implemented | ✅ Yes | ✅ Tested | TimeInForce::FOK, verified O11 |
-| 12 | Reduce-only | ✅ Implemented | ✅ Yes | Can test | --reduce-only flag |
+| 12 | Reduce-only | ✅ Implemented | ✅ Yes | ✅ Tested | --reduce-only flag |
 | 13 | STPF cancel newest | ✅ Implemented | ✅ Yes | ✅ Tested | SelfTradePrevent::CancelNewest, O12 |
 | 14 | STPF decrement | ✅ Implemented | ✅ Yes | ✅ Tested | SelfTradePrevent::DecrementAndCancel, O12 |
-| 15 | Tick size enforcement | ✅ Enforced | ✅ Yes | Can test | Validated in PlaceOrder, O7 |
-| 16 | Lot/min notional | ✅ Enforced | ✅ Yes | Can test | Validated in PlaceOrder, O8 |
+| 15 | Tick size enforcement | ✅ Enforced | ✅ Yes | ✅ Tested | Validated in PlaceOrder, O7 |
+| 16 | Lot/min notional | ✅ Enforced | ✅ Yes | ✅ Tested | Validated in PlaceOrder, O8 |
 | 17 | Crossing protection | ❌ Not impl | ❌ No | Future | No price band logic |
 | 18 | Multi-level depth | ✅ Yes | ✅ Yes | ✅ Tested | BookArea supports 19 levels |
 | 19 | FIFO under partials | ✅ Verified | ✅ Yes | Can test | Price-time priority |
@@ -312,14 +312,15 @@ The slab program is deployed and working:
 - Price bands/crossing protection
 - Auction mode
 
-**CLI testing: 22/34 scenarios tested (65%)**
+**CLI testing: 27/34 scenarios tested (79%)**
 - ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order)
-- ✅ Four E2E test suites passing:
+- ✅ Five E2E test suites passing:
   - test_core_scenarios.sh (scenarios 1, 2, 5, 18, 24, 28)
   - test_modify_order.sh (scenarios 6, 7, 31, 32)
+  - test_orderbook_extended.sh (scenarios 8, 9, 12, 15, 16)
   - test_matching_engine.sh (scenarios 10, 11, 13, 14, 26)
-  - test_orderbook_comprehensive.sh (scenarios 22, 23, 30, 34, 38, 39, 25)
+  - test_orderbook_comprehensive.sh (scenarios 22, 23, 25, 30, 34, 38, 39)
 - ✅ Core + Advanced + Edge case + Safety scenarios tested
-- 🚀 From 13/40 (33%) baseline to 34/40 (85%) implemented, 22/34 (65%) tested
+- 🚀 From 13/40 (33%) baseline to 34/40 (85%) implemented, 27/34 (79%) tested
 
 The foundation is solid with formal verification. All major order book features are implemented, tested, and working!
