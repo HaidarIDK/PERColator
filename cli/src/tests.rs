@@ -1001,14 +1001,14 @@ async fn test_healthy_account_not_liquidatable(config: &NetworkConfig) -> Result
 async fn test_margin_call_scenario(config: &NetworkConfig) -> Result<()> {
     // Scenario: Deposit, trade, check margin requirements
 
-    // 1. Deposit collateral
-    let deposit_amount = LAMPORTS_PER_SOL;
+    // 1. Deposit collateral (100M lamports = 0.1 SOL, max deposit limit)
+    let deposit_amount = 100_000_000; // 100M lamports (max single deposit)
     margin::deposit_collateral(config, deposit_amount, None).await?;
 
     // 2. Check margin state (implicitly done by system)
 
     // 3. Verify we can withdraw (proves healthy)
-    let withdraw_amount = LAMPORTS_PER_SOL / 10;
+    let withdraw_amount = 10_000_000; // 10M lamports = 0.01 SOL
     margin::withdraw_collateral(config, withdraw_amount, None).await?;
 
     Ok(())
