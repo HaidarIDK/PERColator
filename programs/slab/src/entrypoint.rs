@@ -9,7 +9,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding}};
+use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding, process_halt_trading, process_resume_trading}};
 use crate::state::{SlabState, Side as OrderSide};
 use crate::state::model_bridge::{TimeInForce, SelfTradePrevent};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
@@ -44,6 +44,8 @@ pub fn process_instruction(
             return process_adapter_liquidity_inner(accounts, &instruction_data[1..]);
         }
         5 => SlabInstruction::UpdateFunding,
+        6 => SlabInstruction::HaltTrading,
+        7 => SlabInstruction::ResumeTrading,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -71,6 +73,14 @@ pub fn process_instruction(
         SlabInstruction::UpdateFunding => {
             msg!("Instruction: UpdateFunding");
             process_update_funding_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::HaltTrading => {
+            msg!("Instruction: HaltTrading");
+            process_halt_trading_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::ResumeTrading => {
+            msg!("Instruction: ResumeTrading");
+            process_resume_trading_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -549,4 +559,68 @@ fn serialize_liquidity_result(result: &adapter_core::LiquidityResult) -> [u8; 80
     bytes[64..80].copy_from_slice(&result.realized_pnl_delta.to_le_bytes());
 
     bytes
+}
+
+/// Process halt_trading instruction
+///
+/// Accounts expected:
+/// 0. `[writable]` Slab account
+/// 1. `[signer]` LP owner (authority)
+fn process_halt_trading_inner(_program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    // Validate accounts
+    if accounts.len() < 2 {
+        msg!("Error: Missing required accounts");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+
+    let slab_account = &accounts[0];
+    let authority_account = &accounts[1];
+
+    // Validate authority is signer
+    validate_signer(authority_account)?;
+
+    // Validate slab is writable
+    validate_writable(slab_account)?;
+
+    // Borrow slab data
+    let slab_data = &mut borrow_account_data_mut(slab_account)?;
+    let slab = SlabState::from_bytes_mut(slab_data)?;
+
+    // Process halt trading
+    process_halt_trading(slab, authority_account.key())?;
+
+    msg!("Halt trading completed successfully");
+    Ok(())
+}
+
+/// Process resume_trading instruction
+///
+/// Accounts expected:
+/// 0. `[writable]` Slab account
+/// 1. `[signer]` LP owner (authority)
+fn process_resume_trading_inner(_program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    // Validate accounts
+    if accounts.len() < 2 {
+        msg!("Error: Missing required accounts");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+
+    let slab_account = &accounts[0];
+    let authority_account = &accounts[1];
+
+    // Validate authority is signer
+    validate_signer(authority_account)?;
+
+    // Validate slab is writable
+    validate_writable(slab_account)?;
+
+    // Borrow slab data
+    let slab_data = &mut borrow_account_data_mut(slab_account)?;
+    let slab = SlabState::from_bytes_mut(slab_data)?;
+
+    // Process resume trading
+    process_resume_trading(slab, authority_account.key())?;
+
+    msg!("Resume trading completed successfully");
+    Ok(())
 }

@@ -53,6 +53,7 @@ pub enum PercolatorError {
     WouldCross = 217,
     CannotFillCompletely = 218,
     SelfTrade = 219,
+    TradingHalted = 220,
 
     // Matching errors (300-399)
     InvalidSide = 300,

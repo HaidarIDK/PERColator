@@ -42,6 +42,12 @@ pub fn process_commit_fill(
         return Err(PercolatorError::Unauthorized);
     }
 
+    // Check if trading is halted
+    if slab.header.is_trading_halted() {
+        msg!("Error: Trading is halted");
+        return Err(PercolatorError::TradingHalted);
+    }
+
     // TOCTOU Protection: Validate seqno hasn't changed
     if slab.header.seqno != expected_seqno {
         msg!("Error: Seqno mismatch - book changed since read");

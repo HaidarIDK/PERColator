@@ -39,6 +39,12 @@ pub fn process_place_order(
     post_only: bool,
     reduce_only: bool,
 ) -> Result<u64, PercolatorError> {
+    // Check if trading is halted
+    if slab.header.is_trading_halted() {
+        msg!("Error: Trading is halted");
+        return Err(PercolatorError::TradingHalted);
+    }
+
     // Validate order parameters
     if price <= 0 {
         msg!("Error: Price must be positive");

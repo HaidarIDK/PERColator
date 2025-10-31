@@ -54,8 +54,10 @@ pub struct SlabHeader {
 
     /// Bump seed
     pub bump: u8,
+    /// Trading halted flag (1 = halted, 0 = active)
+    pub is_halted: u8,
     /// Padding
-    pub _padding: [u8; 3],
+    pub _padding: [u8; 2],
 }
 
 impl SlabHeader {
@@ -100,8 +102,24 @@ impl SlabHeader {
             off_quote_cache,
             off_receipt_area,
             bump,
-            _padding: [0; 3],
+            is_halted: 0,              // Trading active by default
+            _padding: [0; 2],
         }
+    }
+
+    /// Check if trading is halted
+    pub fn is_trading_halted(&self) -> bool {
+        self.is_halted != 0
+    }
+
+    /// Halt trading (only LP owner or router can call)
+    pub fn halt_trading(&mut self) {
+        self.is_halted = 1;
+    }
+
+    /// Resume trading (only LP owner or router can call)
+    pub fn resume_trading(&mut self) {
+        self.is_halted = 0;
     }
 
     /// Validate magic and version
