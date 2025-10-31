@@ -170,10 +170,41 @@ fn build_adapter_instruction_data(
                     data.push(0); // Selector discriminator for AmmByShares
                     data.extend_from_slice(&shares.to_le_bytes());
                 }
-                _ => {
-                    return Err(ProgramError::InvalidInstructionData);
+                RemoveSel::ObByIds { ids } => {
+                    data.push(1); // Selector discriminator for ObByIds
+                    data.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+                    for id in ids {
+                        data.extend_from_slice(&(*id as u64).to_le_bytes());
+                    }
+                }
+                RemoveSel::ObAll => {
+                    data.push(2); // Selector discriminator for ObAll
+                    // No additional data needed
                 }
             }
+        }
+        LiquidityIntent::ObAdd {
+            orders,
+            post_only,
+            reduce_only,
+        } => {
+            data.push(2); // Intent discriminator for ObAdd
+            data.extend_from_slice(&(orders.len() as u32).to_le_bytes());
+
+            // Serialize each order: side(1) + px_q64(16) + qty_q64(16) + tif_slots(4)
+            for order in orders {
+                let side_byte = match order.side {
+                    adapter_core::Side::Bid => 0u8,
+                    adapter_core::Side::Ask => 1u8,
+                };
+                data.push(side_byte);
+                data.extend_from_slice(&order.px_q64.to_le_bytes());
+                data.extend_from_slice(&order.qty_q64.to_le_bytes());
+                data.extend_from_slice(&order.tif_slots.to_le_bytes());
+            }
+
+            data.push(*post_only as u8);
+            data.push(*reduce_only as u8);
         }
         _ => {
             return Err(ProgramError::InvalidInstructionData);
