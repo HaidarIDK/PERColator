@@ -54,13 +54,14 @@ pub async fn create_amm(
 
     println!("{} {}", "AMM Address:".bright_cyan(), amm_pubkey);
 
-    // Calculate rent for AMM account (~4KB like slab)
-    const AMM_SIZE: usize = 4096;
+    // Calculate rent for AMM account
+    // AMM state size: SlabHeader(256) + QuoteCache(136) + AmmPool(64) = 464 bytes
+    const AMM_SIZE: usize = 464;
     let rent = rpc_client
         .get_minimum_balance_for_rent_exemption(AMM_SIZE)
         .context("Failed to get rent exemption amount")?;
 
-    println!("{} {} lamports", "Rent Required:".bright_cyan(), rent);
+    println!("{} {} lamports ({} bytes)", "Rent Required:".bright_cyan(), rent, AMM_SIZE);
 
     // Build CreateAccount instruction to allocate the AMM account
     let create_account_ix = solana_sdk::system_instruction::create_account(
