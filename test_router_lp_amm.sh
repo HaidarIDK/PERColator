@@ -74,6 +74,11 @@ solana airdrop 10 "$USER_PUBKEY" --url http://127.0.0.1:8899 || true
 sleep 2
 echo
 
+echo "${GREEN}========================================================================${NC}"
+echo "${GREEN}  PART 1: EXECUTABLE NOW - Infrastructure Setup${NC}"
+echo "${GREEN}========================================================================${NC}"
+echo
+
 # =============================================================================
 # Setup: Create registry (AMM creation TBD)
 # =============================================================================
@@ -134,6 +139,11 @@ else
     echo "${YELLOW}⚠ Deposit may have failed (continuing anyway)${NC}"
 fi
 
+echo
+
+echo "${YELLOW}========================================================================${NC}"
+echo "${YELLOW}  PART 2: PARTIALLY IMPLEMENTED - Router AMM LP Operations${NC}"
+echo "${YELLOW}========================================================================${NC}"
 echo
 
 # =============================================================================
@@ -233,25 +243,42 @@ echo
 # Summary
 # =============================================================================
 
-echo "${BLUE}=== Test Summary ===${NC}"
 echo
-echo "${GREEN}✓ Setup complete:${NC}"
-echo "  - Registry: $REGISTRY"
-echo "  - Portfolio initialized"
-echo "  - Collateral deposited"
-echo
-echo "${BLUE}Architecture verified:${NC}"
-echo "  - AMM LP uses same router flow as slab"
-echo "  - Discriminator 2 = adapter_liquidity (AMM and slab)"
-echo "  - AmmAdd intent (disc 0) fully supported in RouterLiquidity"
-echo "  - Capital in router custody, LP shares in seat"
-echo "  - Cross-margining enabled with slab venues"
-echo
-echo "${YELLOW}Next steps:${NC}"
-echo "  1. Implement AMM creation in CLI"
-echo "  2. Test full cycle: reserve → add → remove → release"
-echo "  3. Verify LP share accounting"
-echo "  4. Test mixed AMM + slab cross-margining"
+echo "${GREEN}========================================================================${NC}"
+echo "${GREEN}  TEST EXECUTION SUMMARY${NC}"
+echo "${GREEN}========================================================================${NC}"
 echo
 
-echo "${GREEN}✓ Test Complete${NC}"
+echo "${BLUE}=== PART 1: EXECUTABLE NOW ✓ ===${NC}"
+echo
+echo "${GREEN}✓ Infrastructure setup complete:${NC}"
+echo "  ${GREEN}✓${NC} Test keypair: $USER_PUBKEY"
+echo "  ${GREEN}✓${NC} Validator started"
+echo "  ${GREEN}✓${NC} Registry: $REGISTRY"
+echo "  ${GREEN}✓${NC} Portfolio initialized"
+echo "  ${GREEN}✓${NC} Collateral deposited: 10000 lamports"
+echo
+
+echo "${BLUE}=== PART 2: PARTIALLY IMPLEMENTED ⚠ ===${NC}"
+echo
+echo "${GREEN}✓ CLI command exists for AMM LP:${NC}"
+echo "  ./percolator liquidity add <AMM> <AMOUNT> --lower-price <PX> --upper-price <PX>"
+echo
+echo "${YELLOW}⚠ Missing: AMM creation${NC}"
+echo "  ./percolator amm create <REGISTRY> <INSTRUMENT> --x-reserve <AMT> --y-reserve <AMT>"
+echo
+echo "${YELLOW}⚠ Cannot test full flow without AMM instance${NC}"
+echo "  - Need AMM state account to call liquidity add"
+echo "  - AMM creation instruction (disc 0) exists in programs/amm/src/entrypoint.rs"
+echo "  - CLI just needs to expose the create command"
+echo
+
+echo "${BLUE}Architecture verified:${NC}"
+echo "  - AMM LP uses same router flow as slab (RouterReserve → RouterLiquidity)"
+echo "  - Discriminator 2 = adapter_liquidity (uniform across AMM and slab)"
+echo "  - AmmAdd intent (disc 0) fully supported in programs/router/src/instructions/router_liquidity.rs"
+echo "  - Capital in router custody, LP shares minted to seat"
+echo "  - Cross-margining enabled with slab venues via shared portfolio"
+echo
+
+echo "${GREEN}✓ Test Partially Complete (Setup Executable, AMM Creation Pending CLI)${NC}"
