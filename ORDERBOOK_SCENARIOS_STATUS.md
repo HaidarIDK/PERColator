@@ -313,15 +313,61 @@ The slab program is deployed and working:
 - Auction mode
 
 **CLI testing: 34/34 scenarios tested (100%) 🎉**
-- ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order)
-- ✅ Six E2E test suites passing:
-  - test_core_scenarios.sh (scenarios 1, 2, 5, 18, 24, 28)
-  - test_modify_order.sh (scenarios 6, 7, 31, 32)
-  - test_orderbook_extended.sh (scenarios 8, 9, 12, 15, 16)
-  - test_matching_engine.sh (scenarios 10, 11, 13, 14, 26)
-  - test_matching_scenarios.sh (scenarios 3, 4, 19, 20, 27, 29, 33)
-  - test_orderbook_comprehensive.sh (scenarios 22, 23, 25, 30, 34, 38, 39)
-- ✅ Core + Advanced + Edge case + Safety scenarios tested
-- 🚀 From 13/40 (33%) baseline to 34/40 (85%) implemented, **34/34 (100%) tested**
+- ✅ All CLI commands implemented (place-order, cancel-order, match-order, get-orderbook, halt-trading, resume-trading, modify-order, update-funding)
+- ✅ Comprehensive test suite with 11 functional tests passing:
+
+### Core Orderbook Tests (6 suites)
+1. **test_core_scenarios.sh** - Scenarios 1, 2, 5, 18, 24, 28
+   - Basic orders, price-time priority, cancel, multi-level, best price updates
+2. **test_modify_order.sh** - Scenarios 6, 7, 31, 32
+   - Order replacement, size adjustments, time priority preservation
+3. **test_orderbook_extended.sh** - Scenarios 8, 9, 12, 15, 16
+   - Post-only, reduce-only, tick/lot enforcement
+4. **test_matching_engine.sh** - Scenarios 10, 11, 13, 14, 26
+   - IOC, FOK, self-trade prevention, combined flags
+5. **test_matching_scenarios.sh** - Scenarios 3, 4, 19, 20, 27, 29, 33
+   - Partial fills, multi-level matching, FIFO, large sweeps, fees
+6. **test_orderbook_comprehensive.sh** - Scenarios 22, 23, 25, 30, 34, 38, 39
+   - Seqno validation, halt/resume, invalid inputs, concurrent stress
+
+### Additional Orderbook Tests (3 suites)
+7. **test_halt_resume.sh** - Trading halt/resume functionality
+8. **test_orderbook_simple.sh** - Simplified order placement test
+9. **test_orderbook_working.sh** - Extended order book operations
+
+### Funding Tests (2 suites)
+10. **test_funding_simple.sh** - UpdateFunding instruction verification
+11. **test_funding_working.sh** - Full funding mechanics with positions
+
+### Test Runners
+- **run_all_orderbook_tests.sh** - Runs 6 core test suites
+- **run_all_tests.sh** - Runs all 11 functional tests
+
+### Work-in-Progress
+- **test_funding_e2e.sh** - Template for comprehensive funding E2E test (has TODOs)
+
+**Test Status: 11/11 functional tests passing (100%) ✅**
 
 The foundation is solid with formal verification. All major order book features are implemented, tested, and working!
+
+## CLI Test Usage
+
+Run all tests:
+```bash
+./run_all_tests.sh
+```
+
+Run orderbook tests only:
+```bash
+./run_all_orderbook_tests.sh
+```
+
+Run individual tests:
+```bash
+./test_core_scenarios.sh       # Core order book operations
+./test_modify_order.sh          # Order modification
+./test_funding_simple.sh        # Funding updates
+# ... etc
+```
+
+All tests start a local validator, create test accounts, and exercise the deployed BPF programs.
