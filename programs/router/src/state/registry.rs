@@ -1,52 +1,22 @@
-//! Slab registry for governance and validation
+//! Protocol registry for global state and governance
 
 use pinocchio::pubkey::Pubkey;
-use percolator_common::MAX_SLABS;
 
-/// Slab registration entry
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SlabEntry {
-    /// Slab program ID
-    pub slab_id: Pubkey,
-    /// Version hash (for upgrade validation)
-    pub version_hash: [u8; 32],
-    /// Oracle program ID for price feeds
-    pub oracle_id: Pubkey,
-    /// Initial margin ratio (basis points)
-    pub imr: u64,
-    /// Maintenance margin ratio (basis points)
-    pub mmr: u64,
-    /// Maximum maker fee (basis points)
-    pub maker_fee_cap: u64,
-    /// Maximum taker fee (basis points)
-    pub taker_fee_cap: u64,
-    /// Latency SLA (milliseconds)
-    pub latency_sla_ms: u64,
-    /// Maximum exposure per user (per instrument)
-    pub max_exposure: u128,
-    /// Registered timestamp
-    pub registered_ts: u64,
-    /// Active flag
-    pub active: bool,
-    /// Padding
-    pub _padding: [u8; 7],
-}
-
-/// Slab registry account
+/// Protocol registry account (formerly SlabRegistry, now whitelist-free)
 /// PDA: ["registry", router_id]
+///
+/// Stores global protocol parameters and state. Users permissionlessly choose
+/// which matchers to interact with - no whitelist needed.
 #[repr(C)]
 pub struct SlabRegistry {
     /// Router program ID
     pub router_id: Pubkey,
     /// Governance authority (can update registry)
     pub governance: Pubkey,
-    /// Number of registered slabs
-    pub slab_count: u16,
     /// Bump seed
     pub bump: u8,
     /// Padding
-    pub _padding: [u8; 5],
+    pub _padding: [u8; 7],
 
     // Liquidation parameters (global)
     /// Initial margin ratio (basis points, e.g., 500 = 5%)
@@ -90,9 +60,6 @@ pub struct SlabRegistry {
     pub total_deposits: i128,
     /// Padding for alignment
     pub _padding3: [u8; 8],
-
-    /// Registered slabs
-    pub slabs: [SlabEntry; MAX_SLABS],
 }
 
 impl SlabRegistry {
@@ -105,9 +72,8 @@ impl SlabRegistry {
     pub fn initialize_in_place(&mut self, router_id: Pubkey, governance: Pubkey, bump: u8) {
         self.router_id = router_id;
         self.governance = governance;
-        self.slab_count = 0;
         self.bump = bump;
-        self._padding = [0; 5];
+        self._padding = [0; 7];
 
         // Initialize liquidation parameters with defaults
         self.imr = 500;  // 5% initial margin
@@ -133,15 +99,6 @@ impl SlabRegistry {
         self.warmup_state = model_safety::adaptive_warmup::AdaptiveWarmupState::default();
         self.total_deposits = 0;
         self._padding3 = [0; 8];
-
-        // Zero out the slabs array using ptr::write_bytes (efficient and stack-safe)
-        unsafe {
-            core::ptr::write_bytes(
-                self.slabs.as_mut_ptr(),
-                0,
-                MAX_SLABS,
-            );
-        }
     }
 
     /// Initialize new registry (for tests only - uses stack)
@@ -151,9 +108,8 @@ impl SlabRegistry {
         Self {
             router_id,
             governance,
-            slab_count: 0,
             bump,
-            _padding: [0; 5],
+            _padding: [0; 7],
             imr: 500,
             mmr: 250,
             liq_band_bps: 200,
@@ -171,98 +127,6 @@ impl SlabRegistry {
             warmup_state: model_safety::adaptive_warmup::AdaptiveWarmupState::default(),
             total_deposits: 0,
             _padding3: [0; 8],
-            slabs: [SlabEntry {
-                slab_id: Pubkey::default(),
-                version_hash: [0; 32],
-                oracle_id: Pubkey::default(),
-                imr: 0,
-                mmr: 0,
-                maker_fee_cap: 0,
-                taker_fee_cap: 0,
-                latency_sla_ms: 0,
-                max_exposure: 0,
-                registered_ts: 0,
-                active: false,
-                _padding: [0; 7],
-            }; MAX_SLABS],
-        }
-    }
-
-    /// Register a new slab
-    pub fn register_slab(
-        &mut self,
-        slab_id: Pubkey,
-        version_hash: [u8; 32],
-        oracle_id: Pubkey,
-        imr: u64,
-        mmr: u64,
-        maker_fee_cap: u64,
-        taker_fee_cap: u64,
-        latency_sla_ms: u64,
-        max_exposure: u128,
-        current_ts: u64,
-    ) -> Result<u16, ()> {
-        if (self.slab_count as usize) >= MAX_SLABS {
-            return Err(());
-        }
-
-        let idx = self.slab_count;
-        self.slabs[idx as usize] = SlabEntry {
-            slab_id,
-            version_hash,
-            oracle_id,
-            imr,
-            mmr,
-            maker_fee_cap,
-            taker_fee_cap,
-            latency_sla_ms,
-            max_exposure,
-            registered_ts: current_ts,
-            active: true,
-            _padding: [0; 7],
-        };
-        self.slab_count += 1;
-
-        Ok(idx)
-    }
-
-    /// Find slab by ID
-    pub fn find_slab(&self, slab_id: &Pubkey) -> Option<(u16, &SlabEntry)> {
-        for i in 0..self.slab_count as usize {
-            if &self.slabs[i].slab_id == slab_id && self.slabs[i].active {
-                return Some((i as u16, &self.slabs[i]));
-            }
-        }
-        None
-    }
-
-    /// Validate slab version hash
-    pub fn validate_version(&self, slab_id: &Pubkey, version_hash: &[u8; 32]) -> bool {
-        if let Some((_, entry)) = self.find_slab(slab_id) {
-            &entry.version_hash == version_hash
-        } else {
-            false
-        }
-    }
-
-    /// Deactivate a slab
-    pub fn deactivate_slab(&mut self, slab_id: &Pubkey) -> Result<(), ()> {
-        if let Some((idx, _)) = self.find_slab(slab_id) {
-            self.slabs[idx as usize].active = false;
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-
-    /// Update slab risk params
-    pub fn update_risk_params(&mut self, slab_id: &Pubkey, imr: u64, mmr: u64) -> Result<(), ()> {
-        if let Some((idx, _)) = self.find_slab(slab_id) {
-            self.slabs[idx as usize].imr = imr;
-            self.slabs[idx as usize].mmr = mmr;
-            Ok(())
-        } else {
-            Err(())
         }
     }
 
@@ -362,38 +226,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_registry_operations() {
+    fn test_registry_initialization() {
+        let router_id = Pubkey::from([1; 32]);
+        let governance = Pubkey::from([2; 32]);
+        let registry = SlabRegistry::new(router_id, governance, 42);
+
+        // Verify basic fields
+        assert_eq!(registry.router_id, router_id);
+        assert_eq!(registry.governance, governance);
+        assert_eq!(registry.bump, 42);
+
+        // Verify default liquidation parameters
+        assert_eq!(registry.imr, 500);  // 5%
+        assert_eq!(registry.mmr, 250);  // 2.5%
+        assert_eq!(registry.liq_band_bps, 200);  // 2%
+        assert_eq!(registry.max_oracle_staleness_secs, 60);
+
+        // Verify initial state
+        assert_eq!(registry.total_deposits, 0);
+    }
+
+    #[test]
+    fn test_registry_deposit_tracking() {
         let mut registry = SlabRegistry::new(Pubkey::default(), Pubkey::default(), 0);
 
-        let slab_id = Pubkey::from([1; 32]);
-        let version_hash = [42; 32];
+        // Track deposits
+        registry.track_deposit(1_000_000);
+        assert_eq!(registry.total_deposits, 1_000_000);
 
-        let idx = registry
-            .register_slab(
-                slab_id,
-                version_hash,
-                Pubkey::default(),
-                500,  // 5% IMR
-                250,  // 2.5% MMR
-                10,   // 0.1% maker fee cap
-                20,   // 0.2% taker fee cap
-                1000, // 1s latency SLA
-                1_000_000,
-                12345,
-            )
-            .unwrap();
+        registry.track_deposit(500_000);
+        assert_eq!(registry.total_deposits, 1_500_000);
 
-        assert_eq!(idx, 0);
-        assert_eq!(registry.slab_count, 1);
-
-        let (found_idx, entry) = registry.find_slab(&slab_id).unwrap();
-        assert_eq!(found_idx, 0);
-        assert_eq!(entry.imr, 500);
-
-        assert!(registry.validate_version(&slab_id, &version_hash));
-        assert!(!registry.validate_version(&slab_id, &[0; 32]));
-
-        registry.deactivate_slab(&slab_id).unwrap();
-        assert!(registry.find_slab(&slab_id).is_none());
+        // Track withdrawals
+        registry.track_withdrawal(300_000);
+        assert_eq!(registry.total_deposits, 1_200_000);
     }
 }

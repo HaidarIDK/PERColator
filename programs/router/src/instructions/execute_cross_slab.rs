@@ -166,19 +166,16 @@ pub fn process_execute_cross_slab(
         return Err(PercolatorError::InvalidAccount);
     }
 
-    // Phase 0: Validate all slabs are registered in the SlabRegistry
-    // This prevents unauthorized slab execution (addresses VULNERABILITY_REPORT.md #1)
-    msg!("Validating slabs are registered");
-    for (i, split) in splits.iter().enumerate() {
-        let slab_id = &split.slab_id;
-
-        // Check if slab is registered and active in the registry
-        if registry.find_slab(slab_id).is_none() {
-            msg!("Error: Slab is not registered or not active in registry");
-            return Err(PercolatorError::InvalidAccount);
-        }
-    }
-    msg!("All slabs validated successfully");
+    // Phase 0: Users choose their own matchers (permissionless)
+    //
+    // The user provides matcher accounts in their transaction. The router validates:
+    // - Adapter interface compliance (CPI will fail if incorrect)
+    // - Oracle staleness (Phase 0.5 below)
+    // - Margin requirements (after trade execution)
+    // - Custody security (vault management)
+    //
+    // No whitelist needed - users take responsibility for choosing matchers.
+    msg!("Proceeding with user-chosen matchers (permissionless)");
 
     // Phase 0.5: Oracle staleness checks (VULNERABILITY_REPORT.md #2)
     // When oracle is stale, only position-REDUCING operations are allowed

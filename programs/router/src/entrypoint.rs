@@ -8,7 +8,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_register_slab, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
 use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
@@ -36,7 +36,7 @@ pub fn process_instruction(
         5 => RouterInstruction::LiquidateUser,
         6 => RouterInstruction::BurnLpShares,
         7 => RouterInstruction::CancelLpOrders,
-        8 => RouterInstruction::RegisterSlab,
+        // 8 => RegisterSlab - REMOVED (permissionless matchers)
         9 => RouterInstruction::RouterReserve,
         10 => RouterInstruction::RouterRelease,
         11 => RouterInstruction::RouterLiquidity,
@@ -81,10 +81,7 @@ pub fn process_instruction(
             msg!("Instruction: CancelLpOrders");
             process_cancel_lp_orders_inner(program_id, accounts, &instruction_data[1..])
         }
-        RouterInstruction::RegisterSlab => {
-            msg!("Instruction: RegisterSlab");
-            process_register_slab_inner(program_id, accounts, &instruction_data[1..])
-        }
+        // RouterInstruction::RegisterSlab - REMOVED (permissionless matchers)
         RouterInstruction::RouterReserve => {
             msg!("Instruction: RouterReserve");
             process_router_reserve_inner(program_id, accounts, &instruction_data[1..])
@@ -610,71 +607,7 @@ fn process_cancel_lp_orders_inner(program_id: &Pubkey, accounts: &[AccountInfo],
     Ok(())
 }
 
-/// Process register_slab instruction (governance-only)
-///
-/// Expected accounts:
-/// 0. `[writable]` Registry account
-/// 1. `[signer]` Governance account
-///
-/// Expected data layout (152 bytes):
-/// - slab_id: Pubkey (32 bytes)
-/// - version_hash: [u8; 32] (32 bytes)
-/// - oracle_id: Pubkey (32 bytes)
-/// - imr: u64 (8 bytes)
-/// - mmr: u64 (8 bytes)
-/// - maker_fee_cap: u64 (8 bytes)
-/// - taker_fee_cap: u64 (8 bytes)
-/// - latency_sla_ms: u64 (8 bytes)
-/// - max_exposure: u128 (16 bytes)
-fn process_register_slab_inner(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: RegisterSlab instruction requires at least 2 accounts");
-        return Err(PercolatorError::InvalidInstruction.into());
-    }
-
-    let registry_account = &accounts[0];
-    let governance_account = &accounts[1];
-
-    // Validate accounts
-    validate_writable(registry_account)?;
-
-    // Parse instruction data
-    if data.len() < 152 {
-        msg!("Error: Instruction data too short");
-        return Err(PercolatorError::InvalidInstruction.into());
-    }
-
-    let mut reader = InstructionReader::new(data);
-    let slab_id_bytes = reader.read_bytes::<32>()?;
-    let slab_id = Pubkey::from(slab_id_bytes);
-    let version_hash = reader.read_bytes::<32>()?;
-    let oracle_id_bytes = reader.read_bytes::<32>()?;
-    let oracle_id = Pubkey::from(oracle_id_bytes);
-    let imr = reader.read_u64()?;
-    let mmr = reader.read_u64()?;
-    let maker_fee_cap = reader.read_u64()?;
-    let taker_fee_cap = reader.read_u64()?;
-    let latency_sla_ms = reader.read_u64()?;
-    let max_exposure = reader.read_u128()?;
-
-    // Call the instruction handler
-    process_register_slab(
-        registry_account,
-        governance_account,
-        slab_id,
-        version_hash,
-        oracle_id,
-        imr,
-        mmr,
-        maker_fee_cap,
-        taker_fee_cap,
-        latency_sla_ms,
-        max_exposure,
-    )?;
-
-    msg!("RegisterSlab processed successfully");
-    Ok(())
-}
+// process_register_slab_inner - REMOVED (permissionless matchers)
 
 /// Process router_reserve instruction
 ///

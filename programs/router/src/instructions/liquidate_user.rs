@@ -637,17 +637,15 @@ mod tests {
 
     #[test]
     fn test_liquidation_mode_price_bands() {
-        use crate::state::{SlabRegistry, SlabEntry};
+        use crate::state::SlabRegistry;
         use pinocchio::pubkey::Pubkey;
-        use percolator_common::MAX_SLABS;
 
         // Create registry with different bands for pre-liq vs hard liq
         let registry = SlabRegistry {
             router_id: Pubkey::default(),
             governance: Pubkey::default(),
-            slab_count: 0,
             bump: 0,
-            _padding: [0; 5],
+            _padding: [0; 7],
             imr: 500,
             mmr: 250,
             liq_band_bps: 200,      // 2% for hard liquidation
@@ -665,20 +663,6 @@ mod tests {
             warmup_state: model_safety::adaptive_warmup::AdaptiveWarmupState::default(),
             total_deposits: 0,
             _padding3: [0; 8],
-            slabs: [SlabEntry {
-                slab_id: Pubkey::default(),
-                version_hash: [0; 32],
-                oracle_id: Pubkey::default(),
-                imr: 0,
-                mmr: 0,
-                maker_fee_cap: 0,
-                taker_fee_cap: 0,
-                latency_sla_ms: 0,
-                max_exposure: 0,
-                registered_ts: 0,
-                active: false,
-                _padding: [0; 7],
-            }; MAX_SLABS],
         };
 
         // Pre-liquidation should use tighter band
