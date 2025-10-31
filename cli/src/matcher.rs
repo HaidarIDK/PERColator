@@ -236,35 +236,11 @@ pub async fn list_matchers(config: &NetworkConfig, registry_address: String) -> 
         &*(account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
     };
 
-    println!("\n{} {}", "Total Registered Slabs:".bright_cyan(), registry_data.slab_count);
-
-    if registry_data.slab_count == 0 {
-        println!("{}", "\nNo slabs registered yet".dimmed());
-        return Ok(());
-    }
-
-    if registry_data.slab_count > 0 {
-        println!("\n{}", "=== Registered Slabs ===".bright_yellow());
-        for i in 0..registry_data.slab_count as usize {
-            let slab = &registry_data.slabs[i];
-
-            println!("\n{} {}", "Slab #".bright_green(), i);
-            // Convert pinocchio Pubkeys to SDK Pubkeys for display (same as status command)
-            let slab_id_sdk = Pubkey::new_from_array(slab.slab_id);
-            let oracle_id_sdk = Pubkey::new_from_array(slab.oracle_id);
-
-            println!("  {} {}", "Slab ID:".bright_cyan(), slab_id_sdk);
-            println!("  {} {}", "Oracle:".bright_cyan(), oracle_id_sdk);
-            println!("  {} {}bps ({}%)", "IMR:".bright_cyan(), slab.imr, slab.imr as f64 / 100.0);
-            println!("  {} {}bps ({}%)", "MMR:".bright_cyan(), slab.mmr, slab.mmr as f64 / 100.0);
-            println!("  {} {}bps", "Maker Fee Cap:".bright_cyan(), slab.maker_fee_cap);
-            println!("  {} {}bps", "Taker Fee Cap:".bright_cyan(), slab.taker_fee_cap);
-            println!("  {} {}ms", "Latency SLA:".bright_cyan(), slab.latency_sla_ms);
-            println!("  {} {}", "Max Exposure:".bright_cyan(), slab.max_exposure);
-            println!("  {} {}", "Registered:".bright_cyan(), slab.registered_ts);
-            println!("  {} {}", "Active:".bright_cyan(), if slab.active { "✓" } else { "✗" });
-        }
-    }
+    // Note: Slab whitelist removed - slabs are now permissionless
+    println!("\n{}", "=== Slab Architecture ===".bright_yellow());
+    println!("{}", "  Slabs are permissionless - no whitelist required".bright_green());
+    println!("{}", "  Users can trade on any slab that implements the adapter interface".dimmed());
+    println!("{}", "\n  To view a specific slab, use: percolator matcher info <slab_id>".bright_cyan());
 
     println!("\n{} {}\n", "Status:".bright_green(), "OK ✓".bright_green());
     Ok(())

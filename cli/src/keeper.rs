@@ -178,26 +178,15 @@ fn query_active_slabs_and_oracles(
         &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
     };
 
-    let mut oracles = Vec::new();
-    let mut slabs = Vec::new();
-    let mut receipts = Vec::new();
-
-    // Extract active slabs and their oracles
-    for i in 0..(registry.slab_count as usize) {
-        let entry = &registry.slabs[i];
-
-        if entry.active {
-            let oracle_pubkey = Pubkey::from(entry.oracle_id);
-            let slab_pubkey = Pubkey::from(entry.slab_id);
-
-            oracles.push(oracle_pubkey);
-            slabs.push(slab_pubkey);
-
-            // Derive receipt PDA for this slab
-            let (receipt_pda, _) = derive_receipt_pda(&slab_pubkey, router_program_id);
-            receipts.push(receipt_pda);
-        }
-    }
+    // Note: Slab whitelist was removed - slabs are now permissionless
+    // Return empty vectors since we can't extract slabs from registry
+    // In a real keeper implementation, you would:
+    // 1. Query portfolio account to get LP buckets
+    // 2. Extract slab/AMM accounts from LP buckets
+    // 3. Build liquidation instruction with those accounts
+    let oracles = Vec::new();
+    let slabs = Vec::new();
+    let receipts = Vec::new();
 
     Ok((oracles, slabs, receipts))
 }
