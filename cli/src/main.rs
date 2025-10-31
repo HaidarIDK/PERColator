@@ -351,6 +351,18 @@ enum MatcherCommands {
         #[arg(long, default_value = "None")]
         self_trade_prevention: String,
     },
+
+    /// Halt trading on a slab (LP owner only)
+    HaltTrading {
+        /// Slab address
+        slab: String,
+    },
+
+    /// Resume trading on a slab (LP owner only)
+    ResumeTrading {
+        /// Slab address
+        slab: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -687,6 +699,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 MatcherCommands::MatchOrder { slab, side, qty, limit_price, time_in_force, self_trade_prevention } => {
                     matcher::match_order(&config, slab, side, qty, limit_price, time_in_force, self_trade_prevention).await?;
+                }
+                MatcherCommands::HaltTrading { slab } => {
+                    matcher::halt_trading(&config, slab).await?;
+                }
+                MatcherCommands::ResumeTrading { slab } => {
+                    matcher::resume_trading(&config, slab).await?;
                 }
             }
         }

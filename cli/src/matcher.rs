@@ -792,3 +792,128 @@ pub async fn get_orderbook(
 
     Ok(())
 }
+
+/// Halt trading on a slab
+///
+/// Only the LP owner can call this. When halted, all PlaceOrder and CommitFill
+/// operations will be rejected with TradingHalted error.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn halt_trading(
+    config: &NetworkConfig,
+    slab_address: String,
+) -> Result<()> {
+    println!("{}", "=== Halt Trading ===".bright_red().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Use configured keypair (LP owner)
+    let authority = &config.keypair;
+
+    // Build instruction data: [discriminator=6]
+    let mut instruction_data = Vec::with_capacity(1);
+    instruction_data.push(6); // HaltTrading discriminator
+
+    // Build halt instruction
+    let halt_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),         // Slab account (writable)
+            AccountMeta::new_readonly(authority.pubkey(), true), // LP owner (signer)
+        ],
+        data: instruction_data,
+    };
+
+    // Create RPC client
+    let rpc_client = client::create_rpc_client(config);
+
+    // Get recent blockhash
+    let recent_blockhash = rpc_client.get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    // Create and sign transaction
+    let transaction = Transaction::new_signed_with_payer(
+        &[halt_ix],
+        Some(&authority.pubkey()),
+        &[&authority],
+        recent_blockhash,
+    );
+
+    // Send transaction
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)
+        .context("Failed to send transaction")?;
+
+    println!("{} {}", "✓ Trading halted".bright_green(), signature);
+    Ok(())
+}
+
+/// Resume trading on a slab
+///
+/// Only the LP owner can call this. Restores normal trading operations.
+///
+/// # Arguments
+/// * `config` - Network configuration
+/// * `slab_address` - Slab pubkey as string
+///
+/// # Returns
+/// * Ok(()) on success
+pub async fn resume_trading(
+    config: &NetworkConfig,
+    slab_address: String,
+) -> Result<()> {
+    println!("{}", "=== Resume Trading ===".bright_green().bold());
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+    println!("{} {}", "Slab:".bright_cyan(), slab_address);
+
+    // Parse slab address
+    let slab_pubkey = Pubkey::from_str(&slab_address)
+        .context("Invalid slab address")?;
+
+    // Use configured keypair (LP owner)
+    let authority = &config.keypair;
+
+    // Build instruction data: [discriminator=7]
+    let mut instruction_data = Vec::with_capacity(1);
+    instruction_data.push(7); // ResumeTrading discriminator
+
+    // Build resume instruction
+    let resume_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, false),         // Slab account (writable)
+            AccountMeta::new_readonly(authority.pubkey(), true), // LP owner (signer)
+        ],
+        data: instruction_data,
+    };
+
+    // Create RPC client
+    let rpc_client = client::create_rpc_client(config);
+
+    // Get recent blockhash
+    let recent_blockhash = rpc_client.get_latest_blockhash()
+        .context("Failed to get recent blockhash")?;
+
+    // Create and sign transaction
+    let transaction = Transaction::new_signed_with_payer(
+        &[resume_ix],
+        Some(&authority.pubkey()),
+        &[&authority],
+        recent_blockhash,
+    );
+
+    // Send transaction
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)
+        .context("Failed to send transaction")?;
+
+    println!("{} {}", "✓ Trading resumed".bright_green(), signature);
+    Ok(())
+}
