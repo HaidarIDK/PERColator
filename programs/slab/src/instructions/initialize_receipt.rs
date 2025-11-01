@@ -69,7 +69,7 @@ pub fn process_initialize_receipt(
 
     let account_metas = [
         AccountMeta::writable_signer(payer_account.key()),
-        AccountMeta::writable(receipt_account.key()),
+        AccountMeta::writable_signer(receipt_account.key()),
     ];
 
     let create_ix = Instruction {
