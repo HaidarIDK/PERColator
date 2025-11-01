@@ -423,6 +423,7 @@ fn liquidate_amm_lp_buckets(
 /// * All-or-nothing atomicity
 pub fn process_liquidate_user(
     portfolio: &mut Portfolio,
+    portfolio_account: &AccountInfo,
     registry: &mut SlabRegistry,
     vault: &mut Vault,
     router_authority: &AccountInfo,
@@ -581,12 +582,13 @@ pub fn process_liquidate_user(
     }
 
     // Execute the liquidation using the same cross-slab logic as normal orders
-    // Clone the user pubkey before the mutable borrow to avoid borrow checker issues
-    let user_pubkey = portfolio.user;
+    // PRODUCTION FIX: For liquidation, we use portfolio_account since the user (liquidatee)
+    // is not the transaction signer. The portfolio_account.owner is the liquidatee's pubkey,
+    // and the slab program uses this to track the taker owner in the receipt PDA.
     use crate::instructions::process_execute_cross_slab;
     process_execute_cross_slab(
         portfolio,
-        &user_pubkey,
+        portfolio_account,
         vault,
         registry,
         router_authority,

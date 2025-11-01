@@ -2,6 +2,7 @@
 
 pub mod initialize;
 pub mod initialize_portfolio;
+pub mod initialize_vault;
 pub mod deposit;
 pub mod withdraw;
 pub mod execute_cross_slab;
@@ -18,6 +19,7 @@ pub mod topup_insurance;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
+pub use initialize_vault::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use execute_cross_slab::*;
@@ -40,31 +42,33 @@ pub enum RouterInstruction {
     Initialize = 0,
     /// Initialize user portfolio
     InitializePortfolio = 1,
+    /// Initialize vault account
+    InitializeVault = 2,
     /// Deposit collateral to vault
-    Deposit = 2,
+    Deposit = 3,
     /// Withdraw collateral from vault
-    Withdraw = 3,
+    Withdraw = 4,
     /// Execute cross-slab order (v0 main instruction)
-    ExecuteCrossSlab = 4,
+    ExecuteCrossSlab = 5,
     /// Liquidate user positions (reduce-only)
-    LiquidateUser = 5,
+    LiquidateUser = 6,
     /// Burn AMM LP shares (ONLY way to reduce AMM LP exposure)
-    BurnLpShares = 6,
+    BurnLpShares = 7,
     /// Cancel Slab LP orders (ONLY way to reduce Slab LP exposure)
-    CancelLpOrders = 7,
-    // RegisterSlab = 8,  // REMOVED - permissionless matchers (users choose their own)
+    CancelLpOrders = 8,
+    // RegisterSlab = 9,  // REMOVED - permissionless matchers (users choose their own)
     /// Reserve collateral from portfolio into LP seat
-    RouterReserve = 9,
+    RouterReserve = 10,
     /// Release collateral from LP seat back to portfolio
-    RouterRelease = 10,
+    RouterRelease = 11,
     /// Process liquidity operation via matcher adapter
-    RouterLiquidity = 11,
+    RouterLiquidity = 12,
     /// Initialize LP seat for adapter pattern
-    RouterSeatInit = 12,
+    RouterSeatInit = 13,
     /// Withdraw surplus from insurance fund
-    WithdrawInsurance = 13,
+    WithdrawInsurance = 14,
     /// Top up insurance fund
-    TopUpInsurance = 14,
+    TopUpInsurance = 15,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

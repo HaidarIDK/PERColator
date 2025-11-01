@@ -6,6 +6,7 @@ pub mod update_funding;
 pub mod halt_trading;
 pub mod resume_trading;
 pub mod modify_order;
+pub mod initialize_receipt;
 
 pub use initialize::*;
 pub use commit_fill::*;
@@ -15,6 +16,7 @@ pub use update_funding::*;
 pub use halt_trading::*;
 pub use resume_trading::*;
 pub use modify_order::*;
+pub use initialize_receipt::*;
 
 /// Instruction discriminator
 #[repr(u8)]
@@ -37,4 +39,6 @@ pub enum SlabInstruction {
     ResumeTrading = 7,
     /// Modify order (TESTING ONLY - change price/qty while preserving order_id)
     ModifyOrder = 8,
+    /// Initialize receipt PDA (must be called before ExecuteCrossSlab)
+    InitializeReceipt = 9,
 }

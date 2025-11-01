@@ -9,7 +9,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding, process_halt_trading, process_resume_trading, process_modify_order}};
+use crate::{adapter, instructions::{SlabInstruction, process_initialize_slab, process_commit_fill, process_place_order, process_cancel_order, process_update_funding, process_halt_trading, process_resume_trading, process_modify_order, process_initialize_receipt}};
 use crate::state::{SlabState, Side as OrderSide};
 use crate::state::model_bridge::{TimeInForce, SelfTradePrevent};
 use adapter_core::{LiquidityIntent, RemoveSel, RiskGuard, Side as AdapterSide, ObOrder};
@@ -48,6 +48,7 @@ pub fn process_instruction(
         6 => SlabInstruction::HaltTrading,
         7 => SlabInstruction::ResumeTrading,
         8 => SlabInstruction::ModifyOrder,  // Testing only - deprecated for margin DEX
+        9 => SlabInstruction::InitializeReceipt,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -87,6 +88,10 @@ pub fn process_instruction(
         SlabInstruction::ModifyOrder => {
             msg!("Instruction: ModifyOrder");
             process_modify_order_inner(program_id, accounts, &instruction_data[1..])
+        }
+        SlabInstruction::InitializeReceipt => {
+            msg!("Instruction: InitializeReceipt");
+            process_initialize_receipt_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -668,5 +673,45 @@ fn process_modify_order_inner(_program_id: &Pubkey, accounts: &[AccountInfo], da
     process_modify_order(slab, owner_account.key(), order_id, new_price, new_qty)?;
 
     msg!("Modify order completed successfully");
+    Ok(())
+}
+
+/// Process initialize receipt instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Receipt PDA (to be created)
+/// 1. `[]` Slab account (for PDA derivation)
+/// 2. `[]` User account (for PDA derivation)
+/// 3. `[signer, writable]` Payer account
+/// 4. `[]` System program
+fn process_initialize_receipt_inner(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    if accounts.len() < 5 {
+        msg!("Error: InitializeReceipt requires 5 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let receipt_account = &accounts[0];
+    let slab_account = &accounts[1];
+    let user_account = &accounts[2];
+    let payer_account = &accounts[3];
+    let system_program = &accounts[4];
+
+    // Validate payer is signer
+    if !payer_account.is_signer() {
+        msg!("Error: Payer must be signer");
+        return Err(PercolatorError::Unauthorized.into());
+    }
+
+    // Process initialize receipt
+    process_initialize_receipt(
+        program_id,
+        receipt_account,
+        slab_account,
+        user_account,
+        payer_account,
+        system_program,
+    )?;
+
+    msg!("Initialize receipt completed successfully");
     Ok(())
 }

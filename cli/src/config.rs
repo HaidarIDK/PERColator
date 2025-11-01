@@ -53,13 +53,13 @@ impl NetworkConfig {
         let keypair = load_keypair(&keypair_path)?;
 
         // Use deployed program IDs (localnet addresses)
-        let router_program_id = Pubkey::from_str("Gx3HZrcYntTdN3WkUbqCS6dyUUfiVzfwdvznGx59nHp4")
+        let router_program_id = Pubkey::from_str("FqyPRML6ccZdH1xjMbe5CePx81wVJfZXxGANKfageW5Q")
             .expect("Invalid router program ID");
-        let slab_program_id = Pubkey::from_str("5WA1FVZC1PyMfxmafhsdeP9uNQQajTH3cBUUgp3jckau")
+        let slab_program_id = Pubkey::from_str("2qQsQvBDQCCBm3sULZhczQWgQekxxbgtvrJFmLGs1csJ")
             .expect("Invalid slab program ID");
-        let amm_program_id = Pubkey::from_str("GRHu6sVHHNWjVy4Qc57G1ZvXZvz8hgTrFk4BEjSgPEiG")
+        let amm_program_id = Pubkey::from_str("2PExc2ruLp2jCN2XVFLH8vF3vWoQrSVbGMgCXAhoVkgM")
             .expect("Invalid AMM program ID");
-        let oracle_program_id = Pubkey::from_str("9zr3iWHVp9k2UYUUFNPgLqimL8F18p14SZNNp832bXJ1")
+        let oracle_program_id = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
             .expect("Invalid oracle program ID");
 
         Ok(Self {

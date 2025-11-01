@@ -8,7 +8,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init, process_withdraw_insurance, process_topup_insurance};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_initialize_vault, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init, process_withdraw_insurance, process_topup_insurance};
 use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
@@ -30,19 +30,20 @@ pub fn process_instruction(
     let instruction = match discriminator {
         0 => RouterInstruction::Initialize,
         1 => RouterInstruction::InitializePortfolio,
-        2 => RouterInstruction::Deposit,
-        3 => RouterInstruction::Withdraw,
-        4 => RouterInstruction::ExecuteCrossSlab,
-        5 => RouterInstruction::LiquidateUser,
-        6 => RouterInstruction::BurnLpShares,
-        7 => RouterInstruction::CancelLpOrders,
-        // 8 => RegisterSlab - REMOVED (permissionless matchers)
-        9 => RouterInstruction::RouterReserve,
-        10 => RouterInstruction::RouterRelease,
-        11 => RouterInstruction::RouterLiquidity,
-        12 => RouterInstruction::RouterSeatInit,
-        13 => RouterInstruction::WithdrawInsurance,
-        14 => RouterInstruction::TopUpInsurance,
+        2 => RouterInstruction::InitializeVault,
+        3 => RouterInstruction::Deposit,
+        4 => RouterInstruction::Withdraw,
+        5 => RouterInstruction::ExecuteCrossSlab,
+        6 => RouterInstruction::LiquidateUser,
+        7 => RouterInstruction::BurnLpShares,
+        8 => RouterInstruction::CancelLpOrders,
+        // 9 => RegisterSlab - REMOVED (permissionless matchers)
+        10 => RouterInstruction::RouterReserve,
+        11 => RouterInstruction::RouterRelease,
+        12 => RouterInstruction::RouterLiquidity,
+        13 => RouterInstruction::RouterSeatInit,
+        14 => RouterInstruction::WithdrawInsurance,
+        15 => RouterInstruction::TopUpInsurance,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -58,6 +59,10 @@ pub fn process_instruction(
         RouterInstruction::InitializePortfolio => {
             msg!("Instruction: InitializePortfolio");
             process_initialize_portfolio_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::InitializeVault => {
+            msg!("Instruction: InitializeVault");
+            process_initialize_vault_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::Deposit => {
             msg!("Instruction: Deposit");
@@ -278,6 +283,50 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
     Ok(())
 }
 
+/// Process initialize vault instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Vault account (created externally)
+/// 1. `[signer]` Authority (can initialize)
+///
+/// Instruction data: mint pubkey (32 bytes)
+fn process_initialize_vault_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 2 {
+        msg!("Error: InitializeVault instruction requires at least 2 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    // Parse mint pubkey from instruction data (32 bytes)
+    if data.len() < 32 {
+        msg!("Error: InitializeVault instruction requires mint pubkey in data");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mint_bytes: [u8; 32] = data[0..32].try_into()
+        .map_err(|_| PercolatorError::InvalidInstruction)?;
+    let mint = Pubkey::from(mint_bytes);
+
+    let vault_account = &accounts[0];
+    let authority = &accounts[1];
+
+    // Validate accounts
+    if !vault_account.is_writable() {
+        msg!("Error: Vault account must be writable");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+
+    if !authority.is_signer() {
+        msg!("Error: Authority must be a signer");
+        return Err(PercolatorError::Unauthorized.into());
+    }
+
+    // Call the initialization logic
+    process_initialize_vault(program_id, vault_account, authority, &mint)?;
+
+    msg!("Vault initialized successfully");
+    Ok(())
+}
+
 /// Process execute cross-slab instruction (v0 main instruction)
 ///
 /// Expected accounts:
@@ -300,8 +349,8 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
 /// Total size: 1 + (17 * num_splits) bytes
 /// Maximum splits: 8 (to avoid stack overflow)
 fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 5 {
-        msg!("Error: ExecuteCrossSlab requires at least 5 accounts");
+    if accounts.len() < 6 {
+        msg!("Error: ExecuteCrossSlab requires at least 6 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
@@ -310,6 +359,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
     let vault_account = &accounts[2];
     let registry_account = &accounts[3];
     let router_authority = &accounts[4];
+    let system_program = &accounts[5];
 
     // Validate accounts
     validate_owner(portfolio_account, program_id)?;
@@ -339,17 +389,17 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Verify we have enough accounts: 5 base + num_splits oracles + num_splits slabs + num_splits receipts
-    let required_accounts = 5 + (num_splits * 3);
+    // Verify we have enough accounts: 6 base + num_splits oracles + num_splits slabs + num_splits receipts
+    let required_accounts = 6 + (num_splits * 3);
     if accounts.len() < required_accounts {
         msg!("Error: Insufficient accounts for ExecuteCrossSlab");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Split accounts into oracles, slabs, and receipts
-    let oracle_accounts = &accounts[5..5 + num_splits];
-    let slab_accounts = &accounts[5 + num_splits..5 + (num_splits * 2)];
-    let receipt_accounts = &accounts[5 + (num_splits * 2)..5 + (num_splits * 3)];
+    // Split accounts into oracles, slabs, and receipts (starting at index 6 now)
+    let oracle_accounts = &accounts[6..6 + num_splits];
+    let slab_accounts = &accounts[6 + num_splits..6 + (num_splits * 2)];
+    let receipt_accounts = &accounts[6 + (num_splits * 2)..6 + (num_splits * 3)];
 
     // Parse splits from instruction data (on stack, small)
     // Use a fixed-size buffer to avoid heap allocation
@@ -394,7 +444,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
     // Call the instruction handler
     process_execute_cross_slab(
         portfolio,
-        user_account.key(),
+        user_account,
         vault,
         registry,
         router_authority,
@@ -481,6 +531,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
     // Call the instruction handler
     process_liquidate_user(
         portfolio,
+        portfolio_account,
         registry,
         vault,
         router_authority,
