@@ -99,11 +99,13 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
 
 ---
 
-### Phase 4 (KS-04): Oracle Shock + Liquidations ⚠️ PENDING
+### Phase 4 (KS-04): Oracle Shock + Liquidations ⚠️ DEFERRED
 
 **Goal**: Trigger margin calls and test liquidation mechanics
 
-**Planned Actions**:
+**Status**: Deferred pending position tracking infrastructure
+
+**Planned Actions** (when infrastructure ready):
 1. Simulate adverse price movement
    - Example: SOL oracle drops from $100 → $84 (-16%)
 2. Update mark price to reflect oracle
@@ -112,13 +114,21 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
 5. Liquidate underwater positions
 6. Verify liquidation fees flow to insurance fund
 
-**Pending Implementation**:
-- Oracle price update mechanism
-- Keeper risk touch operations
-- Maker order cancellation during liquidation
-- Liquidation fee routing
+**Available Infrastructure**:
+- ✅ Oracle program (UpdatePrice instruction)
+- ✅ Router LiquidateUser instruction (disc 5)
+- ✅ Formally verified liquidation logic (L1-L13)
+- ✅ LP bucket liquidation (Slab + AMM)
+- ✅ Insurance fund bad debt settlement
+- ✅ Global haircut socialization
 
-**Assertions** (when implemented):
+**Pending Infrastructure**:
+- ⚠️ Position persistence in Portfolio.exposures[]
+- ⚠️ Mark-to-market health recomputation
+- ⚠️ Oracle integration with slab mark prices
+- ⚠️ Keeper operations for risk monitoring
+
+**Assertions** (when position tracking ready):
 - Cancel-then-liquidate ordering respected
 - Reservations freed before position liquidation
 - Seat invariant holds post-liquidation
@@ -130,11 +140,13 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
 
 ---
 
-### Phase 5 (KS-05): Insurance Drawdown + Loss Socialization ⚠️ PENDING
+### Phase 5 (KS-05): Insurance Drawdown + Loss Socialization ⚠️ DEFERRED
 
 **Goal**: Stress insurance fund and verify loss waterfall
 
-**Planned Actions**:
+**Status**: Deferred pending Phase 4 liquidation infrastructure
+
+**Planned Actions** (when infrastructure ready):
 1. Push further adverse move to create bad debt
    - Example: SOL drops to $70 → some liquidations create deficit
 2. Batch liquidations consume insurance fund
@@ -144,12 +156,20 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
    - Haircut positive realized PnL (respect warmup buckets if applicable)
    - System-wide equity haircut if still negative
 
-**Pending Implementation**:
-- Bad debt creation scenarios
-- Loss socialization instruction
-- Warmup bucket integration (if applicable)
+**Available Infrastructure**:
+- ✅ TopUpInsurance instruction
+- ✅ InsuranceParams in SlabRegistry
+- ✅ Bad debt settlement logic
+- ✅ Global haircut index
+- ✅ Formally verified crisis math (C1-C12)
+- ✅ Loss waterfall proofs
 
-**Assertions** (when implemented):
+**Pending Infrastructure** (from Phase 4):
+- ⚠️ Position tracking and liquidation execution
+- ⚠️ Multi-liquidation stress scenarios
+- ⚠️ Insurance fund pre-funding in test
+
+**Assertions** (when liquidation infrastructure ready):
 - Insurance drawn before any user haircut
 - Haircut ratio calculation: `γ = (bad_debt - insurance) / total_equity`
 - User impact: `user_final = user_initial × (1 - γ)`
@@ -399,4 +419,11 @@ To expand the Kitchen Sink test:
 ---
 
 **Last Updated**: November 1, 2025
-**Status**: Phases 1-3 complete, Phases 4-5 pending feature implementations
+**Status**: Phases 1-3 complete, Phases 4-5 deferred pending position tracking infrastructure
+
+**Next Steps**:
+1. Implement position persistence in Portfolio.exposures[]
+2. Add mark-to-market health recomputation
+3. Integrate oracle feeds with slab mark prices
+4. Complete Phase 4 liquidation scenarios
+5. Complete Phase 5 insurance stress testing
