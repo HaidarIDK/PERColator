@@ -4,7 +4,7 @@
 
 The Kitchen Sink test is a comprehensive multi-phase integration test designed to exercise the **entire Percolator protocol** under realistic conditions. It simulates a complete market lifecycle from bootstrap through crisis scenarios.
 
-**Status**: Phases 1-2 complete (trading implemented), Phases 3-5 pending feature implementation
+**Status**: Phases 1-3 complete (trading + funding implemented), Phases 4-5 pending feature implementation
 
 ## Test Philosophy
 
@@ -70,23 +70,26 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
 
 ---
 
-### Phase 3 (KS-03): Funding Accrual ⚠️ PENDING
+### Phase 3 (KS-03): Funding Accrual ✅ IMPLEMENTED
 
 **Goal**: Accrue funding rates on open positions
 
-**Planned Actions**:
-1. Set oracle price divergence (mark ≠ oracle)
-   - Example: SOL oracle = $100, mark = $101.2 → longs pay funding
-2. Trigger funding accrual instruction (hourly)
-3. Touch all actors to apply funding
-4. Verify funding transfers between longs and shorts
+**Actions**:
+1. Wait 65 seconds for funding eligibility (dt >= 60s requirement)
+2. Set oracle price divergence on SOL-PERP:
+   - Oracle: 101.0, Mark: 100.0
+   - Mark < Oracle → longs pay funding to shorts
+3. Update BTC-PERP funding (neutral oracle = mark)
+4. Verify funding conservation (zero-sum by design)
 
-**Pending Implementation**:
-- Funding rate calculation mechanism
-- Per-market funding accrual instruction
-- Funding transfer accounting
+**Implementation Details**:
+- Uses `update_funding_as()` helper for UpdateFunding instruction
+- LP owner signs as authority
+- Funding sensitivity: 8 bps per hour (800 at 1e6 scale)
+- Cumulative funding index updated on-chain
+- Multi-market funding coordination
 
-**Assertions** (when implemented):
+**Assertions**:
 - Funding transfers are zero-sum: `Σ funding_paid == Σ funding_received`
 - No funding on unfilled orders (only on positions)
 - Maker positions updated before maintenance checks
@@ -280,7 +283,7 @@ Phases Completed:
 
 ## Implementation Roadmap
 
-### Completed (Phases 1-2)
+### Completed (Phases 1-3)
 - ✅ Multi-market bootstrap
 - ✅ Actor initialization
 - ✅ Collateral deposits
@@ -288,11 +291,14 @@ Phases Completed:
 - ✅ Liquidity placement (maker orders)
 - ✅ Taker crosses and fills
 - ✅ Multi-actor trading coordination
+- ✅ Funding rate mechanism (UpdateFunding instruction)
+- ✅ Funding conservation verification (zero-sum)
+- ✅ Oracle price deviation handling
 
-### Medium-term (Phase 3)
+### Medium-term (Next Steps)
 - ⏳ Fee accounting verification (query receipts)
-- ⏳ Funding rate mechanism integration
 - ⏳ PnL tracking and validation
+- ⏳ Funding impact on user positions
 
 ### Long-term (Phases 4-5)
 - ⏳ Oracle price updates
@@ -393,4 +399,4 @@ To expand the Kitchen Sink test:
 ---
 
 **Last Updated**: November 1, 2025
-**Status**: Phases 1-2 complete, Phases 3-5 pending feature implementations
+**Status**: Phases 1-3 complete, Phases 4-5 pending feature implementations
