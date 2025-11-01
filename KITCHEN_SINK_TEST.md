@@ -4,7 +4,7 @@
 
 The Kitchen Sink test is a comprehensive multi-phase integration test designed to exercise the **entire Percolator protocol** under realistic conditions. It simulates a complete market lifecycle from bootstrap through crisis scenarios.
 
-**Status**: Skeleton implementation (Phase 1 complete, Phases 2-5 pending feature implementation)
+**Status**: Phases 1-2 complete (trading implemented), Phases 3-5 pending feature implementation
 
 ## Test Philosophy
 
@@ -41,23 +41,24 @@ The Kitchen Sink test is a comprehensive multi-phase integration test designed t
 
 ---
 
-### Phase 2 (KS-02): Taker Bursts + Fills ⚠️ PENDING
+### Phase 2 (KS-02): Taker Bursts + Fills ✅ IMPLEMENTED
 
 **Goal**: Generate fills, fees, and PnL through taker trades
 
-**Planned Actions**:
+**Actions**:
 1. Alice places limit orders on SOL-PERP (creates spread)
 2. Bob places limit orders on BTC-PERP
 3. Dave executes market buy on SOL-PERP → crosses Alice's ask
 4. Erin executes market sell on SOL-PERP → crosses Alice's bid
 5. Verify fills, maker rebates (if implemented), taker fees
 
-**Pending Implementation**:
-- Liquidity placement functions (order book maker operations)
-- Maker rebate distribution (if applicable)
-- Fee accounting verification
+**Implementation Details**:
+- Uses `place_maker_order_as()` helper for maker liquidity
+- Uses `place_taker_order_as()` helper for taker crosses
+- Multi-actor execution (Alice, Bob, Dave, Erin)
+- Actual on-chain order placement and fills
 
-**Assertions** (when implemented):
+**Assertions**:
 - Partial fills don't underflow `qty_remaining`
 - Taker margin checks enforced (no negative free collateral)
 - Maker rebates applied correctly
@@ -279,17 +280,19 @@ Phases Completed:
 
 ## Implementation Roadmap
 
-### Short-term (Phase 1 Complete)
+### Completed (Phases 1-2)
 - ✅ Multi-market bootstrap
 - ✅ Actor initialization
 - ✅ Collateral deposits
 - ✅ Non-negative balance invariant
+- ✅ Liquidity placement (maker orders)
+- ✅ Taker crosses and fills
+- ✅ Multi-actor trading coordination
 
-### Medium-term (Phases 2-3)
-- ⏳ Liquidity placement (order book maker ops)
-- ⏳ Taker crosses and fills
-- ⏳ Fee accounting and verification
+### Medium-term (Phase 3)
+- ⏳ Fee accounting verification (query receipts)
 - ⏳ Funding rate mechanism integration
+- ⏳ PnL tracking and validation
 
 ### Long-term (Phases 4-5)
 - ⏳ Oracle price updates
@@ -390,4 +393,4 @@ To expand the Kitchen Sink test:
 ---
 
 **Last Updated**: November 1, 2025
-**Status**: Phase 1 complete, Phases 2-5 pending feature implementations
+**Status**: Phases 1-2 complete, Phases 3-5 pending feature implementations
