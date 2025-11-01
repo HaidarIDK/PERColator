@@ -13,7 +13,7 @@ pub const PRICE_ORACLE_SIZE: usize = 128;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PriceOracle {
-    /// Magic bytes: "PRCL" + "ORCL" = 0x4C43525044444C52
+    /// Magic bytes: "ORACLE\0\0" = 0x00_00_45_4C_43_41_52_4F (little-endian)
     pub magic: u64,
 
     /// Version (currently 0)
@@ -45,8 +45,9 @@ pub struct PriceOracle {
 }
 
 impl PriceOracle {
-    /// Magic bytes for validation
-    pub const MAGIC: &'static [u8; 8] = b"PRCLORCL";
+    /// Magic bytes for validation: "ORACLE\0\0" in ASCII
+    /// Must match router's expectation: 0x00_00_45_4C_43_41_52_4F
+    pub const MAGIC: &'static [u8; 8] = b"ORACLE\0\0";
 
     /// Current version
     pub const VERSION: u8 = 0;

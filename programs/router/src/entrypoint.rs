@@ -8,7 +8,7 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_initialize_vault, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders, process_router_reserve, process_router_release, process_router_liquidity, process_router_seat_init};
 use crate::state::{Vault, Portfolio, SlabRegistry, RouterLpSeat, VenuePnl};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
@@ -41,6 +41,7 @@ pub fn process_instruction(
         10 => RouterInstruction::RouterRelease,
         11 => RouterInstruction::RouterLiquidity,
         12 => RouterInstruction::RouterSeatInit,
+        13 => RouterInstruction::InitializeVault,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -97,6 +98,10 @@ pub fn process_instruction(
         RouterInstruction::RouterSeatInit => {
             msg!("Instruction: RouterSeatInit");
             process_router_seat_init_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::InitializeVault => {
+            msg!("Instruction: InitializeVault");
+            process_initialize_vault_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -380,8 +385,9 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
 
     // Call the instruction handler
     process_execute_cross_slab(
+        program_id,
         portfolio,
-        user_account.key(),
+        user_account,
         vault,
         registry,
         router_authority,
@@ -467,6 +473,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
 
     // Call the instruction handler
     process_liquidate_user(
+        program_id,
         portfolio,
         registry,
         vault,
@@ -829,5 +836,42 @@ fn process_router_seat_init_inner(program_id: &Pubkey, accounts: &[AccountInfo],
     )?;
 
     msg!("RouterSeatInit processed successfully");
+    Ok(())
+}
+
+/// Process initialize vault instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Vault PDA account
+/// 1. `[]` Mint account (e.g., native SOL mint)
+/// 2. `[signer, writable]` Payer account
+/// 3. `[]` System program
+///
+/// Expected data layout: none (vault PDA derived from mint)
+fn process_initialize_vault_inner(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    if accounts.len() < 4 {
+        msg!("Error: InitializeVault instruction requires at least 4 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let vault_account = &accounts[0];
+    let mint_account = &accounts[1];
+    let payer_account = &accounts[2];
+    let system_program = &accounts[3];
+
+    // Validate accounts
+    validate_writable(vault_account)?;
+    validate_writable(payer_account)?;
+
+    // Call the initialization logic
+    process_initialize_vault(
+        program_id,
+        vault_account,
+        mint_account,
+        payer_account,
+        system_program,
+    )?;
+
+    msg!("Vault initialized successfully");
     Ok(())
 }

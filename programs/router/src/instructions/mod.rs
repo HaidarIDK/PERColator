@@ -2,6 +2,7 @@
 
 pub mod initialize;
 pub mod initialize_portfolio;
+pub mod initialize_vault;
 pub mod deposit;
 pub mod withdraw;
 pub mod execute_cross_slab;
@@ -16,6 +17,7 @@ pub mod router_seat_init;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
+pub use initialize_vault::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use execute_cross_slab::*;
@@ -57,6 +59,8 @@ pub enum RouterInstruction {
     RouterLiquidity = 11,
     /// Initialize LP seat for adapter pattern
     RouterSeatInit = 12,
+    /// Initialize vault for a specific mint
+    InitializeVault = 13,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

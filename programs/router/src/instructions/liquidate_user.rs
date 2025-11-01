@@ -2,7 +2,7 @@
 
 use crate::state::{Portfolio, SlabRegistry, Vault};
 use percolator_common::*;
-use pinocchio::{account_info::AccountInfo, msg};
+use pinocchio::{account_info::AccountInfo, msg, pubkey::Pubkey};
 
 /// Helper to convert verification errors from KANI verified functions
 ///
@@ -422,6 +422,7 @@ fn liquidate_amm_lp_buckets(
 /// * Enforces reduce-only (no position increases)
 /// * All-or-nothing atomicity
 pub fn process_liquidate_user(
+    program_id: &Pubkey,
     portfolio: &mut Portfolio,
     registry: &mut SlabRegistry,
     vault: &mut Vault,
@@ -581,12 +582,13 @@ pub fn process_liquidate_user(
     }
 
     // Execute the liquidation using the same cross-slab logic as normal orders
-    // Clone the user pubkey before the mutable borrow to avoid borrow checker issues
-    let user_pubkey = portfolio.user;
+    // In liquidation, we use router_authority as a dummy user account for self-trade prevention
+    // (self-trade prevention doesn't apply in liquidation since liquidator ≠ liquidatee)
     use crate::instructions::process_execute_cross_slab;
     process_execute_cross_slab(
+        program_id,
         portfolio,
-        &user_pubkey,
+        router_authority, // Use router authority as dummy user account
         vault,
         registry,
         router_authority,

@@ -41,8 +41,9 @@ pub struct SlabSplit {
 /// * Checks margin on net exposure (capital efficiency!)
 /// * All-or-nothing atomicity
 pub fn process_execute_cross_slab(
+    program_id: &Pubkey,
     portfolio: &mut Portfolio,
-    user: &Pubkey,
+    user_account: &AccountInfo,
     vault: &mut Vault,
     registry: &mut SlabRegistry,
     router_authority: &AccountInfo,
@@ -51,6 +52,8 @@ pub fn process_execute_cross_slab(
     oracle_accounts: &[AccountInfo],
     splits: &[SlabSplit],
 ) -> Result<(), PercolatorError> {
+    let user = user_account.key();
+    
     // Verify portfolio belongs to user
     if &portfolio.user != user {
         msg!("Error: Portfolio does not belong to user");
@@ -160,7 +163,7 @@ pub fn process_execute_cross_slab(
 
     // Verify router_authority is the correct PDA
     use crate::pda::derive_authority_pda;
-    let (expected_authority, authority_bump) = derive_authority_pda(&portfolio.router_id);
+    let (expected_authority, authority_bump) = derive_authority_pda(program_id);
     if router_authority.key() != &expected_authority {
         msg!("Error: Invalid router authority PDA");
         return Err(PercolatorError::InvalidAccount);
@@ -192,28 +195,44 @@ pub fn process_execute_cross_slab(
         let oracle_account = &oracle_accounts[i];
 
         // Parse PriceOracle from account data
+        // Minimal oracle structure for reading timestamps
+        #[repr(C)]
+        struct PriceOracle {
+            magic: u64,
+            version: u8,
+            bump: u8,
+            _padding: [u8; 6],
+            authority: [u8; 32],
+            instrument: [u8; 32],
+            price: i64,
+            timestamp: i64,
+            confidence: i64,
+        }
+        
         let oracle_data = oracle_account
             .try_borrow_data()
             .map_err(|_| PercolatorError::InvalidAccount)?;
 
-        if oracle_data.len() < core::mem::size_of::<percolator_oracle::PriceOracle>() {
+        if oracle_data.len() < core::mem::size_of::<PriceOracle>() {
             msg!("Error: Invalid oracle account size");
             return Err(PercolatorError::InvalidAccount);
         }
 
         // Cast to PriceOracle (assuming repr(C) layout)
         let oracle = unsafe {
-            &*(oracle_data.as_ptr() as *const percolator_oracle::PriceOracle)
+            &*(oracle_data.as_ptr() as *const PriceOracle)
         };
 
-        // Validate oracle magic bytes
-        if !oracle.validate() {
+        // Validate oracle magic bytes (b"ORACLE\0\0" = 0x45_4C_43_41_52_4F)
+        const ORACLE_MAGIC: u64 = 0x00_00_45_4C_43_41_52_4F;
+        if oracle.magic != ORACLE_MAGIC {
             msg!("Error: Invalid oracle magic bytes");
             return Err(PercolatorError::InvalidAccount);
         }
 
         // Check staleness
-        let is_stale = oracle.is_stale(current_time, registry.max_oracle_staleness_secs);
+        let oracle_age = current_time.saturating_sub(oracle.timestamp);
+        let is_stale = oracle_age > registry.max_oracle_staleness_secs as i64;
 
         drop(oracle_data); // Release borrow
 
@@ -291,6 +310,7 @@ pub fn process_execute_cross_slab(
         // 0. slab_account (writable)
         // 1. receipt_account (writable)
         // 2. router_authority (signer PDA)
+        // 3. taker_owner (for self-trade prevention)
         use pinocchio::{
             instruction::{AccountMeta, Instruction},
             program::invoke_signed,
@@ -299,7 +319,8 @@ pub fn process_execute_cross_slab(
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
-            AccountMeta::writable_signer(router_authority.key()),
+            AccountMeta::readonly_signer(router_authority.key()),
+            AccountMeta::readonly(user), // taker owner
         ];
 
         let instruction = Instruction {
@@ -318,10 +339,10 @@ pub fn process_execute_cross_slab(
             Seed::from(&bump_array[..]),
         ];
         let signer = Signer::from(seeds);
-
+        
         invoke_signed(
             &instruction,
-            &[slab_account, receipt_account, router_authority],
+            &[slab_account, receipt_account, router_authority, user_account],
             &[signer],
         )
         .map_err(|_| PercolatorError::CpiFailed)?;
@@ -379,20 +400,23 @@ pub fn process_execute_cross_slab(
     // See: crates/model_safety/src/cross_slab.rs for Kani proofs
 
     // Convert portfolio exposures to format expected by verified function
-    // Use stack-allocated array instead of Vec (no_std/BPF compatible)
-    use percolator_common::{MAX_SLABS, MAX_INSTRUMENTS};
-    const MAX_EXPOSURES: usize = MAX_SLABS * MAX_INSTRUMENTS;
-    let mut exposures_buf: [(u16, u16, i128); MAX_EXPOSURES] = [(0, 0, 0); MAX_EXPOSURES];
+    // Use heap allocation to avoid stack overflow (160KB array -> heap)
+    // Each exposure is (u16, u16, i128) = 20 bytes
+    // Max exposures = portfolio.exposure_count (typically < 100)
     let exposure_count = portfolio.exposure_count as usize;
+    
+    // Allocate only what we need on the heap (alloc crate already imported in lib.rs)
+    let mut exposures_buf: alloc::vec::Vec<(u16, u16, i128)> = alloc::vec::Vec::with_capacity(exposure_count);
+    
     for i in 0..exposure_count {
-        exposures_buf[i] = (
+        exposures_buf.push((
             portfolio.exposures[i].0,
             portfolio.exposures[i].1,
             portfolio.exposures[i].2 as i128,
-        );
+        ));
     }
 
-    let net_exposure = crate::state::model_bridge::net_exposure_verified(&exposures_buf[..exposure_count])
+    let net_exposure = crate::state::model_bridge::net_exposure_verified(&exposures_buf)
         .map_err(|_| PercolatorError::Overflow)?;
 
     // Calculate average price from splits (for v0, use first split's price)

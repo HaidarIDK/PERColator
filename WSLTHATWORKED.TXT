@@ -1,0 +1,1608 @@
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+cargo clean --manifest-path programs/router/Cargo.toml
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/amm/Cargo.toml
+workspace: /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/Cargo.toml
+     Removed 7559 files, 1.5GiB total
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # 2. Verify our changes are in the source
+grep "InitializeVault = 13" programs/router/src/instructions/mod.rs
+    InitializeVault = 13,
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # 3. Rebuild from scratch (this will take 2-5 minutes)
+cargo build-sbf --manifest-path programs/router/Cargo.toml
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Try with verbose output
+cargo build-sbf --manifest-path programs/router/Cargo.toml -v
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Try with verbose output
+cargo build-sbf --manifest-path programs/router/Cargo.toml -v
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Verify cargo-build-sbf is installed
+which cargo-build-sbf
+cargo-build-sbf --version
+/home/haidarwtf/.local/share/solana/install/active_release/bin/cargo-build-sbf
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Use the full path to cargo-build-sbf
+~/.local/share/solana/install/releases/2.3.13/solana-release/bin/cargo-build-sbf \
+  --manifest-path programs/router/Cargo.toml
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+
+# Check the actual file and when it was modified
+ls -lh target/deploy/percolator_router.so
+date
+
+# Check if there's a newer version in SBF output
+find target -name "percolator_router.so" -ls
+
+# Let's see all recent .so files
+find target -name "*.so" -mmin -60 -ls
+ls: cannot access 'target/deploy/percolator_router.so': No such file or directory
+Sat Nov  1 17:00:08 GMT 2025
+find: ‘target’: No such file or directory
+find: ‘target’: No such file or directory
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Try forcing a rebuild by touching the source files
+touch programs/router/src/instructions/initialize_vault.rs
+touch programs/router/src/instructions/mod.rs
+touch programs/router/src/entrypoint.rs
+
+# Now try building again with full output
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | head -100
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Look for build logs
+ls -la ~/.cache/solana/
+
+# Check cargo output
+cargo build-sbf --manifest-path programs/router/Cargo.toml --help
+total 20
+drwxr-xr-x 5 haidarwtf haidarwtf 4096 Oct 22 04:52 .
+drwx------ 4 haidarwtf haidarwtf 4096 Oct 21 09:30 ..
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 21 09:30 v1.43
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 22 04:52 v1.48
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 21 09:56 v2.3.3
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+
+# Try building with explicit error output
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1
+
+# If nothing appears, try checking if it's actually running
+echo "Starting build..."
+time cargo build-sbf --manifest-path programs/router/Cargo.toml
+echo "Build finished"
+
+# Check if target was created
+ls -la target/ 2>&1 || echo "No target directory"
+Starting build...
+
+real    0m0.058s
+user    0m0.022s
+sys     0m0.020s
+Build finished
+ls: cannot access 'target/': No such file or directory
+No target directory
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+
+# Try regular cargo check to see if there are errors
+cd programs/router
+cargo check 2>&1
+
+# Go back
+cd ../..
+
+# Try to see what cargo-build-sbf is actually doing
+strace -e trace=file cargo-build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | grep -i error | head -20
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/amm/Cargo.toml
+workspace: /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/Cargo.toml
+    Checking pinocchio v0.9.2
+    Checking five8_core v0.1.2
+    Checking sha2-const-stable v0.1.0
+    Checking arrayvec v0.7.6
+    Checking adapter-core v0.1.0 (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/crates/adapter_core)
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/adapter_core/src/lib.rs:446:7
+    |
+446 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+    Checking five8_const v0.1.4
+    Checking model_safety v0.1.0 (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/crates/model_safety)
+warning: `adapter-core` (lib) generated 1 warning
+    Checking percolator-common v0.1.0 (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/common)
+    Checking percolator-oracle v0.1.0 (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/oracle)
+    Checking pinocchio-pubkey v0.3.0
+warning: unexpected `cfg` condition name: `kani`
+   --> programs/common/src/math.rs:159:7
+    |
+159 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `kani`
+ --> crates/model_safety/src/lib.rs:9:7
+  |
+9 | #[cfg(kani)]
+  |       ^^^^
+  |
+  = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unnecessary parentheses around block return value
+  --> crates/model_safety/src/adaptive_warmup.rs:47:5
+   |
+47 |     ((a * b) / F)
+   |     ^           ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+47 -     ((a * b) / F)
+47 +     (a * b) / F
+   |
+
+warning: unexpected `cfg` condition name: `kani`
+  --> crates/model_safety/src/crisis/mod.rs:83:7
+   |
+83 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/deposit_withdraw.rs:350:7
+    |
+350 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/orderbook.rs:555:7
+    |
+555 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/lp_operations.rs:370:7
+    |
+370 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/cross_slab.rs:302:7
+    |
+302 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `core::ops::Add`
+  --> crates/model_safety/src/cross_slab.rs:15:5
+   |
+15 | use core::ops::Add;
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/funding.rs:143:7
+    |
+143 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: the `#![no_std]` attribute can only be used at the crate root
+  --> crates/model_safety/src/deposit_withdraw.rs:13:24
+   |
+13 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+   |
+   = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: the `#![no_std]` attribute can only be used at the crate root
+  --> crates/model_safety/src/lp_operations.rs:14:24
+   |
+14 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+
+warning: the `#![no_std]` attribute can only be used at the crate root
+  --> crates/model_safety/src/cross_slab.rs:13:24
+   |
+13 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+
+warning: `percolator-common` (lib) generated 1 warning
+warning: unused variable: `s`
+   --> crates/model_safety/src/fee_distribution.rs:139:19
+    |
+139 | pub fn claim_fees(s: &State, acc: &mut Account) -> u128 {
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_s`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `num_fills` is assigned to, but never used
+   --> crates/model_safety/src/orderbook.rs:948:13
+    |
+948 |     let mut num_fills = 0u32;
+    |             ^^^^^^^^^
+    |
+    = note: consider using `_num_fills` instead
+
+warning: method `find_bucket` is never used
+   --> crates/model_safety/src/lp_bucket.rs:104:8
+    |
+ 95 | impl Portfolio {
+    | -------------- method in this implementation
+...
+104 |     fn find_bucket(&self, venue_kind: VenueKind) -> Option<usize> {
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `model_safety` (lib) generated 15 warnings (run `cargo fix --lib -p model_safety` to apply 2 suggestions)
+    Checking percolator-router v0.1.0 (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/router)
+warning: unexpected `cfg` condition value: `solana`
+ --> programs/router/src/lib.rs:1:13
+  |
+1 | #![cfg_attr(target_os = "solana", no_std)]
+  |             ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `std`
+ --> programs/router/src/authority_proofs.rs:7:17
+  |
+7 | #![cfg_attr(not(feature = "std"), no_std)]
+  |                 ^^^^^^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `bpf-entrypoint` and `default`
+  = help: consider adding `std` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `solana`
+  --> programs/router/src/lib.rs:18:11
+   |
+18 | #[cfg(all(target_os = "solana", not(test)))]
+   |           ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `solana`
+   --> programs/router/src/state/portfolio.rs:144:25
+    |
+144 |     #[cfg(all(test, not(target_os = "solana")))]
+    |                         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `solana`
+   --> programs/router/src/state/registry.rs:106:25
+    |
+106 |     #[cfg(all(test, not(target_os = "solana")))]
+    |                         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `solana`
+   --> programs/router/src/instructions/initialize.rs:102:21
+    |
+102 | #[cfg(all(test, not(target_os = "solana")))]
+    |                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/deposit.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition value: `solana`
+   --> programs/router/src/instructions/execute_cross_slab.rs:443:21
+    |
+443 | #[cfg(all(test, not(target_os = "solana")))]
+    |                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `disabled_test`
+  --> programs/router/src/instructions/router_reserve.rs:62:7
+   |
+62 | #[cfg(disabled_test)] // TODO: Update tests for new Portfolio and AccountInfo APIs
+   |       ^^^^^^^^^^^^^
+   |
+   = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled_test)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(disabled_test)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_reserve.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `disabled_test`
+  --> programs/router/src/instructions/router_release.rs:57:7
+   |
+57 | #[cfg(disabled_test)] // TODO: Update tests for new Portfolio and AccountInfo APIs
+   |       ^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled_test)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(disabled_test)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_release.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `LiquidityResult`
+ --> programs/router/src/instructions/router_liquidity.rs:9:37
+  |
+9 | use adapter_core::{LiquidityIntent, LiquidityResult, RemoveSel, RiskGuard};
+  |                                     ^^^^^^^^^^^^^^^
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_liquidity.rs:15:5
+   |
+15 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `solana`
+   --> programs/router/src/chooser.rs:183:11
+    |
+183 | #[cfg(not(target_os = "solana"))]
+    |           ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+  --> programs/router/src/authority_proofs.rs:66:7
+   |
+66 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `solana`
+  --> programs/router/src/entrypoint.rs:15:1
+   |
+15 | entrypoint!(process_instruction);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+   = note: using a cfg inside a macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `$crate::default_allocator` crate for guidance on how handle this unexpected cfg
+   = help: the macro `$crate::default_allocator` may come from an old version of the `pinocchio` crate, try updating your dependency with `cargo update -p pinocchio`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: this warning originates in the macro `$crate::default_allocator` which comes from the expansion of the macro `entrypoint` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unexpected `cfg` condition value: `solana`
+  --> programs/router/src/entrypoint.rs:15:1
+   |
+15 | entrypoint!(process_instruction);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `redox`, `rtems`, `solaris`, `solid_asp3`, `teeos`, `trusty`, and `tvos` and 11 more
+   = note: using a cfg inside a macro will use the cfgs from the destination crate and not the ones from the defining crate
+   = help: try referring to `$crate::default_panic_handler` crate for guidance on how handle this unexpected cfg
+   = help: the macro `$crate::default_panic_handler` may come from an old version of the `pinocchio` crate, try updating your dependency with `cargo update -p pinocchio`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: this warning originates in the macro `$crate::default_panic_handler` which comes from the expansion of the macro `entrypoint` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: the `#![no_std]` attribute can only be used at the crate root
+ --> programs/router/src/authority_proofs.rs:7:35
+  |
+7 | #![cfg_attr(not(feature = "std"), no_std)]
+  |                                   ^^^^^^
+  |
+  = note: `#[warn(unused_attributes)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `registry`
+   --> programs/router/src/state/model_bridge.rs:235:5
+    |
+235 |     registry: &mut SlabRegistry,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `registry`
+    --> programs/router/src/state/model_bridge.rs:1069:5
+     |
+1069 |     registry: &SlabRegistry,
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+
+warning: unused variable: `slab_pubkey`
+   --> programs/router/src/instructions/execute_cross_slab.rs:124:13
+    |
+124 |         let slab_pubkey = slab_account.key();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_slab_pubkey`
+
+warning: unused variable: `idx`
+  --> programs/router/src/instructions/liquidate_user.rs:88:10
+   |
+88 |     for (idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+   |          ^^^
+   |
+help: if this is intentional, prefix it with an underscore
+   |
+88 |     for (_idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+   |          +
+help: you might have meant to pattern match on the similarly named constant `MAX_ORDERS`
+   |
+88 -     for (idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+88 +     for (entrypoint::process_cancel_lp_orders_inner::MAX_ORDERS, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+   |
+
+warning: unused variable: `seat_account`
+  --> programs/router/src/instructions/router_reserve.rs:30:5
+   |
+30 |     seat_account: &AccountInfo,
+   |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seat_account`
+
+warning: unused variable: `seat_account`
+  --> programs/router/src/instructions/router_release.rs:30:5
+   |
+30 |     seat_account: &AccountInfo,
+   |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seat_account`
+
+warning: unused variable: `portfolio`
+  --> programs/router/src/instructions/router_liquidity.rs:42:5
+   |
+42 |     portfolio: &mut Portfolio,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_portfolio`
+
+warning: unused variable: `venue_pnl_account`
+  --> programs/router/src/instructions/router_liquidity.rs:45:5
+   |
+45 |     venue_pnl_account: &AccountInfo,
+   |     ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_venue_pnl_account`
+
+warning: `percolator-router` (lib) generated 28 warnings (1 duplicate) (run `cargo fix --lib -p percolator-router` to apply 6 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.40s
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Copy to native Linux filesystem (this will be faster)
+cp -r /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2 ~/percolator-v2-build
+cd ~/percolator-v2-build
+
+# Now build from Linux filesystem
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | tee build.log
+
+# This should take 2-5 minutes and show lots of output!
+^C
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ cd ~/percolator-v2-build
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | tee build.log
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Check if build.log exists and what's in it
+cat build.log
+
+# Check Solana version
+solana --version
+
+# Check cargo-build-sbf version
+cargo-build-sbf --version
+
+# Check if the platform SDK is installed
+ls -la ~/.cache/solana/
+
+# Try running cargo-build-sbf with explicit verbose flag
+RUST_LOG=debug cargo-build-sbf --manifest-path programs/router/Cargo.toml -- --verbose
+solana-cli 2.3.13 (src:5466f459; feat:2142755730, client:Agave)
+total 20
+drwxr-xr-x 5 haidarwtf haidarwtf 4096 Oct 22 04:52 .
+drwx------ 4 haidarwtf haidarwtf 4096 Oct 21 09:30 ..
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 21 09:30 v1.43
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 22 04:52 v1.48
+drwxr-xr-x 3 haidarwtf haidarwtf 4096 Oct 21 09:56 v2.3.3
+[2025-11-01T17:09:29.042350817Z INFO  cargo_build_sbf::utils] spawn: "/home/haidarwtf/.cache/solana/v1.48/platform-tools/rust/bin/rustc" --version
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Force reinstall the platform tools
+cargo-build-sbf --force-tools-install --manifest-path programs/router/Cargo.toml
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Check if rustc exists
+ls -la ~/.cache/solana/v1.48/platform-tools/rust/bin/ 2>&1
+
+# Check if the directory structure exists at all
+find ~/.cache/solana/v1.48 -type f | head -20
+
+# Try running rustc directly
+~/.cache/solana/v1.48/platform-tools/rust/bin/rustc --version 2>&1
+
+# Delete the corrupted cache and force reinstall
+rm -rf ~/.cache/solana/v1.48
+rm -rf ~/.cache/solana/v1.43
+
+# Now try with verbose output
+cargo-build-sbf --force-tools-install --manifest-path programs/router/Cargo.toml -vv 2>&1 | tee install.log
+total 51436
+drwxr-xr-x 2 haidarwtf haidarwtf     4096 Oct 22 04:52 .
+drwxr-xr-x 4 haidarwtf haidarwtf     4096 Oct 22 04:52 ..
+-rwxr-xr-x 1 haidarwtf haidarwtf 38680184 May 14 18:01 cargo
+-rwxr-xr-x 1 haidarwtf haidarwtf    16424 May 14 18:01 rustc
+-rwxr-xr-x 1 haidarwtf haidarwtf 13957760 May 14 18:01 rustdoc
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/stdatomic.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ftw.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/grp.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/math.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/_newlib_version.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/malloc.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/signal.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/spawn.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/stdio.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/string.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/unistd.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/strings.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/stdlib.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/ssp.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/ssp/wchar.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/unctrl.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/complex.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/libgen.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/locale.h
+/home/haidarwtf/.cache/solana/v1.48/platform-tools/llvm/include/glob.h
+Bus error (core dumped)
+error: The argument '--verbose' was provided more than once, but cannot be used multiple times
+
+USAGE:
+    cargo-build-sbf [OPTIONS] [-- <cargo_args>...]
+
+For more information try --help
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Check if rustc exists
+ls -la ~/.cache/solana/v1.48/platform-tools/rust/bin/ 2>&1
+
+# Check if the directory structure exists at all
+find ~/.cache/solana/v1.48 -type f | head -20
+
+# Try running rustc directly
+~/.cache/solana/v1.48/platform-tools/rust/bin/rustc --version 2>&1
+
+# Delete the corrupted cache and force reinstall
+rm -rf ~/.cache/solana/v1.48
+rm -rf ~/.cache/solana/v1.43
+
+# Now try with verbose output
+cargo-build-sbf --force-tools-install --manifest-path programs/router/Cargo.toml -vv 2>&1 | tee install.log
+ls: cannot access '/home/haidarwtf/.cache/solana/v1.48/platform-tools/rust/bin/': No such file or directory
+find: ‘/home/haidarwtf/.cache/solana/v1.48’: No such file or directory
+-bash: /home/haidarwtf/.cache/solana/v1.48/platform-tools/rust/bin/rustc: No such file or directory
+error: The argument '--verbose' was provided more than once, but cannot be used multiple times
+
+USAGE:
+    cargo-build-sbf [OPTIONS] [-- <cargo_args>...]
+
+For more information try --help
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Try with single -v (not -vv)
+cargo-build-sbf --force-tools-install --manifest-path programs/router/Cargo.toml -v 2>&1 | tee install.log
+
+# If that still does nothing instantly, check what cargo-build-sbf actually is
+which cargo-build-sbf
+file $(which cargo-build-sbf)
+
+# Check if it's a script that's exiting early
+head -50 $(which cargo-build-sbf)
+
+# Try running it directly with full path
+~/.local/share/solana/install/active_release/bin/cargo-build-sbf --version
+info: uninstalling toolchain 'solana'
+info: toolchain 'solana' uninstalled
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/haidarwtf/percolator-v2-build/programs/amm/Cargo.toml
+workspace: /home/haidarwtf/percolator-v2-build/Cargo.toml
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded arrayvec v0.7.6
+   Compiling pinocchio v0.9.2
+   Compiling five8_core v0.1.2
+   Compiling arrayvec v0.7.6
+   Compiling sha2-const-stable v0.1.0
+   Compiling adapter-core v0.1.0 (/home/haidarwtf/percolator-v2-build/crates/adapter_core)
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name pinocchio --edition=2021 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/pinocchio-0.9.2/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type rlib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 --warn=unexpected_cfgs --check-cfg 'cfg(target_os, values("solana"))' --check-cfg 'cfg(target_feature, values("static-syscalls"))' -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("std"))' -C metadata=cef45180db5a3245 -C extra-filename=-cef45180db5a3245 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --cap-lints allow -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name five8_core --edition=2021 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/five8_core-0.1.2/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("std"))' -C metadata=b1aabaf3ae85ae9e -C extra-filename=-b1aabaf3ae85ae9e --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --cap-lints allow -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name arrayvec --edition=2018 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/arrayvec-0.7.6/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("borsh", "default", "serde", "std", "zeroize"))' -C metadata=50c8363cfd129e33 -C extra-filename=-50c8363cfd129e33 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --cap-lints allow -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name sha2_const_stable --edition=2018 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/sha2-const-stable-0.1.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values())' -C metadata=124b3b6f2a563670 -C extra-filename=-124b3b6f2a563670 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --cap-lints allow -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name adapter_core --edition=2021 crates/adapter_core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("default"))' -C metadata=44bf947765aa528a -C extra-filename=-44bf947765aa528a --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps -Zremap-cwd-prefix=`
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/adapter_core/src/lib.rs:446:7
+    |
+446 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: expected names are: `clippy`, `debug_assertions`, `doc`, `docsrs`, `doctest`, `feature`, `fmt_debug`, `miri`, `overflow_checks`, `panic`, `proc_macro`, `relocation_model`, `rustfmt`, `sanitize`, `sanitizer_cfi_generalize_pointers`, `sanitizer_cfi_normalize_integers`, `target_abi`, `target_arch`, `target_endian`, `target_env`, `target_family`, `target_feature`, `target_has_atomic`, `target_has_atomic_equal_alignment`, `target_has_atomic_load_store`, `target_os`, `target_pointer_width`, `target_thread_local`, `target_vendor`, `test`, `ub_checks`, `unix`, and `windows`
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+   Compiling five8_const v0.1.4
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name five8_const --edition=2021 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/five8_const-0.1.4/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values())' -C metadata=7cbce827ff02137e -C extra-filename=-7cbce827ff02137e --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern five8_core=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libfive8_core-b1aabaf3ae85ae9e.rmeta --cap-lints allow -Zremap-cwd-prefix=`
+warning: `adapter-core` (lib) generated 1 warning
+   Compiling model_safety v0.1.0 (/home/haidarwtf/percolator-v2-build/crates/model_safety)
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name model_safety --edition=2021 crates/model_safety/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("default"))' -C metadata=928e8129db64acc2 -C extra-filename=-928e8129db64acc2 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern arrayvec=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libarrayvec-50c8363cfd129e33.rmeta -Zremap-cwd-prefix=`
+warning: unexpected `cfg` condition name: `kani`
+ --> crates/model_safety/src/lib.rs:9:7
+  |
+9 | #[cfg(kani)]
+  |       ^^^^
+  |
+  = help: expected names are: `clippy`, `debug_assertions`, `doc`, `docsrs`, `doctest`, `feature`, `fmt_debug`, `miri`, `overflow_checks`, `panic`, `proc_macro`, `relocation_model`, `rustfmt`, `sanitize`, `sanitizer_cfi_generalize_pointers`, `sanitizer_cfi_normalize_integers`, `target_abi`, `target_arch`, `target_endian`, `target_env`, `target_family`, `target_feature`, `target_has_atomic`, `target_has_atomic_equal_alignment`, `target_has_atomic_load_store`, `target_os`, `target_pointer_width`, `target_thread_local`, `target_vendor`, `test`, `ub_checks`, `unix`, and `windows`
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unnecessary parentheses around block return value
+  --> crates/model_safety/src/adaptive_warmup.rs:47:5
+   |
+47 |     ((a * b) / F)
+   |     ^           ^
+   |
+   = note: `#[warn(unused_parens)]` on by default
+help: remove these parentheses
+   |
+47 -     ((a * b) / F)
+47 +     (a * b) / F
+   |
+
+warning: unexpected `cfg` condition name: `kani`
+  --> crates/model_safety/src/crisis/mod.rs:83:7
+   |
+83 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/deposit_withdraw.rs:350:7
+    |
+350 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/orderbook.rs:555:7
+    |
+555 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/lp_operations.rs:370:7
+    |
+370 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/cross_slab.rs:302:7
+    |
+302 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `core::ops::Add`
+  --> crates/model_safety/src/cross_slab.rs:15:5
+   |
+15 | use core::ops::Add;
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unexpected `cfg` condition name: `kani`
+   --> crates/model_safety/src/funding.rs:143:7
+    |
+143 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: crate-level attribute should be in the root module
+  --> crates/model_safety/src/deposit_withdraw.rs:13:24
+   |
+13 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+   |
+   = note: `#[warn(unused_attributes)]` on by default
+
+warning: crate-level attribute should be in the root module
+  --> crates/model_safety/src/lp_operations.rs:14:24
+   |
+14 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+
+warning: crate-level attribute should be in the root module
+  --> crates/model_safety/src/cross_slab.rs:13:24
+   |
+13 | #![cfg_attr(not(test), no_std)]
+   |                        ^^^^^^
+
+   Compiling pinocchio-pubkey v0.3.0
+   Compiling percolator-common v0.1.0 (/home/haidarwtf/percolator-v2-build/programs/common)
+   Compiling percolator-oracle v0.1.0 (/home/haidarwtf/percolator-v2-build/programs/oracle)
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name percolator_common --edition=2021 programs/common/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --cfg 'feature="default"' --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("default"))' -C metadata=9a19fe139122b29e -C extra-filename=-9a19fe139122b29e --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern pinocchio=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpinocchio-cef45180db5a3245.rmeta -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name pinocchio_pubkey --edition=2021 /home/haidarwtf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/pinocchio-pubkey-0.3.0/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type rlib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 --warn=unexpected_cfgs --check-cfg 'cfg(target_os, values("solana"))' -C overflow-checks=on --cfg 'feature="const"' --cfg 'feature="default"' --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("const", "default"))' -C metadata=be2ed4b068e698bf -C extra-filename=-be2ed4b068e698bf --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern five8_const=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libfive8_const-7cbce827ff02137e.rmeta --extern pinocchio=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpinocchio-cef45180db5a3245.rmeta --extern sha2_const_stable=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libsha2_const_stable-124b3b6f2a563670.rmeta --cap-lints allow -Zremap-cwd-prefix=`
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name percolator_oracle --edition=2021 programs/oracle/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C codegen-units=1 --warn=unexpected_cfgs --check-cfg 'cfg(target_os, values("solana"))' -C overflow-checks=on --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("bpf-entrypoint", "default", "test-sbf"))' -C metadata=d7f14ac3be7f2489 -C extra-filename=-d7f14ac3be7f2489 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern pinocchio=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpinocchio-cef45180db5a3245.rmeta -Zremap-cwd-prefix=`
+warning: unexpected `cfg` condition name: `kani`
+   --> programs/common/src/math.rs:159:7
+    |
+159 | #[cfg(kani)]
+    |       ^^^^
+    |
+    = help: expected names are: `clippy`, `debug_assertions`, `doc`, `docsrs`, `doctest`, `feature`, `fmt_debug`, `miri`, `overflow_checks`, `panic`, `proc_macro`, `relocation_model`, `rustfmt`, `sanitize`, `sanitizer_cfi_generalize_pointers`, `sanitizer_cfi_normalize_integers`, `target_abi`, `target_arch`, `target_endian`, `target_env`, `target_family`, `target_feature`, `target_has_atomic`, `target_has_atomic_equal_alignment`, `target_has_atomic_load_store`, `target_os`, `target_pointer_width`, `target_thread_local`, `target_vendor`, `test`, `ub_checks`, `unix`, and `windows`
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused variable: `s`
+   --> crates/model_safety/src/fee_distribution.rs:139:19
+    |
+139 | pub fn claim_fees(s: &State, acc: &mut Account) -> u128 {
+    |                   ^ help: if this is intentional, prefix it with an underscore: `_s`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: variable `num_fills` is assigned to, but never used
+   --> crates/model_safety/src/orderbook.rs:948:13
+    |
+948 |     let mut num_fills = 0u32;
+    |             ^^^^^^^^^
+    |
+    = note: consider using `_num_fills` instead
+
+warning: method `find_bucket` is never used
+   --> crates/model_safety/src/lp_bucket.rs:104:8
+    |
+95  | impl Portfolio {
+    | -------------- method in this implementation
+...
+104 |     fn find_bucket(&self, venue_kind: VenueKind) -> Option<usize> {
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: `percolator-common` (lib) generated 1 warning
+warning: `model_safety` (lib) generated 15 warnings (run `cargo fix --lib -p model_safety` to apply 2 suggestions)
+   Compiling percolator-router v0.1.0 (/home/haidarwtf/percolator-v2-build/programs/router)
+     Running `/home/haidarwtf/.rustup/toolchains/solana/bin/rustc --crate-name percolator_router --edition=2021 programs/router/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type cdylib --crate-type lib --emit=dep-info,link -C opt-level=3 -C codegen-units=1 -C overflow-checks=on --cfg 'feature="default"' --check-cfg 'cfg(docsrs)' --check-cfg 'cfg(feature, values("bpf-entrypoint", "default"))' -C metadata=6912a9e9ff99ee71 --out-dir /home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps --target sbpf-solana-solana -C strip=debuginfo -L dependency=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps -L dependency=/home/haidarwtf/percolator-v2-build/target/release/deps --extern adapter_core=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libadapter_core-44bf947765aa528a.rlib --extern arrayvec=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libarrayvec-50c8363cfd129e33.rlib --extern model_safety=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libmodel_safety-928e8129db64acc2.rlib --extern percolator_common=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpercolator_common-9a19fe139122b29e.rlib --extern percolator_oracle=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpercolator_oracle-d7f14ac3be7f2489.rlib --extern pinocchio=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpinocchio-cef45180db5a3245.rlib --extern pinocchio_pubkey=/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/deps/libpinocchio_pubkey-be2ed4b068e698bf.rlib -Zremap-cwd-prefix=`
+warning: unexpected `cfg` condition value: `std`
+ --> programs/router/src/authority_proofs.rs:7:17
+  |
+7 | #![cfg_attr(not(feature = "std"), no_std)]
+  |                 ^^^^^^^^^^^^^^^
+  |
+  = note: expected values for `feature` are: `bpf-entrypoint` and `default`
+  = help: consider adding `std` as a feature in `Cargo.toml`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/deposit.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unexpected `cfg` condition name: `disabled_test`
+  --> programs/router/src/instructions/router_reserve.rs:62:7
+   |
+62 | #[cfg(disabled_test)] // TODO: Update tests for new Portfolio and AccountInfo APIs
+   |       ^^^^^^^^^^^^^
+   |
+   = help: expected names are: `clippy`, `debug_assertions`, `doc`, `docsrs`, `doctest`, `feature`, `fmt_debug`, `miri`, `overflow_checks`, `panic`, `proc_macro`, `relocation_model`, `rustfmt`, `sanitize`, `sanitizer_cfi_generalize_pointers`, `sanitizer_cfi_normalize_integers`, `target_abi`, `target_arch`, `target_endian`, `target_env`, `target_family`, `target_feature`, `target_has_atomic`, `target_has_atomic_equal_alignment`, `target_has_atomic_load_store`, `target_os`, `target_pointer_width`, `target_thread_local`, `target_vendor`, `test`, `ub_checks`, `unix`, and `windows`
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled_test)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(disabled_test)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_reserve.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `disabled_test`
+  --> programs/router/src/instructions/router_release.rs:57:7
+   |
+57 | #[cfg(disabled_test)] // TODO: Update tests for new Portfolio and AccountInfo APIs
+   |       ^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(disabled_test)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(disabled_test)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_release.rs:10:5
+   |
+10 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `LiquidityResult`
+ --> programs/router/src/instructions/router_liquidity.rs:9:37
+  |
+9 | use adapter_core::{LiquidityIntent, LiquidityResult, RemoveSel, RiskGuard};
+  |                                     ^^^^^^^^^^^^^^^
+
+warning: unused import: `pubkey::Pubkey`
+  --> programs/router/src/instructions/router_liquidity.rs:15:5
+   |
+15 |     pubkey::Pubkey,
+   |     ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition name: `kani`
+  --> programs/router/src/authority_proofs.rs:66:7
+   |
+66 | #[cfg(kani)]
+   |       ^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(kani)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: crate-level attribute should be in the root module
+ --> programs/router/src/authority_proofs.rs:7:35
+  |
+7 | #![cfg_attr(not(feature = "std"), no_std)]
+  |                                   ^^^^^^
+  |
+  = note: `#[warn(unused_attributes)]` on by default
+
+warning: unused variable: `registry`
+   --> programs/router/src/state/model_bridge.rs:235:5
+    |
+235 |     registry: &mut SlabRegistry,
+    |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `registry`
+    --> programs/router/src/state/model_bridge.rs:1069:5
+     |
+1069 |     registry: &SlabRegistry,
+     |     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registry`
+
+warning: unused variable: `slab_pubkey`
+   --> programs/router/src/instructions/execute_cross_slab.rs:124:13
+    |
+124 |         let slab_pubkey = slab_account.key();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_slab_pubkey`
+
+warning: unused variable: `idx`
+  --> programs/router/src/instructions/liquidate_user.rs:88:10
+   |
+88 |     for (idx, bucket) in portfolio.lp_buckets.iter_mut().enumerate() {
+   |          ^^^ help: if this is intentional, prefix it with an underscore: `_idx`
+
+warning: unused variable: `seat_account`
+  --> programs/router/src/instructions/router_reserve.rs:30:5
+   |
+30 |     seat_account: &AccountInfo,
+   |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seat_account`
+
+warning: unused variable: `seat_account`
+  --> programs/router/src/instructions/router_release.rs:30:5
+   |
+30 |     seat_account: &AccountInfo,
+   |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_seat_account`
+
+warning: unused variable: `portfolio`
+  --> programs/router/src/instructions/router_liquidity.rs:42:5
+   |
+42 |     portfolio: &mut Portfolio,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_portfolio`
+
+warning: unused variable: `venue_pnl_account`
+  --> programs/router/src/instructions/router_liquidity.rs:45:5
+   |
+45 |     venue_pnl_account: &AccountInfo,
+   |     ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_venue_pnl_account`
+
+Error: Function _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE Stack offset of 196704 exceeded max offset of 4096 by 192608 bytes, please minimize large stack variables. Estimated function frame size: 197120 bytes. Exceeding the maximum stack offset may cause undefined behavior during execution.
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+warning: `percolator-router` (lib) generated 18 warnings (run `cargo fix --lib -p percolator-router` to apply 5 suggestions)
+    Finished `release` profile [optimized] target(s) in 5.88s
++ ./platform-tools/rust/bin/rustc --version
++ ./platform-tools/rust/bin/rustc --print sysroot
++ set +e
++ rustup toolchain uninstall solana
+info: uninstalling toolchain 'solana'
+info: toolchain 'solana' uninstalled
++ set -e
++ rustup toolchain link solana platform-tools/rust
++ exit 0
+/home/haidarwtf/.local/share/solana/install/active_release/bin/cargo-build-sbf
+/home/haidarwtf/.local/share/solana/install/active_release/bin/cargo-build-sbf: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=4f8546a878b31c2466ad019e524e756d6fe4760e, for GNU/Linux 3.2.0, not stripped
+ELF>P�@`x@8@"!@@PPP������ٗ�ٗ�������5�5XM�X]�X]���H���������� ppp ���DDXM�X]�X]�pS�tdppp P�td�������������Q�tdR�tdXM�X]�X]�#��wכ|Î���+��}`�|�e�mz�V�GX7����|U�qu�wo�p�Dn�`~U��vGNUG4��`!1B0Bhdh�"���p      j
+��
+   �"�A ��!�9�  ���@
+�Nz���-Y�n��"�(s�|�/�   �H�     uO�X:   �b      �t
+G
+HO�U
+�di�����        �;�
+
+k
+!?2␦
++�;�k5Z�        k       �%��b�2�
+(       "�.��pp�����bg.          ���     ��     Ne
+�M������j       �\�     ��F
+l
+2
+�
+��9
+7 F���U�
+         5A|� 'H        �, ��   �;`Kr�}��"�x<���PE�/    U�+
+�+�     6�
+          �"�fL
+Z
+b_ITM_deregisterTMCloneTable__gmon_start___ITM_registerTMCloneTable_Unwind_Resume_Unwind_Backtrace_Unwind_GetLanguageSpecificData_Unwind_GetIPInfo_Unwind_GetDataRelBase_Unwind_GetRegionStart_Unwind_SetIP_Unwind_GetIP_Unwind_DeleteException_Unwind_RaiseException_Unwind_SetGR_Unwind_GetTextRelBasepowpthread_setname_np__fgets_chklutimeschdir__ctype_tolower_locgetcontextgetrandomqsortftruncate64pthread_cond_destroy__fdelt_chklchown__cxa_finalizefgetspipe2pthread_mutex_lockstrchrfilenopthread_detachpthread_mutex_unlockmallocfreeaddrinfofseekfcntlpthread_joinconnectmemmovestrcspn__memset_chkmunmapshutdownpthread_mutex_destroymmap64recvposix_memalign__cxa_thread_atexit_impldirfdgetsocknamesetgroupsmprotectrealpathpthread_getspecificsendmsgwaitidrename__libc_start_mainsigaltstackgnu_get_libc_version__xpg_strerror_runlinkatsecure_getenvpthread_key_create__fprintf_chkstrtoulfputcstrcmpgetentropydlsymfputsopenat64sigaddsetpthread_cond_signalpthread_attr_destroybcmpsocketmakecontexttcgetattrfopenfcloseunameposix_spawn_file_actions_adddup2strcpyepoll_ctlunlinkstrspnposix_spawn_file_actions_addchdir_npswapcontextdl_iterate_phdrgmtime_rstrtokstrtolmemsetselectgetauxvalsigemptysetstrncmp__ctype_b_locshmatsched_getaffinitymemchrpthread_cond_broadcastclosedirwritevftellfreefflushpthread_setspecificstrstrpthread_attr_getstackshmgetpthread_onceposix_spawnattr_setsigdefaultrmdirsocketpairpthread_rwlock_destroyposix_spawnattr_setflagspthread_createeventfdstrncpyshmdtpthread_key_deletefchmodstrlensetpgidpthread_attr_getguardsizeposix_spawnattr_destroy__libc_current_sigrtmax__memcpy_chkfstat64unsetenvsendmemcmpgetpeernamepthread_rwlock_rdlockgai_strerrorreallocfopen64sysconfrecvmsgsetuidpthread_attr_setstacksizeexecvpstdinposix_spawnpgetaddrinforeaddir64syscallbindtcsetattrpthread_attr_setdetachstateferrorabortpthread_rwlock_initsched_yield__sprintf_chkepoll_waitforkstderrioctlposix_spawn_file_actions_destroymemcpypthread_selfsigactionsetgidgetcwdpthread_attr_init__res_initpthread_rwlock_unlockpthread_cond_timedwaitposix_spawn_file_actions_initstrrchrpthread_getattr_npgettimeofdaylstat64fdopendirfutimespollpthread_mutex_initpthread_rwlock_wrlockstatxfreadpauseperroracceptposix_spawnattr_setpgrouplseek64_exit__vfprintf_chksymlink__errno_locationpthread_cond_waitposix_spawnattr_init__isoc99_sscanfwaitpidgetsockoptfwritepthread_cond_initreaddirepoll_create1readlink__stack_chk_failcallocfchownisattymkdirfstatclock_gettimesetsockoptfeof__environ__cxa_atexit__tls_get_addrlibgcc_s.so.1libm.so.6libc.so.6ld-linux-x86-64.so.2GLIBC_2.29GLIBC_2.3GCC_3.0GCC_4.2.0GCC_3.3GLIBC_2.16GLIBC_2.15GLIBC_2.28GLIBC_2.7GLIBC_2.17GLIBC_2.33GLIBC_2.14GLIBC_2.32GLIBC_2.9GLIBC_2.4GLIBC_2.18GLIBC_2.3.4GLIBC_2.34GLIBC_2.25GLIBC_2.3.2GLIBC_2.2.5pidfd_spawnppidfd_getpid
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+�
+ ����
+�
+�ii
+�
+@P&y
+
+    �
+``'     �
+S&y
+   �
+�
+����
+���
+   ���
+
+      ii
+���!
+    ���,
+        ���7
+            ���B
+M               ii
+Wii
+ ���
+    a
+�p�28���I8���`8���w8����8����8�Ц�8���8���8���8���8� ��
+l                                                    9�0���@�+9�P�;9�`�K9�p�[9���k9���{9����9����9����9�Ч�(���/�@/�� /�0�P,���/�@/�� /�0�P,��p/�@/�� /��p/�@/�� /��p/�@/�� /��p/�@/�� /��/� .��.���.��.���.��p.�@0���/��P.�0���/���-��-���-��p@-�� -��-��,���,�0��,��@1�P1��`1���H���<�9���"�(��"�8�[�H�b�X��(�h����x�|����"H��������a�ȶ�a���a�@��B�H����h����p����������ɟ���Ο�������������з���"����������?����� ���0���8���H���X���`�� ��p���������&��������;����G�����и\��ظh����      ���}������� ����(����8��H����P����`��p�<��x�����������������������ȹƠ�ع��C7��ڠ��!�������(�$�8��H�@����P�'�`���h���x�+����
+        ri      �                                                                                              �����
+                 u␦i    �                                                                                          ���3���������Ⱥ<�غ'���'���E��;��;���N�(�X��0�X��@�W�P�i��X�i��h�`�x�}����}����i�������������q�Ȼ���л����z������������7�� ����0���@����H�¡�X���h����p�ʡ���ӡ���ܡ��������������������r������ ���0���8���X�!��`�)����1����9��������A������нE��ؽM�������b���n�� �z��(����8���H����P����`���p����x�����������������������Ⱦ���ؾ���ɢ��ɢ�����ڢ��ڢ�(���8���@���P���`���h���x�����������������������ȿ��ؿ#���#������7��7���(�U��0�^��@��P�|��X�8��h��x����������� ������������������ɣ���֣�������� ����@�j��H��X�(�h���p�����-���'����/����6���:����B����;���T����d����@�z���z�� �I�0����8����H�R�X����`����p�W��������Ƥ���`���ؤ�������i�����������r���-���:���{� �O��(�]��8���H�t��P����`���p����x���������������ǥ���������������������������������(���8�0��@�9��P��`�J��h�X��x�����`����x��������o�������������}���������������������(�æ�0�צ�@���P���X����h���x����.�8v��Gv�(�p-�8�Nv�H�]v�
+��������������������&����-����4����;���K�� �B��0���@�G��H�P��X���h�%��p�\����c����n��������y��������������������������� ���0����8����H���X����`����p�����§���ͧ�������ا���ا��������������������|���|���� ���(����8���H����P���������p���x�����'����1����;����;�������Q����Z��������� ����@����p�|��x������p���������~��P�~����~��`�~��@�~��p�~ȉ0�~Љ�؉`���~���~��~��P����~�
+��~H���~P���~x���~��@�~��0�~��f���o��8�x��@����P��`���h����x���������������������������$��ƨ�Ψ��*�(�֨�0�ި�P���X���x�����������������~ȋ �~Ћ��~��k��ʽ�0�k�P�ؽ�p�@l������������0�����E���`��8�`8�P5 � 8(�60�058��5@��3H��5P��5X��5`�P/h�P=p�p5x� 5���2
+��@0�������2�������-��=��G�� �G��0�@�@�L��H�L��X�F�h�R��p�]����M���{���������U�������������]��������ͩ���e�ߩ��/�� �m�0���8����H�u�X����`� ��p����������i���v���i��0v��f���gȕpfЕ�vؕ f��n��j��0��o�P�x��x��q���@r����q�Ж����q�����0�p�P����x�s����s��
+��������'����-��������K����H��������Q���W����� �t��(�}��8���H����P����`���p����x�Ȫ�������ت���������������������������,������C���h��(���8�Q��@����P���`�_��h�p��x���������������������������������������������ҫ�ҫ���(�ګ�0�ګ�@�P���X���h�&�x��������1�������������<���������E���������N��#�� �#��0�X�@�3��H�3��X�b�h�;��p�;����l���A����A����u���H����H����~���U����_���t������ ���0����8����X����`����p�����Ԭ����������������������������)��������?���H����� �d��(�R��8���H��6�P��6�`���p�k��x�k��������w����w��������}����}���������������������������(���8����@�í�P���`�έ�h�ڭ�x���������������������������5���5���5���5
+� ��5�0��5�@��5�P��5�`��5�p��5���6���6���6���$6���/6�У:6��E6��P6��[6��e6� �o6�0�y6�@��6�P��6�`��6�p��6�������������%��+����(�1��0�6��@����6���6��7� �7�0�␦7�@�%7�P�07�`�;7�p�F7���Q7���\7���g7���r7���}7�Х�7���7���7���7���7� ��7�0��7�@��7�P�8�
+�P�A��X�A��h��x�G����G�������M����S���� ���Z����Z����)���g����g��3��s�� �s��0�=�@���H���X�G�h����p������Q�������������[�������������e�������������o�î��î� �z�0�Ԯ�8�Ԯ�H���X���`���p������������������������������������������������������� ����(���`���p�"��x�"��������:����:��������N����N��������b����b������z���z��(���8����@����P��`����h����x����ί���ί���*�����������5�����������@�������K�(�5��0�5��@�V�P�R��X�R��h�a�x�p����p����l�������������w����������������������������8�� �8��0���@�ٰ�H�ٰ�X���h����p����������������������X����X��������x����x������.���.�� ���0�I��8�I��H���X����`����p��������������������������������f����f�������������� ����(����8�'�H�(��P�(��`�2�p�P��x�P����=�������������H�������������S���ͱ���ͱ��^�������(�i�8���@���P�t�`���h���x����+����+��������d?���d?�������=����=�������U��U�����(�f��0�f��@���P���X���h���x�x����x����������������������������������������������� ��0���@�(�H�(�X�␦�h�f��p������␦�������������␦�������������␦�������������$␦�������� �+␦�0����8����H�2␦�X�ǲ�`�ǲ�p�9␦���β���β���@␦���Բ���Բ���G␦���۲���۲���N␦���������U␦� ���(���8�\␦�H���P���`�c␦�p���x�����k␦���␦����␦����s␦���/����/����{␦���D����D����␦��P���P��(��␦�8�[��@�[��P��␦�`�q��h�q��x��␦��������������␦��������������␦��������������␦��ĳ�ĳ���␦�(�ڳ�0�ڳ�@��␦�P���X���h��␦�x����������␦����
+                                                                 �����
+                                                                     �����␦������)�����␦���8����8���␦��E�� �E��0��␦�@�T��H�T��X��␦�h�a��p�a������l����l�����
+                                   ��}����}����������������������� �#0����8�ô�H�+X�Դ�`���p�3�����������;��@����H����C���������K��������S �-��(�-��8�[H�C��P�C��`�cp�Z��x�Z����k��p����p����s������������{��������������������(��8�̵�@�̵�P��`���h��x������������������
+                  �����
+                      �������"����"������8��8����(�M��0�M��@��P�X��X�X��h��x�c����c�������w����w������������������������������˶� �˶�0��@���H���X��h����p������� ��������������#����#������0����0����#�C���C�� �+�0�[��8�[��H�3�X�i��`�i��p�;��{����{����C�������������K�������������S�����������[� �ͷ�(�ͷ�8�c�H���P���`�k�p����x������s����
+                                                                                          �����
+                                                                                              ����{���������������3���3������H���H��(���8�W��@�W��P���`�e��h�e��x�����z����z��������������������������������������������(�Ƹ�0�Ƹ�@���P�ܸ�X�ܸ�h���x����������������
+              �����
+                  �������������������3�� �3��0���@�A��H�A��X���h�]��p�]�������w����w�����
+                                                                                        ��������������������������������� �#�0�̹�8�̹�H�+�X�ع�`�ع�p�3�����������;�������������C���������   ����K������,���S� �=��(�E��8�[�H�M��P�_��`�c�p�x��x�s����l���~���������u�������������~��������ƺ�����Ժ����(���8����@���P���`�␦��h�)��x������
+                                                                                  i����
+                                                                                      i��������y����y�������>����H��������"��"����(�S��0�S��@���P�`��X�P�h���x�o����+E�������s����w��������{�������������PQ������������ ����0���@����H����X���h����p����������*0���ɻ�������һ���ٻ���������������������� ���0����8���H���X����`���p�������������
+                                                                                             ����r����r���&����?������X���X���� �b��(�j��8��H���P���`�%�p����x������-�������������5���ӹ���ӹ���=���ȼ���ڼ��@�������(�C�8�␦��@�p�P�F�`��r�h��r���%����0����I�������������N�������������U��t(�t(��\�(�6�0�6�@�c�P�6�X�6�h�k�x�$6���$6���s���/6���/6���{���:6���:6�������E6���E6����P6� �P6�0���@�;��H�;��X���h�K��p�S���������0���f��������r����~��������������������������� ���0����8�ƽ�H���X�ҽ�`޽�p������������������������������B1���␦�����������&����� �2��(�>��8��H�J��P�V��`��p�b��x�v�����������������␦��������о���!����������(���(���(�(�/�8��@��P�0�`���h���x�3���#����#����:���)����)����B���<����<����K��Q��Q���T�(�b��0�b��@�]�P�n��X�n��h�f�x�~����~����p�������������z������������������������������� ����0���@����H����X���h�ƿ�p�ƿ�������տ���տ���������������������������������� ���0���8���H���X�(��`�(��p�����:����:��������C����C��������o}���W���� ���^���^��� � �bS�(�s��8�␦ �H�Z
+�P�Z
+�`�$ �p����x������. �������������8 �������������B �����������L �������(V �8���@���P` �`���h���xj ����������t ���������~ ����������� ������� �(� ��0�    ��@� �P��X��h� �x'���'���� ��4���4���� ��E���E���� ��T���T�� �\�� \��0� �@q��Hq��X� �hz��pz���� ����������� ����������!�����������
+!������ !�0���8���H!�X���`���p(!����������2!����������<!��������F!������P!� -��(-��8Z!�H:��P:��`d!�pO��xO���n!��\���\���x!��g���g����!��z���z���!�������(�!�8���@���P�!�`���h���x�!�����������!�����������!�����������!�������!�(��0��@�!�P��X��h�!�x%���%����!��<���<����!��U���U����!��i���i��!�@s��H��X�!�hz��p�����!�����������!�����������!�����������������!�������"�������"������"������
+                      "�����"�)��       )��     "�      2��(    2��8    "�H     ?��P    ?��`    "�p     T��x    T���   "��      c���    c���    $"��    x���    x���    ("��    ����    ���
+,"�
+���
+���(
+0"�8
+solana-cargo-build-sbf 2.3.13
+platform-tools v1.48
+rustc 1.84.1
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ # Check if the .so file was created
+ls -lh target/sbpf-solana-solana/release/percolator_router.so
+
+# Check if deploy directory exists
+ls -lh target/deploy/ 2>&1 || echo "No deploy dir yet"
+
+# The binary might be in the release folder
+find target -name "*.so" -type f
+-rwxr-xr-x 2 haidarwtf haidarwtf 189K Nov  1 17:11 target/sbpf-solana-solana/release/percolator_router.so
+total 160K
+-rw------- 1 haidarwtf haidarwtf  227 Nov  1 17:11 percolator_router-keypair.json
+-rwxr-xr-x 1 haidarwtf haidarwtf 153K Nov  1 17:11 percolator_router.so
+target/deploy/percolator_router.so
+target/sbpf-solana-solana/release/percolator_router.so
+target/sbpf-solana-solana/release/deps/percolator_router.so
+haidarwtf@DESKTOP-VE5BENQ:~/percolator-v2-build$ cp target/deploy/percolator_router.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+cp target/deploy/percolator_router-keypair.json /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+ls -lh /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_router.so --keypair keypairs/router.json --url devnet
+cp: cannot create regular file '/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/': Not a directory
+cp: cannot create regular file '/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/': Not a directory
+ls: cannot access '/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/': No such file or directory
+Error: Unable to open program file: No such file or directory (os error 2)
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Create the directory
+mkdir -p /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Now copy
+cp ~/percolator-v2-build/target/deploy/percolator_router.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+cp ~/percolator-v2-build/target/deploy/percolator_router-keypair.json /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Verify
+ls -lh /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Deploy
+solana program deploy target/deploy/percolator_router.so --keypair keypairs/router.json --url devnet
+total 156K
+-rwxrwxrwx 1 haidarwtf haidarwtf  227 Nov  1 17:14 percolator_router-keypair.json
+-rwxrwxrwx 1 haidarwtf haidarwtf 153K Nov  1 17:14 percolator_router.so
+================================================================================
+Recover the intermediate account's ephemeral keypair file with
+`solana-keygen recover` and the following 12-word seed phrase:
+================================================================================
+exile dumb cat mechanic relief field marble tornado body month mosquito envelope
+================================================================================
+To resume a deploy, pass the recovered keypair as the
+[BUFFER_SIGNER] to `solana program deploy` or `solana program write-buffer'.
+Or to recover the account's lamports, use:
+================================================================================
+solana program close CEmijBMtNCe5SEVPEKj4hAraJqBN5KLz9481iYn3a35W
+================================================================================
+Error: Account rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh has insufficient funds for spend (1.08479256 SOL) + fee (0.00079 SOL)
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Check the router's public key
+solana-keygen pubkey keypairs/router.json
+
+# Airdrop 2 SOL to it (do this twice since devnet limits 1 SOL per airdrop)
+solana airdrop 1 $(solana-keygen pubkey keypairs/router.json) --url devnet
+sleep 2
+solana airdrop 1 $(solana-keygen pubkey keypairs/router.json) --url devnet
+
+# Check balance
+solana balance $(solana-keygen pubkey keypairs/router.json) --url devnet
+
+# Now try deploying again
+solana program deploy target/deploy/percolator_router.so --keypair keypairs/router.json --url devnet
+rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+Requesting airdrop of 1 SOL
+
+Signature: 3H8WypwneAeLgDR8BFkHwHrKoJvUZeND1MpHxSvyGEXzrkJnmpzFzqbU2kvgK2k5uMLCpmwyvDtFS2qm2gw9F9Au
+
+1.00114144 SOL
+Requesting airdrop of 1 SOL
+Error: airdrop request failed. This can happen when the rate limit is reached.
+1.00114144 SOL
+===========================================================================
+Recover the intermediate account's ephemeral keypair file with
+`solana-keygen recover` and the following 12-word seed phrase:
+===========================================================================
+warrior only isolate fever swarm topic small fluid scrub above cover gossip
+===========================================================================
+To resume a deploy, pass the recovered keypair as the
+[BUFFER_SIGNER] to `solana program deploy` or `solana program write-buffer'.
+Or to recover the account's lamports, use:
+===========================================================================
+solana program close AZfNdDZaufjZTC1bztxVFN5qGDrknj6JfhzXm6cBqYsm
+===========================================================================
+Error: Account rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh has insufficient funds for spend (1.08479256 SOL) + fee (0.00079 SOL)
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Check the balance to confirm
+solana balance $(solana-keygen pubkey keypairs/router.json) --url devnet
+
+# Deploy the program (this will take 1-2 minutes)
+solana program deploy target/deploy/percolator_router.so --keypair keypairs/router.json --url devnet
+3.00114144 SOL
+=========================================================================
+Recover the intermediate account's ephemeral keypair file with
+`solana-keygen recover` and the following 12-word seed phrase:
+=========================================================================
+faith today alert buffalo bonus coast cattle hollow rich help occur speed
+=========================================================================
+To resume a deploy, pass the recovered keypair as the
+[BUFFER_SIGNER] to `solana program deploy` or `solana program write-buffer'.
+Or to recover the account's lamports, use:
+=========================================================================
+solana program close BBPzMFseP3BqSNyhAWHQAsR8UVvRgeLymb5qbdK6dsTS
+=========================================================================
+Error: Account allocation failed: RPC response error -32002: Transaction simulation failed: This account may not be used to pay transaction fees;
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Create a Node.js script to convert the base58 key to JSON format
+cat > convert-key.js << 'EOF'
+const bs58 = require('bs58');
+const fs = require('fs');
+
+const base58Key = process.argv[2];
+const outputFile = process.argv[3];
+
+try {
+  const decoded = bs58.decode(base58Key);
+  const keyArray = Array.from(decoded);
+  fs.writeFileSync(outputFile, JSON.stringify(keyArray));
+  console.log(`✅ Keypair saved to ${outputFile}`);
+} catch (e) {
+  console.error('Error:', e.message);
+}
+EOF
+
+# Install bs58 if needed
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+npm install bs58
+
+# Convert your private key to JSON
+node convert-key.js "kYkNn8ApfXD9iRNE9Sy7FyemUbzUecXwmSgxMBoguBqPB6ts6oKdneuB6qtXiw13tNb8kAEWpsbnbtujGmXDmqr" keypairs/deployer.json
+
+# Verify the keypair
+solana address -k keypairs/deployer.json
+
+  --url devnetypairs/deployer.json \\ercolator_router.so \
+
+up to date, audited 56 packages in 804ms
+
+9 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+✅ Keypair saved to keypairs/deployer.json
+pErcnK9NSVQQK54BsKV4tUt8YWiKngubpJ7jxHrFtvL
+9.695389 SOL
+Error: Program's authority Some(dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi) does not match authority provided pErcnK9NSVQQK54BsKV4tUt8YWiKngubpJ7jxHrFtvL
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Convert the authority wallet's private key to JSON
+node convert-key.js "49wmfwhTk1K9LAcDafyXiFEPpzVcNWxFXDyuixqFqUTYk3ZVYj8MSyqW7wYhkDBSKsxkW9jWVHxU32DtYo9Nharx" keypairs/upgrade-authority.json
+
+# Verify it matches the expected authority
+solana address -k keypairs/upgrade-authority.json
+
+# Check if it has funds
+solana balance keypairs/upgrade-authority.json --url devnet
+
+# If it doesn't have funds, transfer from your deployer wallet
+solana transfer dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi 2 \
+  --from keypairs/deployer.json \
+  --url devnet \
+  --allow-unfunded-recipient
+
+# Now deploy with the correct authority
+solana program deploy target/deploy/percolator_router.so \
+  --program-id keypairs/router.json \
+  --upgrade-authority keypairs/upgrade-authority.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+✅ Keypair saved to keypairs/upgrade-authority.json
+dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+9.35219648 SOL
+
+Signature: 5WeYAcTENyjRsb8oztHKHE6bxwXB4QnxkwWceVTS1BwhstfnDYuLHNJH4ddXVFrzFFSxKkCLPRV6a2B22o9DrT9c
+
+⠄  38.8% | Sending 121/170 transactions             [block height 406553268; re-sign in 150 blocks]                 ⠄  38.8% | Sending 126/170 transactions             [block height 406553268; re-sign in 150 blocks]     ⠄  38.8% | Sending 131/170 transactions             [block height 406553268; re-sign i⠤  38.8% | Sending 136/170 transactions             [block height ⠠  38.8% | Sending 140/170 transactions             [block heig⠠  38.8% | Sending 146/170 transactions             [bloc⠠  38.8% | Sending 151/170 transactions             [block he⠠  38.8% | Sending 156/170 transactions             [bl⠤  38.8% | Sending 166/170 transactions             [block height 4Program Id: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+
+Signature: yp4JM8Xe9FKDpDUwFT8JQrV1SPadWif7CgPxsdoufodt57PoZE3eAeCEttod6cu2QvZ4KKVm759BydCmpxJBZu6
+
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Run the vault initialization script
+node scripts/init_vault.js
+Router Program: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+Dev Wallet: dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+
+Native SOL Mint: So11111111111111111111111111111111111111112
+Vault PDA: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc
+Bump: 255
+
+Initializing vault...
+
+Sending InitializeVault transaction...
+❌ Vault initialization failed:
+SendTransactionError: Simulation failed.
+Message: Transaction simulation failed: Error processing Instruction 0: missing required signature for instruction.
+Logs:
+[
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]",
+  "Program log: Instruction: InitializeVault",
+  "Program 11111111111111111111111111111111 invoke [2]",
+  "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+  "Program 11111111111111111111111111111111 failed: missing required signature for instruction",
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units",
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction"
+].
+Catch the `SendTransactionError` and call `getLogs()` on it for full details.
+    at Connection.sendEncodedTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8208:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async Connection.sendRawTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8173:20)
+    at async Connection.sendTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8164:12)
+    at async sendAndConfirmTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:2273:21)
+    at async initializeVault (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/scripts/init_vault.js:67:23) {
+  signature: '',
+  transactionMessage: 'Transaction simulation failed: Error processing Instruction 0: missing required signature for instruction',
+  transactionLogs: [
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]',
+    'Program log: Instruction: InitializeVault',
+    'Program 11111111111111111111111111111111 invoke [2]',
+    "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+    'Program 11111111111111111111111111111111 failed: missing required signature for instruction',
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units',
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction'
+  ]
+}
+Logs: [
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]',
+  'Program log: Instruction: InitializeVault',
+  'Program 11111111111111111111111111111111 invoke [2]',
+  "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+  'Program 11111111111111111111111111111111 failed: missing required signature for instruction',
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units',
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction'
+]
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Rebuild in Linux
+cd ~/percolator-v2-build
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | grep -E "(Finished|Error)"
+
+# Copy back to Windows
+cp target/deploy/percolator_router.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Redeploy
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_router.so \
+  --program-id keypairs/router.json \
+  --upgrade-authority keypairs/upgrade-authority.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+
+# Initialize the vault
+node scripts/init_vault.js
+Error: Function _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE Stack offset of 196704 exceeded max offset of 4096 by 192608 bytes, please minimize large stack variables. Estimated function frame size: 197120 bytes. Exceeding the maximum stack offset may cause undefined behavior during execution.
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+    Finished `release` profile [optimized] target(s) in 0.49s
+Program Id: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+
+Signature: 5cebe8N2o5RLGJPPv4KXZk1eyHdfGesAqkAUiLmzGJxcC1iqJff7YVkmLfU2jcgjLwzaA5gtn3eYgC73Hf2gPXSk
+
+Router Program: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+Dev Wallet: dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+
+Native SOL Mint: So11111111111111111111111111111111111111112
+Vault PDA: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc
+Bump: 255
+
+Initializing vault...
+
+Sending InitializeVault transaction...
+❌ Vault initialization failed:
+SendTransactionError: Simulation failed.
+Message: Transaction simulation failed: Error processing Instruction 0: missing required signature for instruction.
+Logs:
+[
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]",
+  "Program log: Instruction: InitializeVault",
+  "Program 11111111111111111111111111111111 invoke [2]",
+  "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+  "Program 11111111111111111111111111111111 failed: missing required signature for instruction",
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units",
+  "Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction"
+].
+Catch the `SendTransactionError` and call `getLogs()` on it for full details.
+    at Connection.sendEncodedTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8208:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async Connection.sendRawTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8173:20)
+    at async Connection.sendTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:8164:12)
+    at async sendAndConfirmTransaction (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/node_modules/@solana/web3.js/lib/index.cjs.js:2273:21)
+    at async initializeVault (/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/scripts/init_vault.js:67:23) {
+  signature: '',
+  transactionMessage: 'Transaction simulation failed: Error processing Instruction 0: missing required signature for instruction',
+  transactionLogs: [
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]',
+    'Program log: Instruction: InitializeVault',
+    'Program 11111111111111111111111111111111 invoke [2]',
+    "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+    'Program 11111111111111111111111111111111 failed: missing required signature for instruction',
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units',
+    'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction'
+  ]
+}
+Logs: [
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh invoke [1]',
+  'Program log: Instruction: InitializeVault',
+  'Program 11111111111111111111111111111111 invoke [2]',
+  "Allocate: 'to' account Address { address: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc, base: None } must sign",
+  'Program 11111111111111111111111111111111 failed: missing required signature for instruction',
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh consumed 3282 of 200000 compute units',
+  'Program rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh failed: missing required signature for instruction'
+]
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Copy the updated file from Windows to Linux
+cp /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/router/src/instructions/initialize_vault.rs \
+   ~/percolator-v2-build/programs/router/src/instructions/initialize_vault.rs
+
+# Verify the change is there
+grep "is_signer: true, // MUST" ~/percolator-v2-build/programs/router/src/instructions/initialize_vault.rs
+
+# Rebuild
+cd ~/percolator-v2-build
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | tail -5
+
+# Copy back to Windows
+cp target/deploy/percolator_router.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Redeploy
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_router.so \
+  --program-id keypairs/router.json \
+  --upgrade-authority keypairs/upgrade-authority.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+
+# Initialize vault
+node scripts/init_vault.js
+                    is_signer: true, // MUST be true for CreateAccount, even for PDAs
+
+Error: A function call in method _ZN17percolator_router12instructions18execute_cross_slab26process_execute_cross_slab17h1fc11de9a689f6fcE overwrites values in the frame. Please, decrease stack usage or remove parameters from the call. The function call may cause undefined behavior during execution.
+
+warning: `percolator-router` (lib) generated 18 warnings (run `cargo fix --lib -p percolator-router` to apply 5 suggestions)
+    Finished `release` profile [optimized] target(s) in 1.72s
+Program Id: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+
+Signature: 3zySnCj4kkZ5rBKcPWxGqQzbZmmqFr7cGRdZBoj8YiipJUNPboPRBCvXKavuQVskQw1gXfM4d53pvpuPtqDrht3W
+
+Router Program: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+Dev Wallet: dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+
+Native SOL Mint: So11111111111111111111111111111111111111112
+Vault PDA: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc
+Bump: 255
+
+Initializing vault...
+
+Sending InitializeVault transaction...
+✅ Vault initialized successfully!
+   Signature: 3iEjeSq6nD2hYkH3Kyk3kA5sXN4Q7RMR3yUEVujhjewy6HjDj2pmTpVzVSFpWzPz8P4YuMdZXTs3iiwvMKWt8MwT
+
+✅ Vault created: 7mb5LfMnyQC1d8bNYB3dfKn6iMW6PtQEsrVPKpFvNhCc
+   Balance: 0.00183744 SOL
+   Size: 136 bytes
+   Owner: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Copy the fixed file from Windows to Linux
+cp /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/programs/router/src/instructions/execute_cross_slab.rs \
+   ~/percolator-v2-build/programs/router/src/instructions/execute_cross_slab.rs
+
+# Verify the change
+grep "alloc::vec::Vec" ~/percolator-v2-build/programs/router/src/instructions/execute_cross_slab.rs
+
+# Rebuild
+cd ~/percolator-v2-build
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | grep -E "(Finished|Error|Stack)"
+
+# Check if the stack overflow warning is gone
+echo "--- Checking for stack warnings ---"
+cargo build-sbf --manifest-path programs/router/Cargo.toml 2>&1 | grep -i "stack"
+
+# Copy to Windows
+cp target/deploy/percolator_router.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Redeploy
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_router.so \
+  --program-id keypairs/router.json \
+  --upgrade-authority keypairs/upgrade-authority.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+    let mut exposures_buf: alloc::vec::Vec<(u16, u16, i128)> = alloc::vec::Vec::with_capacity(exposure_count);
+    Finished `release` profile [optimized] target(s) in 1.23s
+--- Checking for stack warnings ---
+Program Id: rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh
+
+Signature: gMFsuXzWxqeVnHNLbu8uc712V4MpiLenFVNz5ob7DLACqYiyeRs8TfBziFfDeAsFe6KeTsdVFVpbWWShUzT5VBn
+
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Build the oracle program
+cd ~/percolator-v2-build
+cargo build-sbf --manifest-path programs/oracle/Cargo.toml 2>&1 | tail -5
+
+# Copy to Windows
+cp target/deploy/percolator_oracle.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/
+
+# Deploy the oracle program
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_oracle.so \
+  --keypair keypairs/oracle.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+
+# Initialize the SOL/USD oracle
+node scripts/init_oracle.js
+package:   /home/haidarwtf/percolator-v2-build/programs/amm/Cargo.toml
+workspace: /home/haidarwtf/percolator-v2-build/Cargo.toml
+   Compiling pinocchio v0.9.2
+   Compiling percolator-oracle v0.1.0 (/home/haidarwtf/percolator-v2-build/programs/oracle)
+    Finished `release` profile [optimized] target(s) in 0.61s
+cp: cannot stat 'target/deploy/percolator_oracle.so': No such file or directory
+error: The argument '--keypair <KEYPAIR>' was provided more than once, but cannot be used multiple times
+
+USAGE:
+    solana program deploy --config <FILEPATH> --url <URL_OR_MONIKER> --keypair <KEYPAIR> --max-sign-attempts <max_sign_attempts>
+
+For more information try --help
+Oracle Program ID: omYNPX19JABfHteKSEdHUggAM43EtTtAA1Uw3xp9sa4
+Authority (DevWallet): dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+
+❌ Oracle program not deployed!
+
+To deploy the oracle program:
+  cd programs/oracle
+  cargo build-sbf
+  solana program deploy target/deploy/percolator_oracle.so --keypair ../../keypairs/oracle.json --url devnet
+
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$ # Find the oracle binary
+find ~/percolator-v2-build/target -name "percolator_oracle.so" -type f
+
+# Copy from the correct location
+cp ~/percolator-v2-build/target/deploy/percolator_oracle.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/ 2>/dev/null || \
+cp ~/percolator-v2-build/target/sbpf-solana-solana/release/percolator_oracle.so /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/percolator_oracle.so
+
+# Verify it copied
+ls -lh /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/percolator_oracle.so
+
+# Deploy with correct syntax (use deployer as fee payer, oracle.json as program ID)
+cd /mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2
+solana program deploy target/deploy/percolator_oracle.so \
+  --program-id keypairs/oracle.json \
+  --keypair keypairs/deployer.json \
+  --url devnet
+
+# Initialize the oracle
+node scripts/init_oracle.js
+cp: cannot stat '/home/haidarwtf/percolator-v2-build/target/sbpf-solana-solana/release/percolator_oracle.so': No such file or directory
+ls: cannot access '/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2/target/deploy/percolator_oracle.so': No such file or directory
+Error: Unable to open program file: No such file or directory (os error 2)
+Oracle Program ID: omYNPX19JABfHteKSEdHUggAM43EtTtAA1Uw3xp9sa4
+Authority (DevWallet): dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi
+
+❌ Oracle program not deployed!
+
+To deploy the oracle program:
+  cd programs/oracle
+  cargo build-sbf
+  solana program deploy target/deploy/percolator_oracle.so --keypair ../../keypairs/oracle.json --url devnet
+
+haidarwtf@DESKTOP-VE5BENQ:/mnt/c/Users/7haid/OneDrive/Desktop/percolator-v2$
+

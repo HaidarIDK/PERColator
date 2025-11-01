@@ -7,6 +7,7 @@ use pinocchio::{
 
 use crate::instructions;
 
+// The entrypoint! macro provides the global allocator and panic handler
 entrypoint!(process_instruction);
 
 /// Oracle instruction discriminators

@@ -8,9 +8,10 @@ import { TrendingUp, TrendingDown } from 'lucide-react';
 interface TradingChartProps {
   coin: Coin;
   onPriceUpdate?: (price: number) => void;
+  onCoinChange?: (coin: Coin) => void;
 }
 
-export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps) {
+export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: TradingChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -25,6 +26,12 @@ export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps)
     { value: '15m', label: '15M' },
     { value: '1h', label: '1H' },
     { value: '12h', label: '12H' },
+  ];
+
+  const coins: { value: Coin; label: string }[] = [
+    { value: 'SOL', label: 'SOL' },
+    { value: 'ETH', label: 'ETH' },
+    { value: 'BTC', label: 'BTC' },
   ];
 
   useEffect(() => {
@@ -189,9 +196,24 @@ export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps)
 
     window.addEventListener('resize', handleResize);
 
+    // Use ResizeObserver to detect container size changes (for panel resizing)
+    const resizeObserver = new ResizeObserver(() => {
+      if (chartContainerRef.current && chart && isMounted) {
+        chart.applyOptions({ 
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight 
+        });
+      }
+    });
+
+    if (chartContainerRef.current) {
+      resizeObserver.observe(chartContainerRef.current);
+    }
+
     return () => {
       isMounted = false;
       window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       if (wsCleanupRef.current) {
         wsCleanupRef.current();
       }
@@ -201,22 +223,23 @@ export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps)
 
   return (
     <div className="flex flex-col h-full bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800">
-        <div className="flex items-center gap-4">
-          <h3 className="text-xl font-bold text-white">{coin}/USDC</h3>
-          <div className="flex items-center gap-2">
-            <span className="text-2xl font-bold text-white">
+      {/* Header - Responsive Layout */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 border-b border-gray-800 gap-2 sm:gap-0">
+        {/* Price Info */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <h3 className="text-sm sm:text-lg font-bold text-white whitespace-nowrap">{coin}/USDC</h3>
+          <div className="flex items-center gap-1 sm:gap-1.5">
+            <span className="text-base sm:text-xl font-bold text-white">
               ${currentPrice.toFixed(2)}
             </span>
             {priceChange !== 0 && (
-              <div className={`flex items-center gap-1 text-sm font-semibold ${
+              <div className={`flex items-center gap-0.5 text-[10px] sm:text-xs font-semibold ${
                 priceChange >= 0 ? 'text-green-500' : 'text-red-500'
               }`}>
                 {priceChange >= 0 ? (
-                  <TrendingUp className="w-4 h-4" />
+                  <TrendingUp className="w-3 h-3" />
                 ) : (
-                  <TrendingDown className="w-4 h-4" />
+                  <TrendingDown className="w-3 h-3" />
                 )}
                 {Math.abs(priceChange).toFixed(2)}%
               </div>
@@ -224,21 +247,41 @@ export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps)
           </div>
         </div>
         
-        {/* Timeframe Selector */}
-        <div className="flex gap-1 bg-gray-800 rounded-lg p-1">
-          {timeframes.map((tf) => (
-            <button
-              key={tf.value}
-              onClick={() => setSelectedTimeframe(tf.value)}
-              className={`px-4 py-2 text-sm font-semibold rounded transition-colors ${
-                selectedTimeframe === tf.value
-                  ? 'bg-blue-600 text-white'
-                  : 'text-gray-400 hover:text-white hover:bg-gray-700'
-              }`}
-            >
-              {tf.label}
-            </button>
-          ))}
+        {/* Controls - Horizontal scroll on mobile */}
+        <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide -mx-3 px-3 sm:mx-0 sm:px-0 sm:overflow-visible">
+          {/* Coin Selector */}
+          <div className="flex gap-0.5 bg-gray-800 rounded-md p-0.5 shrink-0">
+            {coins.map((c) => (
+              <button
+                key={c.value}
+                onClick={() => onCoinChange?.(c.value)}
+                className={`px-2.5 sm:px-3 py-1 sm:py-1.5 text-[11px] sm:text-xs font-medium rounded-sm transition-all touch-manipulation ${
+                  coin === c.value
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50 active:bg-gray-700'
+                }`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Timeframe Selector */}
+          <div className="flex gap-0.5 bg-gray-800 rounded-md p-0.5 shrink-0">
+            {timeframes.map((tf) => (
+              <button
+                key={tf.value}
+                onClick={() => setSelectedTimeframe(tf.value)}
+                className={`px-2.5 sm:px-3 py-1 sm:py-1.5 text-[11px] sm:text-xs font-medium rounded-sm transition-all touch-manipulation ${
+                  selectedTimeframe === tf.value
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50 active:bg-gray-700'
+                }`}
+              >
+                {tf.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -247,8 +290,8 @@ export default function TradingChart({ coin, onPriceUpdate }: TradingChartProps)
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80 z-10">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-400">Loading chart data...</p>
+              <div className="animate-spin rounded-full h-8 w-8 sm:h-12 sm:w-12 border-b-2 border-blue-600 mx-auto mb-3 sm:mb-4"></div>
+              <p className="text-xs sm:text-sm text-gray-400">Loading chart data...</p>
             </div>
           </div>
         )}
