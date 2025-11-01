@@ -62,6 +62,7 @@ desktop.ini
 # Local configuration
 .env
 .env.local
+.env.example
 .percolator/
 tests/e2e/test-ledger/
 test-ledger/
@@ -71,3 +72,11 @@ target/
 # FORK-SAFE: All devnet setup artifacts stay here - won't conflict with upstream
 keypairs/
 keypairs/**
+
+# Website (Next.js & API)
+website/frontend/.next/
+website/frontend/out/
+website/frontend/.env*
+website/api/.env*
+website/api/dist/
+*.tsbuildinfo
