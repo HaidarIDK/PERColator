@@ -2075,7 +2075,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
 
     // Create SOL-PERP slab
     println!("{}", "  Creating SOL-PERP matcher...".dimmed());
-    let sol_slab = matcher::create_slab(
+    let sol_slab = create_slab(
         config,
         &registry_address,
         "SOL-PERP",
@@ -2087,7 +2087,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
 
     // Create BTC-PERP slab
     println!("{}", "  Creating BTC-PERP matcher...".dimmed());
-    let btc_slab = matcher::create_slab(
+    let btc_slab = create_slab(
         config,
         &registry_address,
         "BTC-PERP",
@@ -2341,6 +2341,77 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Helper: Create a slab matcher and return its pubkey
+/// Wrapper around matcher::create_matcher that returns the created slab address
+async fn create_slab(
+    config: &NetworkConfig,
+    registry: &Pubkey,
+    symbol: &str,
+    tick_size: u64,
+    lot_size: u64,
+) -> Result<Pubkey> {
+    let rpc_client = client::create_rpc_client(config);
+    let payer = &config.keypair;
+
+    // Generate new keypair for the slab account
+    let slab_keypair = Keypair::new();
+    let slab_pubkey = slab_keypair.pubkey();
+
+    // Calculate rent for ~4KB account
+    const SLAB_SIZE: usize = 4096;
+    let rent = rpc_client.get_minimum_balance_for_rent_exemption(SLAB_SIZE)?;
+
+    // Build CreateAccount instruction
+    let create_account_ix = system_instruction::create_account(
+        &payer.pubkey(),
+        &slab_pubkey,
+        rent,
+        SLAB_SIZE as u64,
+        &config.slab_program_id,
+    );
+
+    // Build initialization instruction data
+    let mut instruction_data = Vec::with_capacity(122);
+    instruction_data.push(0u8); // Initialize discriminator
+    instruction_data.extend_from_slice(payer.pubkey().as_ref()); // lp_owner
+    instruction_data.extend_from_slice(registry.as_ref()); // router_id
+
+    // Instrument (symbol padded to 32 bytes)
+    let mut instrument_bytes = [0u8; 32];
+    let symbol_bytes = symbol.as_bytes();
+    let copy_len = symbol_bytes.len().min(32);
+    instrument_bytes[..copy_len].copy_from_slice(&symbol_bytes[..copy_len]);
+    instruction_data.extend_from_slice(&instrument_bytes);
+
+    instruction_data.extend_from_slice(&100_000_000i64.to_le_bytes()); // mark_px (100.0)
+    instruction_data.extend_from_slice(&6i64.to_le_bytes()); // taker_fee_bps (6 bps)
+    instruction_data.extend_from_slice(&1_000_000i64.to_le_bytes()); // contract_size
+    instruction_data.push(0u8); // bump
+
+    // Build Initialize instruction
+    let initialize_ix = Instruction {
+        program_id: config.slab_program_id,
+        accounts: vec![
+            AccountMeta::new(slab_pubkey, true),
+            AccountMeta::new_readonly(payer.pubkey(), true),
+        ],
+        data: instruction_data,
+    };
+
+    // Send transaction
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[create_account_ix, initialize_ix],
+        Some(&payer.pubkey()),
+        &[payer, &slab_keypair],
+        recent_blockhash,
+    );
+
+    rpc_client.send_and_confirm_transaction(&transaction)?;
+
+    Ok(slab_pubkey)
+}
 
 /// Helper: Place a resting maker order on slab as a specific actor
 /// Returns the transaction signature
