@@ -1,5 +1,7 @@
 # PERColator
 
+
+
 Contract Address: CXobgfkQT6wCysehb3abkuimkmx5chS62fZew9NBpump
 
 A formally-verified perpetual exchange protocol on PERCS (Percolator Exchange Resource Coordination System) with O(1) crisis loss socialization.
@@ -466,3 +468,5 @@ Apache-2.0 (same as original Percolator)
 **Last Updated**: October 25, 2025  
 **Maintainer**: Haidar  
 **Original Author**: Toly
+
+NO WAY HOLY MOLY 
