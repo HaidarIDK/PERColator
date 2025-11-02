@@ -91,15 +91,15 @@ pub fn process_execute_cross_slab(
             return Err(PercolatorError::InvalidAccount);
         }
 
-        // cum_funding is at offset 104 in SlabHeader (after mark_px, taker_fee_bps, funding_rate)
+        // cum_funding is at offset after all other SlabHeader fields
         // SlabHeader layout: magic(8) + version(4) + seqno(4) + program_id(32) + lp_owner(32) +
         //                    router_id(32) + instrument(32) + contract_size(8) + tick(8) + lot(8) +
-        //                    mark_px(8) + taker_fee_bps(8) + funding_rate(8) = 192 bytes before cum_funding
-        // Actually, let me calculate precisely:
+        //                    min_order_size(8) + mark_px(8) + taker_fee_bps(8) + funding_rate(8)
+        // Calculation:
         // magic: 8, version: 4, seqno: 4, program_id: 32, lp_owner: 32, router_id: 32,
-        // instrument: 32, contract_size: 8, tick: 8, lot: 8, mark_px: 8, taker_fee_bps: 8,
-        // funding_rate: 8 = 192 bytes
-        const CUM_FUNDING_OFFSET: usize = 192;
+        // instrument: 32, contract_size: 8, tick: 8, lot: 8, min_order_size: 8, mark_px: 8,
+        // taker_fee_bps: 8, funding_rate: 8 = 200 bytes
+        const CUM_FUNDING_OFFSET: usize = 200;
 
         if slab_data.len() < CUM_FUNDING_OFFSET + 16 {
             msg!("Error: Slab data too small for cum_funding");
@@ -215,26 +215,29 @@ pub fn process_execute_cross_slab(
         let slab_data = slab_account
             .try_borrow_data()
             .map_err(|_| PercolatorError::InvalidAccount)?;
-        if slab_data.len() < 4 {
+        if slab_data.len() < 16 {
             msg!("Error: Invalid slab account data");
             return Err(PercolatorError::InvalidAccount);
         }
-        // Seqno is at offset 0 in SlabHeader (first field)
+        // Seqno is at offset 12 in SlabHeader (after magic[8] + version[4])
         let expected_seqno = u32::from_le_bytes([
-            slab_data[0],
-            slab_data[1],
-            slab_data[2],
-            slab_data[3],
+            slab_data[12],
+            slab_data[13],
+            slab_data[14],
+            slab_data[15],
         ]);
 
-        // Build commit_fill instruction data (22 bytes total)
-        // Layout: discriminator (1) + expected_seqno (4) + side (1) + qty (8) + limit_px (8)
-        let mut instruction_data = [0u8; 22];
+        // Build commit_fill instruction data (24 bytes total)
+        // Layout: discriminator (1) + [expected_seqno (4) + side (1) + qty (8) + limit_px (8) + tif (1) + stp (1)]
+        // Note: discriminator is parsed by entrypoint, then rest is passed to process_commit_fill_inner
+        let mut instruction_data = [0u8; 24];
         instruction_data[0] = 1; // CommitFill discriminator
         instruction_data[1..5].copy_from_slice(&expected_seqno.to_le_bytes());
         instruction_data[5] = split.side;
         instruction_data[6..14].copy_from_slice(&split.qty.to_le_bytes());
         instruction_data[14..22].copy_from_slice(&split.limit_px.to_le_bytes());
+        instruction_data[22] = 0; // time_in_force = GTC (default)
+        instruction_data[23] = 0; // self_trade_prevention = None (default)
 
         // Build account metas for CPI
         // 0. slab_account (writable)
@@ -253,7 +256,7 @@ pub fn process_execute_cross_slab(
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
-            AccountMeta::writable_signer(router_authority.key()),
+            AccountMeta::readonly(router_authority.key()),
             AccountMeta::readonly(user_account.key()),
         ];
 
@@ -281,8 +284,11 @@ pub fn process_execute_cross_slab(
             &[signer],
         );
 
-        if let Err(e) = cpi_result {
-            msg!("DEBUG: CPI failed with Solana error code");
+        if let Err(_e) = cpi_result {
+            msg!("DEBUG: CPI failed");
+            msg!("Verify: receipt PDA owned by slab program");
+            msg!("Verify: router authority PDA bump is correct");
+            msg!("Verify: slab owner matches slab program");
             return Err(PercolatorError::CpiFailed);
         }
         msg!("DEBUG: CPI succeeded");
