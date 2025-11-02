@@ -161,8 +161,11 @@ pub fn process_execute_cross_slab(
     }
 
     // Verify router_authority is the correct PDA
+    // CRITICAL: We must derive the PDA using the router program's ID (router_authority's owner)
+    // because invoke_signed validates against the executing program_id
     use crate::pda::derive_authority_pda;
-    let (expected_authority, authority_bump) = derive_authority_pda(&portfolio.router_id);
+    let router_program_id = router_authority.owner();
+    let (expected_authority, authority_bump) = derive_authority_pda(router_program_id);
     if router_authority.key() != &expected_authority {
         msg!("Error: Invalid router authority PDA");
         return Err(PercolatorError::InvalidAccount);
