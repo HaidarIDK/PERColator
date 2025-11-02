@@ -255,7 +255,7 @@ pub fn process_execute_cross_slab(
 
         // Sign CPI with router authority PDA
         use crate::pda::AUTHORITY_SEED;
-        let bump_array = [authority_bump];
+        let bump_array = [registry.bump];
         let seeds = &[
             Seed::from(AUTHORITY_SEED),
             Seed::from(&bump_array[..]),

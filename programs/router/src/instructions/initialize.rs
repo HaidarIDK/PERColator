@@ -1,6 +1,6 @@
 //! Initialize instruction - initialize router accounts
 
-use crate::pda::derive_registry_pda;
+use crate::pda::{derive_registry_pda, derive_authority_pda};
 use crate::state::SlabRegistry;
 use percolator_common::*;
 use pinocchio::{
@@ -34,7 +34,7 @@ pub fn process_initialize_registry(
     insurance_authority: &Pubkey,
 ) -> Result<(), PercolatorError> {
     // Derive the authority PDA that will be stored in the registry
-    let (authority_pda, bump) = derive_registry_pda(program_id);
+    let (authority_pda, bump) = derive_authority_pda(program_id);
 
     // NOTE: We cannot verify create_with_seed derivation in pinocchio (no_std BPF environment)
     // because Pubkey::create_with_seed is not available. The client is responsible for

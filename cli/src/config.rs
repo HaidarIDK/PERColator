@@ -57,9 +57,9 @@ impl NetworkConfig {
             .expect("Invalid router program ID");
         let slab_program_id = Pubkey::from_str("2qQsQvBDQCCBm3sULZhczQWgQekxxbgtvrJFmLGs1csJ")
             .expect("Invalid slab program ID");
-        let amm_program_id = Pubkey::from_str("2PExc2ruLp2jCN2XVFLH8vF3vWoQrSVbGMgCXAhoVkgM")
+        let amm_program_id = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
             .expect("Invalid AMM program ID");
-        let oracle_program_id = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
+        let oracle_program_id = Pubkey::from_str("BaB5cSBUFe47i1NQ5V3ijaGWmx6BCdW8yJB65hHcQRtX")
             .expect("Invalid oracle program ID");
 
         Ok(Self {
