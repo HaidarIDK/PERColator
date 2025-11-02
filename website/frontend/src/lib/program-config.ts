@@ -1,17 +1,18 @@
 // Solana program configuration for devnet
 import { PublicKey } from '@solana/web3.js';
-import configData from '../../../../keypairs/config.json';
 
 export const NETWORK = 'devnet';
 export const RPC_ENDPOINT = 'https://api.devnet.solana.com';
 
-// Program IDs from deployed programs
-export const ROUTER_PROGRAM_ID = new PublicKey(configData.programs.router.program_id);
-export const SLAB_PROGRAM_ID = new PublicKey(configData.programs.slab.program_id);
-export const AMM_PROGRAM_ID = new PublicKey(configData.programs.amm.program_id);
+// Program IDs from deployed programs (from config.json)
+export const ROUTER_PROGRAM_ID = new PublicKey('rPB77V5pFZ3dzwgmUH5jvXDwzK7FTqs92nyFgBecxMh');
+export const SLAB_PROGRAM_ID = new PublicKey('sDoE9Fb3H516S5ZuxBD1SUFgP1Z7ddXBpi9fweZb6Mk');
+export const AMM_PROGRAM_ID = new PublicKey('aMepWm9uGGtMGpufmUs8xKAVV8ES8QLPHXg1612RCmz');
+
+// Dev wallet for registry
+const DEV_WALLET = new PublicKey('dMJN4LVNZyURkXwfE5rv3c3dnD6iEeZBVXHdVxKrXPi');
 
 // Derive registry address (created with createWithSeed, not PDA!)
-const DEV_WALLET = new PublicKey(configData.keypairs.devwallet.pubkey);
 export async function getRegistryAddress(): Promise<PublicKey> {
   return await PublicKey.createWithSeed(
     DEV_WALLET,
@@ -20,24 +21,16 @@ export async function getRegistryAddress(): Promise<PublicKey> {
   );
 }
 
-// Slab accounts (order books)
+// Slab accounts (order books) - from config.json
 export const SLABS = {
-  'SOL': configData.trading_pairs['SOL-USD'].slab_address 
-    ? new PublicKey(configData.trading_pairs['SOL-USD'].slab_address) 
-    : null,
-  'ETH': configData.trading_pairs['ETH-USD'].slab_address 
-    ? new PublicKey(configData.trading_pairs['ETH-USD'].slab_address) 
-    : null,
-  'BTC': configData.trading_pairs['BTC-USD'].slab_address 
-    ? new PublicKey(configData.trading_pairs['BTC-USD'].slab_address) 
-    : null,
+  'SOL': new PublicKey('7pyCSG18qBXipgUCApPxBo48T3a1M7arhrf1AbkMtAFL'), // SOL-USD slab
+  'ETH': null, // Not created yet
+  'BTC': null, // Not created yet
 };
 
-// Oracle accounts (price feeds)
+// Oracle accounts (price feeds) - from config.json
 export const ORACLES = {
-  'SOL': configData.oracles?.['SOL-USD']?.address 
-    ? new PublicKey(configData.oracles['SOL-USD'].address) 
-    : null,
+  'SOL': new PublicKey('6YkiHPMfmr3xaxgH13anHr9V4puoRuS15LBpSeto1rDF'), // SOL-USD oracle
   'ETH': null, // Not created yet
   'BTC': null, // Not created yet
 };

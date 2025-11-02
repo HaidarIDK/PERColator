@@ -219,7 +219,7 @@ export function PortfolioPanel() {
         {portfolioAddress && (
           <div className="mb-3 p-2 bg-gray-900 rounded border border-gray-700">
             <div className="text-[10px] text-gray-400 mb-1">Portfolio Account</div>
-            <div className="text-xs font-mono text-blue-400 break-all">
+            <div className="text-[10px] font-mono text-blue-400 break-all overflow-hidden">
               {portfolioAddress.toString()}
             </div>
           </div>

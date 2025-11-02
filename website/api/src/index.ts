@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { hyperliquidRouter } from './routes/hyperliquid';
+import { slabRouter } from './routes/slab';
 import { initializeWebSocketServer } from './services/websocket-server';
 
 dotenv.config();
@@ -45,13 +46,25 @@ app.get('/', (req, res) => {
     status: 'running',
     endpoints: {
       hyperliquid: '/api/hyperliquid/*',
+      slab: '/api/slab/*',
+      health: '/api/health',
       websocket: 'ws://localhost:5001/ws'
     }
   });
 });
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    status: 'online',
+    timestamp: Date.now()
+  });
+});
+
 // Routes
 app.use('/api/hyperliquid', hyperliquidRouter);
+app.use('/api/slab', slabRouter);
 
 // 404 handler
 app.use((req, res) => {

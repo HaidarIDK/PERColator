@@ -35,14 +35,22 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
   ];
 
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    if (!chartContainerRef.current) {
+      console.log('⚠️ Chart container ref is null');
+      return;
+    }
+
+    const containerWidth = chartContainerRef.current.clientWidth;
+    const containerHeight = chartContainerRef.current.clientHeight;
+    
+    console.log(`📊 Initializing chart: ${containerWidth}x${containerHeight}`);
 
     let isMounted = true;
 
     // Create chart
     const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: chartContainerRef.current.clientHeight,
+      width: containerWidth,
+      height: containerHeight,
       layout: {
         background: { type: ColorType.Solid, color: '#0a0e1a' },
         textColor: '#9ca3af',
@@ -222,7 +230,7 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
   }, [coin, selectedTimeframe, onPriceUpdate]);
 
   return (
-    <div className="flex flex-col h-full bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
+    <div className="flex flex-col h-full min-h-[1000px] bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
       {/* Header - Responsive Layout */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 border-b border-gray-800 gap-2 sm:gap-0">
         {/* Price Info */}
@@ -286,7 +294,7 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
       </div>
 
       {/* Chart Container */}
-      <div className="flex-1 relative" ref={chartContainerRef}>
+      <div className="flex-1 relative min-h-[800px]" ref={chartContainerRef}>
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80 z-10">
             <div className="text-center">
