@@ -66,7 +66,7 @@ pub async fn place_limit_order(
 
     // Convert price and size to fixed-point (1e6 scale)
     let price_fixed = (price * 1_000_000.0) as i64;
-    let qty_fixed = size as i64;
+    let qty_fixed = (size as f64 * 1_000_000.0) as i64; // Quantities also use 1e6 scale
 
     println!("\n{}", "Building transaction...".dimmed());
 
@@ -443,7 +443,7 @@ pub async fn place_slab_order(
 
     // Convert price and size to fixed-point (1e6 scale)
     let price_fixed = (price * 1_000_000.0) as i64;
-    let qty_fixed = size as i64;
+    let qty_fixed = (size as f64 * 1_000_000.0) as i64; // Quantities also use 1e6 scale
 
     // Validation
     if price_fixed <= 0 {
@@ -459,7 +459,7 @@ pub async fn place_slab_order(
 
     // Build instruction data: discriminator (1) + side (1) + price (8) + qty (8) = 18 bytes
     let mut instruction_data = Vec::with_capacity(18);
-    instruction_data.push(2u8); // PlaceOrder discriminator
+    instruction_data.push(3u8); // PlaceOrder discriminator (per slab/src/entrypoint.rs:45)
     instruction_data.push(side_byte);
     instruction_data.extend_from_slice(&price_fixed.to_le_bytes());
     instruction_data.extend_from_slice(&qty_fixed.to_le_bytes());
@@ -531,7 +531,7 @@ pub async fn cancel_slab_order(
 
     // Build instruction data: discriminator (1) + order_id (8) = 9 bytes
     let mut instruction_data = Vec::with_capacity(9);
-    instruction_data.push(3u8); // CancelOrder discriminator
+    instruction_data.push(4u8); // CancelOrder discriminator (per slab/src/entrypoint.rs:46)
     instruction_data.extend_from_slice(&order_id.to_le_bytes());
 
     // Build account list

@@ -54,13 +54,14 @@ pub async fn create_amm(
 
     println!("{} {}", "AMM Address:".bright_cyan(), amm_pubkey);
 
-    // Calculate rent for AMM account (~4KB like slab)
-    const AMM_SIZE: usize = 4096;
+    // Calculate rent for AMM account
+    // AMM state size: SlabHeader(256) + QuoteCache(136) + AmmPool(64) = 464 bytes
+    const AMM_SIZE: usize = 464;
     let rent = rpc_client
         .get_minimum_balance_for_rent_exemption(AMM_SIZE)
         .context("Failed to get rent exemption amount")?;
 
-    println!("{} {} lamports", "Rent Required:".bright_cyan(), rent);
+    println!("{} {} lamports ({} bytes)", "Rent Required:".bright_cyan(), rent, AMM_SIZE);
 
     // Build CreateAccount instruction to allocate the AMM account
     let create_account_ix = solana_sdk::system_instruction::create_account(
@@ -166,12 +167,14 @@ pub async fn create_amm(
 }
 
 /// List AMM pools (placeholder for future implementation)
-pub async fn list_amms(config: &NetworkConfig) -> Result<()> {
-    println!("{}", "=== List AMM Pools ===".bright_green().bold());
-    println!("{} {}", "Network:".bright_cyan(), config.network);
-
-    println!("\n{}", "⚠ AMM listing not yet implemented".yellow());
-    println!("{}", "  Future: Query program accounts for AMM state".dimmed());
-
-    Ok(())
+pub async fn list_amms(_config: &NetworkConfig) -> Result<()> {
+    // TODO: Implement AMM listing functionality
+    // This should:
+    // 1. Query program accounts for AMM state using getProgramAccounts
+    // 2. Deserialize AMM account data to extract pool information
+    // 3. Display pool liquidity, fees, and active status
+    // 4. Show associated oracle and price information
+    //
+    // Not implemented - command will fail rather than silently succeed
+    anyhow::bail!("AMM listing not yet implemented - requires getProgramAccounts integration")
 }

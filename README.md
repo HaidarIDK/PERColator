@@ -1,6 +1,6 @@
 # Percolator
 
-A formally-verified perpetual futures exchange protocol for Solana with O(1) crisis loss socialization, constant product AMM, and rigorous security guarantees.
+A formally-verified perpetual futures exchange protocol for Solana with three-tier bad debt defense, constant product AMM, and rigorous security guarantees.
 
 > **⚠️ EDUCATIONAL USE ONLY**
 >
@@ -11,7 +11,9 @@ A formally-verified perpetual futures exchange protocol for Solana with O(1) cri
 Percolator is a high-assurance decentralized exchange (DEX) protocol built on Solana that combines:
 
 - **Formal Verification**: 70+ Kani proofs covering safety-critical invariants
+- **Three-Tier Bad Debt Defense**: Insurance fund → Warmup burn → Equity haircut
 - **O(1) Crisis Resolution**: Constant-time loss socialization via global scale factors
+- **Insurance Fund**: Separate vault with configurable authority, fee accrual, and payout caps
 - **Constant Product AMM**: Verified x·y=k invariant with fee accrual
 - **Cross-Margin Portfolio**: Net exposure calculation for capital efficiency
 - **Adaptive PnL Vesting**: Taylor series approximation for withdrawal throttling
@@ -98,27 +100,61 @@ Responsibilities:
 
 ## Core Features
 
-### 1. Crisis Loss Socialization (O(1))
+### 1. Three-Tier Bad Debt Defense (O(1))
 
-When the system becomes insolvent (liquidations fail to cover losses), the crisis module socializes losses across winners without iterating over users.
+When liquidations create bad debt, the protocol uses a three-tier defense mechanism to socialize losses across winners without iterating over users.
 
 **Loss Waterfall**:
-1. Warming PnL (unvested profits)
-2. Insurance fund
-3. Equity (principal + realized PnL)
+1. **Insurance Fund** (first line of defense)
+   - Separate vault PDA controlled by insurance authority
+   - Accrues fees from trades
+   - Pays out during liquidations with bad debt
+   - Configurable authority for topup/withdrawal
+   - Hard caps: per-event payout (0.5% of OI) and daily limit (3% of vault)
+
+2. **Warming PnL** (second line of defense)
+   - Burns unvested profits from users
+   - Only after insurance exhausted
+
+3. **Equity Haircut** (final resort)
+   - Global scale factor applied to all users
+   - Only after insurance AND warmup exhausted
+   - Haircut = (deficit - insurance - warmup) / total_equity
 
 ```rust
 use model_safety::crisis::*;
 
-// Crisis occurs - 200K deficit
+// Example: 150 SOL bad debt, 50 SOL insurance, 800 SOL equity
 let mut accums = Accums::new();
-accums.sigma_principal = 1_000_000;
-accums.sigma_collateral = 800_000;
+accums.sigma_principal = 800_000_000_000;        // 800 SOL
+accums.sigma_collateral = 650_000_000_000;      // 650 SOL (150 SOL deficit)
+accums.sigma_insurance = 50_000_000_000;        // 50 SOL
 
 let outcome = crisis_apply_haircuts(&mut accums);
 
-// Later, user materializes on next action
-materialize_user(&mut user, &mut accums, MaterializeParams::default());
+// Result:
+// - Insurance drawn: 50 SOL (exhausted completely)
+// - Remaining deficit: 100 SOL
+// - Haircut ratio: 100 / 800 = 12.5%
+// - User with 300 SOL → keeps 262.5 SOL (loses 37.5 SOL)
+```
+
+**Insurance Fund Operations**:
+```bash
+# Initialize exchange with custom insurance authority
+percolator init \
+  --name "Percolator DEX" \
+  --insurance-authority <PUBKEY>
+
+# Top up insurance fund (requires insurance authority)
+percolator insurance fund \
+  --exchange <EXCHANGE_PUBKEY> \
+  --amount 50000000000
+
+# Withdraw surplus (requires insurance authority, fails if uncovered bad debt)
+percolator insurance withdraw \
+  --exchange <EXCHANGE_PUBKEY> \
+  --amount 10000000000
 ```
 
 **Verified Invariants** (C1-C9):
@@ -127,8 +163,15 @@ materialize_user(&mut user, &mut accums, MaterializeParams::default());
 - C3: No over-burn (bounded haircuts)
 - C4: Materialization idempotent
 - C5: Vesting conservation
-- C8: Loss waterfall ordering
+- C8: Loss waterfall ordering (insurance → warmup → equity)
 - C9: Vesting progress guarantee
+
+**Security Guarantees**:
+- ✅ Insurance tapped BEFORE any user haircut
+- ✅ Users only haircut for (deficit - insurance) / total_equity
+- ✅ Insurance authority separate from governance
+- ✅ Withdrawal blocked if uncovered bad debt exists
+- ✅ All transfers verified via PDA derivation
 
 ### 2. Constant Product AMM (x·y=k)
 
@@ -236,7 +279,7 @@ percolator --network devnet deploy --all
 # Create exchange instance
 percolator init \
   --name "Percolator DEX" \
-  --insurance-fund 10000000000 \
+  --insurance-authority <INSURANCE_AUTHORITY_PUBKEY> \
   --maintenance-margin 500 \
   --initial-margin 1000
 
@@ -282,10 +325,21 @@ cargo test -- --nocapture
 ./target/release/percolator -n localnet test --quick
 
 # Specific test suites
-./target/release/percolator -n localnet test --crisis
-./target/release/percolator -n localnet test --liquidations
-./target/release/percolator -n localnet test --margin
+./target/release/percolator -n localnet test --crisis        # Insurance exhaustion + haircut
+./target/release/percolator -n localnet test --liquidations  # LP and user liquidations
+./target/release/percolator -n localnet test --margin        # Margin system
+./target/release/percolator -n localnet test --funding       # Funding mechanics
+
+# Standalone crisis test scripts
+./test_insurance_crisis.sh                    # Insurance topup/withdrawal
+./test_comprehensive_crisis.sh                # E2E insurance exhaustion + haircut
 ```
+
+**New Insurance Crisis Tests**:
+- `test_insurance_fund_usage()` - Verifies insurance vault PDA, TopUp/Withdraw instructions
+- `test_loss_socialization_integration()` - E2E test proving insurance exhausted before haircut
+- Shows concrete user impact: "User with 300 SOL → loses 37.5 SOL → keeps 262.5 SOL"
+- Mathematical verification: `insurance_payout + haircut_loss = bad_debt`
 
 ### Formal Verification
 
@@ -557,4 +611,4 @@ Apache-2.0
 
 **Status**: ✅ 257 tests passing | ✅ 70+ proofs verified | ✅ ALL verification gaps resolved
 
-**Last Updated**: October 30, 2025
+**Last Updated**: November 1, 2025

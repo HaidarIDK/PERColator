@@ -3,9 +3,12 @@
 //! This CLI provides end-to-end testing and deployment of the Percolator
 //! perpetual exchange protocol on Solana networks (localnet, devnet, mainnet).
 
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use solana_sdk::pubkey::Pubkey;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 mod config;
 mod client;
@@ -96,6 +99,10 @@ enum Commands {
         /// Initial margin ratio (basis points)
         #[arg(long, default_value = "1000")]
         initial_margin: u16,
+
+        /// Insurance authority pubkey (defaults to payer if not provided)
+        #[arg(long)]
+        insurance_authority: Option<String>,
     },
 
     /// Matcher/slab operations
@@ -717,8 +724,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Deploy { router, slab, amm, oracle, all, program_keypair } => {
             deploy::deploy_programs(&config, router, slab, amm, oracle, all, program_keypair).await?;
         }
-        Commands::Init { name, insurance_fund, maintenance_margin, initial_margin } => {
-            exchange::initialize_exchange(&config, name, insurance_fund, maintenance_margin, initial_margin).await?;
+        Commands::Init { name, insurance_fund, maintenance_margin, initial_margin, insurance_authority } => {
+            let insurance_auth_pubkey = insurance_authority
+                .map(|s| Pubkey::from_str(&s))
+                .transpose()
+                .context("Invalid insurance authority pubkey")?;
+            exchange::initialize_exchange(&config, name, insurance_fund, maintenance_margin, initial_margin, insurance_auth_pubkey).await?;
         }
         Commands::Matcher { command } => {
             match command {

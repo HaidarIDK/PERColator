@@ -26,6 +26,7 @@ pub async fn initialize_exchange(
     _insurance_fund: u64,
     _maintenance_margin: u16,
     _initial_margin: u16,
+    insurance_authority: Option<Pubkey>,
 ) -> Result<()> {
     println!("{}", "=== Initialize Exchange ===".bright_green().bold());
     println!("{} {}", "Network:".bright_cyan(), config.network);
@@ -94,10 +95,17 @@ pub async fn initialize_exchange(
         &config.router_program_id,         // Owner (router program)
     );
 
-    // Build instruction data: [discriminator (0u8), governance_pubkey (32 bytes)]
-    let mut instruction_data = Vec::with_capacity(33);
+    // Build instruction data: [discriminator (0u8), governance_pubkey (32 bytes), insurance_authority (32 bytes)]
+    let mut instruction_data = Vec::with_capacity(65);
     instruction_data.push(0u8); // RouterInstruction::Initialize discriminator
     instruction_data.extend_from_slice(&payer.pubkey().to_bytes()); // governance = payer for now
+
+    // Insurance authority (defaults to payer if not provided)
+    let insurance_auth = insurance_authority.unwrap_or(payer.pubkey());
+    instruction_data.extend_from_slice(&insurance_auth.to_bytes());
+
+    println!("{} {}", "Governance:".bright_cyan(), payer.pubkey());
+    println!("{} {}", "Insurance Authority:".bright_cyan(), insurance_auth);
 
     // INSTRUCTION 2: Initialize the created account
     let initialize_ix = Instruction {
@@ -189,8 +197,8 @@ pub async fn query_registry_status(
     let governance_sdk = Pubkey::new_from_array(registry.governance);
     println!("{} {}", "Router ID:".bright_cyan(), router_id_sdk);
     println!("{} {}", "Governance:".bright_cyan(), governance_sdk);
-    println!("{} {}", "Registered Slabs:".bright_cyan(), registry.slab_count);
     println!("{} {}", "Bump Seed:".bright_cyan(), registry.bump);
+    println!("{}", "  (Note: Slabs are permissionless - no whitelist)".dimmed());
 
     println!("\n{}", "=== Global Risk Parameters ===".bright_yellow());
     println!("{} {}% ({}bps)",
@@ -249,53 +257,12 @@ pub async fn query_registry_status(
         println!("{} <state details available in account data>", "State:".bright_cyan());
     }
 
-    if registry.slab_count > 0 {
-        println!("\n{}", "=== Registered Slabs ===".bright_yellow());
-        for i in 0..registry.slab_count as usize {
-            let slab = &registry.slabs[i];
-            if slab.active {
-                println!("\n{} {} {}", "Slab".bright_green(), i, ":");
-                // Convert pinocchio Pubkeys to SDK Pubkeys for display
-                let slab_id_sdk = Pubkey::new_from_array(slab.slab_id);
-                let oracle_id_sdk = Pubkey::new_from_array(slab.oracle_id);
-                println!("  {} {}", "ID:".bright_cyan(), slab_id_sdk);
-                println!("  {} {}", "Oracle:".bright_cyan(), oracle_id_sdk);
-                println!("  {} {}% / {}%",
-                    "IMR / MMR:".bright_cyan(),
-                    slab.imr as f64 / 100.0,
-                    slab.mmr as f64 / 100.0
-                );
-                println!("  {} {}bps / {}bps",
-                    "Fees (maker/taker):".bright_cyan(),
-                    slab.maker_fee_cap,
-                    slab.taker_fee_cap
-                );
-                println!("  {} {}ms",
-                    "Latency SLA:".bright_cyan(),
-                    slab.latency_sla_ms
-                );
-                println!("  {} {}",
-                    "Max Exposure:".bright_cyan(),
-                    slab.max_exposure
-                );
-                println!("  {} {}",
-                    "Registered At:".bright_cyan(),
-                    slab.registered_ts
-                );
-
-                if detailed {
-                    // Show first 8 bytes of version hash
-                    print!("  {} ", "Version Hash:".bright_cyan());
-                    for byte in &slab.version_hash[..8] {
-                        print!("{:02x}", byte);
-                    }
-                    println!("...");
-                }
-            }
-        }
-    } else {
-        println!("\n{}", "No slabs registered yet".dimmed());
-    }
+    // Note: Slab whitelist removed - slabs are now permissionless
+    // Users can interact with any slab without registration
+    // To view active slabs, query slab program accounts directly
+    println!("\n{}", "=== Slab Architecture ===".bright_yellow());
+    println!("{}", "  Slabs are permissionless - no whitelist required".bright_green());
+    println!("{}", "  Users can trade on any slab that implements the adapter interface".dimmed());
 
     println!("\n{} {}", "Status:".bright_green().bold(), "OK ✓".bright_green());
     Ok(())

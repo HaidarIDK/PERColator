@@ -174,7 +174,7 @@ pub async fn deposit_collateral(
 
     // Build instruction data: [discriminator (1u8), amount (8 bytes)]
     let mut instruction_data = Vec::with_capacity(9);
-    instruction_data.push(2u8); // RouterInstruction::Deposit discriminator
+    instruction_data.push(3u8); // RouterInstruction::Deposit discriminator
     instruction_data.extend_from_slice(&amount.to_le_bytes());
 
     // Build deposit instruction
@@ -279,7 +279,7 @@ pub async fn withdraw_collateral(
 
     // Build instruction data: [discriminator (1u8), amount (8 bytes)]
     let mut instruction_data = Vec::with_capacity(9);
-    instruction_data.push(3u8); // RouterInstruction::Withdraw discriminator
+    instruction_data.push(4u8); // RouterInstruction::Withdraw discriminator
     instruction_data.extend_from_slice(&amount.to_le_bytes());
 
     // Build withdraw instruction

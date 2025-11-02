@@ -2,11 +2,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
-use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::Signer,
     transaction::Transaction,
 };
 use std::str::FromStr;
@@ -33,6 +31,15 @@ fn derive_router_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
 /// Derive vault PDA
 fn derive_vault_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault"], program_id)
+}
+
+/// Derive receipt PDA for a slab
+/// Matches router/src/pda.rs::derive_receipt_pda
+fn derive_receipt_pda(slab: &Pubkey, user: &Pubkey, program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"receipt", slab.as_ref(), user.as_ref()],
+        program_id
+    )
 }
 
 pub async fn execute_liquidation(
@@ -81,12 +88,14 @@ pub async fn execute_liquidation(
     let health_sol = portfolio.health as f64 / 1_000_000_000.0;
     let im_sol = portfolio.im as f64 / 1_000_000_000.0;
     let mm_sol = portfolio.mm as f64 / 1_000_000_000.0;
+    let lp_bucket_count = portfolio.lp_bucket_count;
 
     println!("\n{}", "Portfolio Status:".bright_yellow().bold());
     println!("  {} {:.4} SOL", "Equity:".bright_cyan(), equity_sol);
     println!("  {} {:.4} SOL", "Health:".bright_cyan(), health_sol);
     println!("  {} {:.4} SOL", "Initial Margin:".bright_cyan(), im_sol);
     println!("  {} {:.4} SOL", "Maintenance Margin:".bright_cyan(), mm_sol);
+    println!("  {} {}", "LP Buckets:".bright_cyan(), lp_bucket_count);
 
     // Check if liquidatable
     if portfolio.health >= 0 {
@@ -96,6 +105,40 @@ pub async fn execute_liquidation(
     }
 
     println!("\n{} {}", "Portfolio is liquidatable!".bright_red().bold(), "(health < 0)".red());
+
+    // Extract LP bucket accounts for liquidation
+    println!("\n{}", "Extracting LP bucket accounts...".dimmed());
+
+    let mut slab_accounts = Vec::new();
+    let mut amm_accounts = Vec::new();
+
+    // Parse LP buckets from portfolio
+    // Portfolio.lp_buckets is at a specific offset in the account data
+    for i in 0..lp_bucket_count as usize {
+        let bucket = &portfolio.lp_buckets[i];
+
+        // Check venue kind
+        match bucket.venue.venue_kind {
+            percolator_router::state::VenueKind::Slab => {
+                // Convert pinocchio Pubkey to solana_sdk Pubkey
+                let market_id = Pubkey::new_from_array(bucket.venue.market_id);
+                slab_accounts.push(market_id);
+                println!("  {} Slab venue: {}", "•".bright_cyan(), market_id);
+            }
+            percolator_router::state::VenueKind::Amm => {
+                // Convert pinocchio Pubkey to solana_sdk Pubkey
+                let market_id = Pubkey::new_from_array(bucket.venue.market_id);
+                amm_accounts.push(market_id);
+                println!("  {} AMM venue: {}", "•".bright_cyan(), market_id);
+            }
+        }
+    }
+
+    println!("  {} {} slab(s), {} AMM(s)",
+        "Found:".bright_yellow(),
+        slab_accounts.len(),
+        amm_accounts.len()
+    );
 
     // Build and execute liquidation transaction
     println!("\n{}", "Building liquidation transaction...".dimmed());
@@ -109,31 +152,72 @@ pub async fn execute_liquidation(
         .duration_since(UNIX_EPOCH)?
         .as_secs();
 
-    // Instruction data layout (from entrypoint.rs:384-390):
+    // Instruction data layout (from entrypoint.rs:398-484):
     // - num_oracles: u8 (1 byte)
     // - num_slabs: u8 (1 byte)
+    // - num_amms: u8 (1 byte)
     // - is_preliq: u8 (1 byte, 0 = auto, 1 = force pre-liq)
     // - current_ts: u64 (8 bytes)
+    // Total: 12 bytes
     let num_oracles: u8 = 0; // No oracles configured yet
-    let num_slabs: u8 = 0;   // No slabs configured yet
+    let num_slabs: u8 = slab_accounts.len() as u8;
+    let num_amms: u8 = amm_accounts.len() as u8;
     let is_preliq: u8 = 0;   // Auto-determine mode
 
-    let mut instruction_data = Vec::with_capacity(11);
+    let mut instruction_data = Vec::with_capacity(12);
     instruction_data.push(5u8); // RouterInstruction::LiquidateUser discriminator
     instruction_data.push(num_oracles);
     instruction_data.push(num_slabs);
+    instruction_data.push(num_amms);
     instruction_data.push(is_preliq);
     instruction_data.extend_from_slice(&current_ts.to_le_bytes());
 
-    // Build account list (from entrypoint.rs:375-382)
-    // Note: Oracle and slab accounts would be added here when configured
-    let accounts = vec![
-        AccountMeta::new(portfolio_pda, false),               // Portfolio (writable)
-        AccountMeta::new(registry_pda, false),                // Registry (writable)
-        AccountMeta::new(vault_pda, false),                   // Vault (writable)
+    println!("  {} num_slabs={}, num_amms={}",
+        "Instruction data:".bright_cyan(),
+        num_slabs,
+        num_amms
+    );
+
+    // Build account list (from entrypoint.rs:398-484):
+    // Expected accounts:
+    // 0. Portfolio (writable)
+    // 1. Registry
+    // 2. Vault (writable)
+    // 3. Router authority PDA
+    // 4..4+N. Oracle accounts (N = num_oracles)
+    // 4+N..4+N+M. Slab accounts (M = num_slabs, writable)
+    // 4+N+M..4+N+2M. Receipt PDAs (M = num_slabs, writable)
+    // 4+N+2M..4+N+2M+K. AMM accounts (K = num_amms, writable)
+    let mut accounts = vec![
+        AccountMeta::new(portfolio_pda, false),                 // Portfolio (writable)
+        AccountMeta::new_readonly(registry_pda, false),         // Registry
+        AccountMeta::new(vault_pda, false),                     // Vault (writable)
         AccountMeta::new_readonly(router_authority_pda, false), // Router authority
-        // Oracle and slab accounts would be appended here based on num_oracles/num_slabs
     ];
+
+    // Add oracle accounts (num_oracles)
+    // TODO: Oracle support not yet implemented
+
+    // Add slab accounts (num_slabs, writable)
+    for slab in &slab_accounts {
+        accounts.push(AccountMeta::new(*slab, false));
+    }
+
+    // Add receipt PDAs (num_slabs, writable)
+    for slab in &slab_accounts {
+        let (receipt_pda, _) = derive_receipt_pda(slab, &user_pubkey, &config.router_program_id);
+        accounts.push(AccountMeta::new(receipt_pda, false));
+    }
+
+    // Add AMM accounts (num_amms, writable)
+    for amm in &amm_accounts {
+        accounts.push(AccountMeta::new(*amm, false));
+    }
+
+    println!("  {} {} total accounts",
+        "Account list:".bright_cyan(),
+        accounts.len()
+    );
 
     let liquidate_ix = Instruction {
         program_id: config.router_program_id,
