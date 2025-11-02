@@ -252,11 +252,16 @@ pub fn process_execute_cross_slab(
         msg!("DEBUG: Preparing CPI to slab program");
         msg!("DEBUG: Slab program ID from owner");
         msg!("DEBUG: Receipt account exists");
+        msg!("DEBUG: Receipt owner matches slab program?");
+        if receipt_account.owner() != slab_program_id {
+            msg!("ERROR: Receipt account not owned by slab program");
+            return Err(PercolatorError::InvalidAccount);
+        }
 
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
-            AccountMeta::readonly(router_authority.key()),
+            AccountMeta::readonly_signer(router_authority.key()),
             AccountMeta::readonly(user_account.key()),
         ];
 
