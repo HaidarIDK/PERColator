@@ -649,6 +649,24 @@ async fn test_registry_init(config: &NetworkConfig) -> Result<()> {
     match rpc_client.get_account_with_commitment(&registry_address, CommitmentConfig::confirmed()) {
         Ok(response) => {
             if response.value.is_some() {
+                // Verify existing registry
+                let account = response.value.unwrap();
+
+                // Verify owner is router program
+                if account.owner != config.router_program_id {
+                    anyhow::bail!(
+                        "Registry account owner mismatch: expected {}, got {}",
+                        config.router_program_id,
+                        account.owner
+                    );
+                }
+
+                // Verify account has sufficient data (SlabRegistry::LEN is quite large)
+                if account.data.len() < 32 * 3 + 8 {  // At least router_id + governance + insurance_authority + bump/padding
+                    anyhow::bail!("Registry account data too small: {} bytes", account.data.len());
+                }
+
+                println!("✓ Registry already initialized and validated");
                 return Ok(());
             }
         }
@@ -664,6 +682,28 @@ async fn test_registry_init(config: &NetworkConfig) -> Result<()> {
         1000,
         None, // insurance_authority defaults to payer
     ).await?;
+
+    // Verify initialization succeeded
+    thread::sleep(Duration::from_millis(200));
+
+    let account = rpc_client.get_account(&registry_address)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch registry account after initialization: {}", e))?;
+
+    // Verify owner is router program
+    if account.owner != config.router_program_id {
+        anyhow::bail!(
+            "Registry account owner mismatch: expected {}, got {}",
+            config.router_program_id,
+            account.owner
+        );
+    }
+
+    // Verify account has data
+    if account.data.is_empty() {
+        anyhow::bail!("Registry account has no data after initialization");
+    }
+
+    println!("✓ Registry initialized and validated: {} bytes", account.data.len());
 
     Ok(())
 }
@@ -684,6 +724,24 @@ async fn test_portfolio_init(config: &NetworkConfig) -> Result<()> {
     match rpc_client.get_account_with_commitment(&portfolio_address, CommitmentConfig::confirmed()) {
         Ok(response) => {
             if response.value.is_some() {
+                // Verify existing portfolio
+                let account = response.value.unwrap();
+
+                // Verify owner is router program
+                if account.owner != config.router_program_id {
+                    anyhow::bail!(
+                        "Portfolio account owner mismatch: expected {}, got {}",
+                        config.router_program_id,
+                        account.owner
+                    );
+                }
+
+                // Verify account has sufficient data (Portfolio has router_id + user + fields)
+                if account.data.len() < 32 * 2 + 16 {  // At least router_id + user + some fields
+                    anyhow::bail!("Portfolio account data too small: {} bytes", account.data.len());
+                }
+
+                println!("✓ Portfolio already initialized and validated");
                 return Ok(());
             }
         }
@@ -693,20 +751,116 @@ async fn test_portfolio_init(config: &NetworkConfig) -> Result<()> {
     // Initialize portfolio
     margin::initialize_portfolio(config).await?;
 
+    // Verify initialization succeeded
+    thread::sleep(Duration::from_millis(200));
+
+    let account = rpc_client.get_account(&portfolio_address)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch portfolio account after initialization: {}", e))?;
+
+    // Verify owner is router program
+    if account.owner != config.router_program_id {
+        anyhow::bail!(
+            "Portfolio account owner mismatch: expected {}, got {}",
+            config.router_program_id,
+            account.owner
+        );
+    }
+
+    // Verify account has data
+    if account.data.is_empty() {
+        anyhow::bail!("Portfolio account has no data after initialization");
+    }
+
+    println!("✓ Portfolio initialized and validated: {} bytes", account.data.len());
+
     Ok(())
 }
 
 /// Test deposit functionality
 async fn test_deposit(config: &NetworkConfig) -> Result<()> {
+    let rpc_client = client::create_rpc_client(config);
+    let user = &config.keypair;
+
+    let portfolio_seed = "portfolio";
+    let portfolio_address = Pubkey::create_with_seed(
+        &user.pubkey(),
+        portfolio_seed,
+        &config.router_program_id,
+    )?;
+
+    // Get balance before deposit
+    let balance_before = rpc_client.get_account(&portfolio_address)
+        .map(|acc| acc.lamports)
+        .unwrap_or(0);
+
     let deposit_amount = LAMPORTS_PER_SOL / 5; // 0.2 SOL (ensures enough for withdrawal + rent)
+
     margin::deposit_collateral(config, deposit_amount, None).await?;
+
+    // Verify balance increased
+    thread::sleep(Duration::from_millis(200));
+
+    let balance_after = rpc_client.get_account(&portfolio_address)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch portfolio after deposit: {}", e))?
+        .lamports;
+
+    let actual_increase = balance_after.saturating_sub(balance_before);
+
+    if actual_increase < deposit_amount {
+        anyhow::bail!(
+            "Deposit verification failed: expected at least {} lamports increase, got {}",
+            deposit_amount,
+            actual_increase
+        );
+    }
+
+    println!("✓ Deposit verified: {} lamports (before: {}, after: {})",
+        actual_increase, balance_before, balance_after);
+
     Ok(())
 }
 
 /// Test withdraw functionality
 async fn test_withdraw(config: &NetworkConfig) -> Result<()> {
+    let rpc_client = client::create_rpc_client(config);
+    let user = &config.keypair;
+
+    let portfolio_seed = "portfolio";
+    let portfolio_address = Pubkey::create_with_seed(
+        &user.pubkey(),
+        portfolio_seed,
+        &config.router_program_id,
+    )?;
+
+    // Get balance before withdrawal
+    let balance_before = rpc_client.get_account(&portfolio_address)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch portfolio before withdrawal: {}", e))?
+        .lamports;
+
     let withdraw_amount = LAMPORTS_PER_SOL / 20; // 0.05 SOL
+
     margin::withdraw_collateral(config, withdraw_amount, None).await?;
+
+    // Verify balance decreased
+    thread::sleep(Duration::from_millis(200));
+
+    let balance_after = rpc_client.get_account(&portfolio_address)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch portfolio after withdrawal: {}", e))?
+        .lamports;
+
+    let actual_decrease = balance_before.saturating_sub(balance_after);
+
+    if actual_decrease < withdraw_amount {
+        anyhow::bail!(
+            "Withdrawal verification failed: expected at least {} lamports decrease, got {}",
+            withdraw_amount,
+            actual_decrease
+        );
+    }
+
+    println!("✓ Withdrawal verified: {} lamports (before: {}, after: {})",
+        actual_decrease, balance_before, balance_after);
+
     Ok(())
 }
 
@@ -727,10 +881,18 @@ async fn test_slab_create(config: &NetworkConfig) -> Result<()> {
     matcher::create_matcher(
         config,
         registry_address.to_string(),
-        symbol,
+        symbol.clone(),
         tick_size,
         lot_size,
     ).await?;
+
+    // Note: create_matcher generates a random keypair for each slab,
+    // so we cannot easily verify the specific slab here.
+    // The fact that it doesn't error means the slab was created successfully.
+    // More detailed verification is done in test_slab_orders which creates
+    // a slab with a known keypair and verifies its state.
+
+    println!("✓ Slab created successfully for {}", symbol);
 
     Ok(())
 }
@@ -767,9 +929,9 @@ async fn test_slab_orders(config: &NetworkConfig) -> Result<()> {
     instruction_data.extend_from_slice(&payer.pubkey().to_bytes());
     instruction_data.extend_from_slice(&config.router_program_id.to_bytes());
     instruction_data.extend_from_slice(&solana_sdk::system_program::id().to_bytes());
-    instruction_data.extend_from_slice(&100000i64.to_le_bytes());
-    instruction_data.extend_from_slice(&20i64.to_le_bytes());
-    instruction_data.extend_from_slice(&1000i64.to_le_bytes());
+    instruction_data.extend_from_slice(&100000i64.to_le_bytes()); // mark_px
+    instruction_data.extend_from_slice(&20i64.to_le_bytes());     // tick_size
+    instruction_data.extend_from_slice(&1000i64.to_le_bytes());   // lot_size
     instruction_data.push(0u8);
 
     let initialize_ix = Instruction {
@@ -793,6 +955,44 @@ async fn test_slab_orders(config: &NetworkConfig) -> Result<()> {
 
     thread::sleep(Duration::from_millis(200));
 
+    // Verify slab account exists and has correct owner
+    let slab_account = rpc_client.get_account(&slab_pubkey)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch slab account after creation: {}", e))?;
+
+    if slab_account.owner != config.slab_program_id {
+        anyhow::bail!(
+            "Slab account owner mismatch: expected {}, got {}",
+            config.slab_program_id,
+            slab_account.owner
+        );
+    }
+
+    if slab_account.data.len() != SLAB_SIZE {
+        anyhow::bail!(
+            "Slab account size mismatch: expected {}, got {}",
+            SLAB_SIZE,
+            slab_account.data.len()
+        );
+    }
+
+    // Verify slab header has correct magic bytes (b"PERP10\0\0")
+    if slab_account.data.len() >= 8 {
+        let magic = &slab_account.data[0..8];
+        let expected_magic = b"PERP10\0\0";
+        if magic != expected_magic {
+            anyhow::bail!(
+                "Slab magic bytes mismatch: expected {:?}, got {:?}",
+                expected_magic,
+                magic
+            );
+        }
+    }
+
+    println!("✓ Slab account created and validated: {}", slab_pubkey);
+
+    // Get slab state before placing order
+    let slab_data_before = slab_account.data.clone();
+
     // Place order
     trading::place_slab_order(
         config,
@@ -804,8 +1004,30 @@ async fn test_slab_orders(config: &NetworkConfig) -> Result<()> {
 
     thread::sleep(Duration::from_millis(200));
 
+    // Verify slab state changed after placing order
+    let slab_account_after_place = rpc_client.get_account(&slab_pubkey)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch slab after placing order: {}", e))?;
+
+    if slab_account_after_place.data == slab_data_before {
+        anyhow::bail!("Slab state did not change after placing order");
+    }
+
+    println!("✓ Order placed successfully (slab state changed)");
+
     // Cancel order
     trading::cancel_slab_order(config, slab_pubkey.to_string(), 1).await?;
+
+    thread::sleep(Duration::from_millis(200));
+
+    // Verify slab state changed after cancellation
+    let slab_account_after_cancel = rpc_client.get_account(&slab_pubkey)
+        .map_err(|e| anyhow::anyhow!("Failed to fetch slab after cancelling order: {}", e))?;
+
+    if slab_account_after_cancel.data == slab_account_after_place.data {
+        anyhow::bail!("Slab state did not change after cancelling order");
+    }
+
+    println!("✓ Order cancelled successfully (slab state changed)");
 
     Ok(())
 }
