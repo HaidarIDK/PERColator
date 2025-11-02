@@ -167,12 +167,14 @@ pub async fn create_amm(
 }
 
 /// List AMM pools (placeholder for future implementation)
-pub async fn list_amms(config: &NetworkConfig) -> Result<()> {
-    println!("{}", "=== List AMM Pools ===".bright_green().bold());
-    println!("{} {}", "Network:".bright_cyan(), config.network);
-
-    println!("\n{}", "⚠ AMM listing not yet implemented".yellow());
-    println!("{}", "  Future: Query program accounts for AMM state".dimmed());
-
-    Ok(())
+pub async fn list_amms(_config: &NetworkConfig) -> Result<()> {
+    // TODO: Implement AMM listing functionality
+    // This should:
+    // 1. Query program accounts for AMM state using getProgramAccounts
+    // 2. Deserialize AMM account data to extract pool information
+    // 3. Display pool liquidity, fees, and active status
+    // 4. Show associated oracle and price information
+    //
+    // Not implemented - command will fail rather than silently succeed
+    anyhow::bail!("AMM listing not yet implemented - requires getProgramAccounts integration")
 }

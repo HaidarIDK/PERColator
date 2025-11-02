@@ -1246,19 +1246,28 @@ async fn test_single_position_margin(config: &NetworkConfig) -> Result<()> {
     Ok(())
 }
 
-async fn test_offsetting_positions(config: &NetworkConfig) -> Result<()> {
-    // Open long and short positions
-    // Net exposure should be reduced
-    // Margin requirement should be lower than sum of individual positions
-
-    Ok(())
+async fn test_offsetting_positions(_config: &NetworkConfig) -> Result<()> {
+    // TODO: Implement offsetting positions test
+    // This test should:
+    // 1. Open a long position on one slab
+    // 2. Open a short position on another slab (same or correlated underlying)
+    // 3. Verify net exposure is reduced
+    // 4. Verify margin requirement is lower than sum of individual positions
+    //
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: offsetting positions netting")
 }
 
-async fn test_cross_margining_benefit(config: &NetworkConfig) -> Result<()> {
-    // Open correlated positions
-    // Verify margin efficiency from portfolio margining
-
-    Ok(())
+async fn test_cross_margining_benefit(_config: &NetworkConfig) -> Result<()> {
+    // TODO: Implement cross-margining benefit test
+    // This test should:
+    // 1. Open correlated positions (e.g., long BTC-USD, short ETH-USD)
+    // 2. Calculate expected margin with and without portfolio margining
+    // 3. Verify margin requirement is reduced due to correlation
+    // 4. Measure capital efficiency improvement
+    //
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: cross-margining capital efficiency")
 }
 
 // ============================================================================
@@ -1812,11 +1821,18 @@ async fn test_loss_socialization(config: &NetworkConfig) -> Result<()> {
     Ok(())
 }
 
-async fn test_cascade_liquidations(config: &NetworkConfig) -> Result<()> {
-    // Simulate multiple accounts becoming underwater
-    // Verify liquidations are handled sequentially
-
-    Ok(())
+async fn test_cascade_liquidations(_config: &NetworkConfig) -> Result<()> {
+    // TODO: Implement cascade liquidations test
+    // This test should:
+    // 1. Set up multiple user accounts with leveraged positions
+    // 2. Simulate price movement that makes accounts underwater sequentially
+    // 3. Trigger liquidation on first account
+    // 4. Verify liquidation proceeds correctly
+    // 5. Verify subsequent accounts are liquidated in proper order
+    // 6. Verify insurance fund and loss socialization work correctly across cascade
+    //
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: cascade liquidation handling")
 }
 
 // ============================================================================
@@ -1922,8 +1938,8 @@ async fn test_amm_lp_insolvency(_config: &NetworkConfig) -> Result<()> {
     // - LP bucket margin should be reduced proportionally
     // - Other accounts should be isolated from the loss
 
-    println!("{}", "  ⚠ AMM LP insolvency tests not yet implemented (liquidity module stub)".yellow());
-    Ok(())
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: AMM LP insolvency (liquidity module required)")
 }
 
 async fn test_slab_lp_insolvency(_config: &NetworkConfig) -> Result<()> {
@@ -1946,8 +1962,8 @@ async fn test_slab_lp_insolvency(_config: &NetworkConfig) -> Result<()> {
     // - LP's positions are liquidated
     // - Isolation: other participants unaffected
 
-    println!("{}", "  ⚠ Slab LP insolvency tests not yet implemented (liquidity module stub)".yellow());
-    Ok(())
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: Slab LP insolvency (liquidity module required)")
 }
 
 async fn test_lp_trader_isolation(_config: &NetworkConfig) -> Result<()> {
@@ -1972,8 +1988,8 @@ async fn test_lp_trader_isolation(_config: &NetworkConfig) -> Result<()> {
     // - Trader's collateral is not touched
     // - Both account types use separate risk accounting
 
-    println!("{}", "  ⚠ LP/trader isolation tests not yet implemented".yellow());
-    Ok(())
+    // Currently unimplemented - failing explicitly to avoid false test coverage
+    anyhow::bail!("Test not implemented: LP/trader isolation verification")
 }
 
 /// Kitchen Sink End-to-End Test (KS-00)
