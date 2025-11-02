@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { Server } from 'http';
 import { hyperliquidWS } from './hyperliquid-websocket';
+import { handleCLIWebSocket } from './cli-websocket';
 
 export interface ClientSubscription {
   symbol: string;
@@ -32,6 +33,7 @@ export interface ServerMessage {
 
 export class WebSocketServer {
   private wss: WebSocket.Server | null = null;
+  private cliWss: WebSocket.Server | null = null;
   private clients: Map<WebSocket, Set<string>> = new Map();
   private subscriptions: Map<string, Set<WebSocket>> = new Map();
   private hyperliquidSubscriptions: Map<string, string> = new Map();
@@ -41,9 +43,16 @@ export class WebSocketServer {
   public start(): void {
     console.log('Starting WebSocket server...');
     
+    // WebSocket for chart data
     this.wss = new WebSocket.Server({ 
       server: this.server,
       path: '/ws'
+    });
+
+    // WebSocket for CLI
+    this.cliWss = new WebSocket.Server({
+      server: this.server,
+      path: '/ws/cli'
     });
 
     this.wss.on('connection', (ws: WebSocket) => {
@@ -72,19 +81,29 @@ export class WebSocketServer {
       });
     });
 
+    // Handle CLI WebSocket connections
+    this.cliWss.on('connection', (ws: WebSocket) => {
+      console.log('New CLI WebSocket client connected');
+      handleCLIWebSocket(ws);
+    });
+
     this.setupHyperliquidListeners();
 
-    console.log('WebSocket server started on /ws');
+    console.log('WebSocket server started on /ws (charts) and /ws/cli (CLI)');
   }
 
   public stop(): void {
     if (this.wss) {
       this.wss.close();
       this.wss = null;
-      this.clients.clear();
-      this.subscriptions.clear();
-      this.hyperliquidSubscriptions.clear();
     }
+    if (this.cliWss) {
+      this.cliWss.close();
+      this.cliWss = null;
+    }
+    this.clients.clear();
+    this.subscriptions.clear();
+    this.hyperliquidSubscriptions.clear();
   }
 
   private handleClientMessage(ws: WebSocket, data: Buffer): void {

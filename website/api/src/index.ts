@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { hyperliquidRouter } from './routes/hyperliquid';
 import { slabRouter } from './routes/slab';
+import aiRouter from './routes/ai';
 import { initializeWebSocketServer } from './services/websocket-server';
 
 dotenv.config();
@@ -47,6 +48,7 @@ app.get('/', (req, res) => {
     endpoints: {
       hyperliquid: '/api/hyperliquid/*',
       slab: '/api/slab/*',
+      ai: '/api/ai/*',
       health: '/api/health',
       websocket: 'ws://localhost:5001/ws'
     }
@@ -65,6 +67,7 @@ app.get('/api/health', (req, res) => {
 // Routes
 app.use('/api/hyperliquid', hyperliquidRouter);
 app.use('/api/slab', slabRouter);
+app.use('/api/ai', aiRouter);
 
 // 404 handler
 app.use((req, res) => {

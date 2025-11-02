@@ -13,7 +13,7 @@ import { AMMInterface } from '@/components/AMMInterface';
 import { LPPanel } from '@/components/LPPanel';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { Home, Plus } from 'lucide-react';
+import { Home, Plus, Terminal } from 'lucide-react';
 import Link from 'next/link';
 
 type Coin = 'SOL' | 'ETH' | 'BTC';
@@ -100,6 +100,12 @@ export default function DashboardPage() {
                 <button className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 hover:border-green-500/50 text-green-400 text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5">
                   <Plus className="w-4 h-4" />
                   <span className="hidden md:inline">Create Slab</span>
+                </button>
+              </Link>
+              <Link href="/cli">
+                <button className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 hover:border-purple-500/50 text-purple-400 text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5">
+                  <Terminal className="w-4 h-4" />
+                  <span className="hidden md:inline">CLI</span>
                 </button>
               </Link>
               <h1 className="text-base sm:text-xl font-bold bg-gradient-to-r from-blue-500 to-purple-600 bg-clip-text text-transparent">
