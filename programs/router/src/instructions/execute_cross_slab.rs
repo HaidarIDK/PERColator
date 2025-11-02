@@ -229,7 +229,6 @@ pub fn process_execute_cross_slab(
 
         // Build commit_fill instruction data (24 bytes total)
         // Layout: discriminator (1) + [expected_seqno (4) + side (1) + qty (8) + limit_px (8) + tif (1) + stp (1)]
-        // Note: discriminator is parsed by entrypoint, then rest is passed to process_commit_fill_inner
         let mut instruction_data = [0u8; 24];
         instruction_data[0] = 1; // CommitFill discriminator
         instruction_data[1..5].copy_from_slice(&expected_seqno.to_le_bytes());
@@ -239,25 +238,8 @@ pub fn process_execute_cross_slab(
         instruction_data[22] = 0; // time_in_force = GTC (default)
         instruction_data[23] = 0; // self_trade_prevention = None (default)
 
-        // Build account metas for CPI
-        // 0. slab_account (writable)
-        // 1. receipt_account (writable)
-        // 2. router_authority (signer PDA)
-        // 3. user_account (taker owner, readonly)
-        use pinocchio::{
-            instruction::{AccountMeta, Instruction},
-            program::invoke_signed,
-        };
-
-        msg!("DEBUG: Preparing CPI to slab program");
-        msg!("DEBUG: Slab program ID from owner");
-        msg!("DEBUG: Receipt account exists");
-        msg!("DEBUG: Receipt owner matches slab program?");
-        if receipt_account.owner() != slab_program_id {
-            msg!("ERROR: Receipt account not owned by slab program");
-            return Err(PercolatorError::InvalidAccount);
-        }
-
+        // Build CPI accounts: [slab_account, receipt_account, router_authority, taker_owner]
+        use pinocchio::instruction::{AccountMeta, Instruction, Seed, Signer};
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
@@ -271,10 +253,8 @@ pub fn process_execute_cross_slab(
             data: &instruction_data,
         };
 
-        // Sign the CPI with router authority PDA
+        // Sign CPI with router authority PDA
         use crate::pda::AUTHORITY_SEED;
-        use pinocchio::instruction::{Seed, Signer};
-
         let bump_array = [authority_bump];
         let seeds = &[
             Seed::from(AUTHORITY_SEED),
@@ -282,21 +262,12 @@ pub fn process_execute_cross_slab(
         ];
         let signer = Signer::from(seeds);
 
-        msg!("DEBUG: Calling invoke_signed");
-        let cpi_result = invoke_signed(
+        pinocchio::program::invoke_signed(
             &instruction,
             &[slab_account, receipt_account, router_authority, user_account],
             &[signer],
-        );
-
-        if let Err(_e) = cpi_result {
-            msg!("DEBUG: CPI failed");
-            msg!("Verify: receipt PDA owned by slab program");
-            msg!("Verify: router authority PDA bump is correct");
-            msg!("Verify: slab owner matches slab program");
-            return Err(PercolatorError::CpiFailed);
-        }
-        msg!("DEBUG: CPI succeeded");
+        )
+        .map_err(|_| PercolatorError::CpiFailed)?;
     }
 
     // Phase 3: Aggregate fills and update portfolio

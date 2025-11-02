@@ -2965,7 +2965,7 @@ async fn place_taker_order_as(
         AccountMeta::new_readonly(actor_pubkey, true),    // 1: User (signer & payer for PDA creation)
         AccountMeta::new(vault_pda, false),               // 2: Vault
         AccountMeta::new(registry_pda, false),            // 3: Registry
-        AccountMeta::new_readonly(router_authority_pda, false), // 4: Router authority
+        AccountMeta::new(router_authority_pda, false),    // 4: Router authority (writable for CPI signing)
         AccountMeta::new_readonly(system_program::ID, false),   // 5: System Program (for PDA creation)
         AccountMeta::new_readonly(*oracle, false),        // 6: Oracle account
         AccountMeta::new(*slab, false),                   // 7: Slab
