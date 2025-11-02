@@ -1140,7 +1140,7 @@ async fn test_place_buy_limit_order(config: &NetworkConfig, slab: &Pubkey) -> Re
         config,
         slab.to_string(),
         "buy".to_string(),
-        99.50,  // $99.50
+        100.0,  // $100 (aligned to tick size 20)
         5000,   // 0.005 BTC
     ).await
 }
@@ -1150,7 +1150,7 @@ async fn test_place_sell_limit_order(config: &NetworkConfig, slab: &Pubkey) -> R
         config,
         slab.to_string(),
         "sell".to_string(),
-        100.50,  // $100.50
+        120.0,  // $120 (aligned to tick size 20)
         5000,    // 0.005 BTC
     ).await
 }
@@ -1172,8 +1172,8 @@ async fn test_cancel_order(config: &NetworkConfig, slab: &Pubkey) -> Result<()> 
 }
 
 async fn test_multiple_orders(config: &NetworkConfig, slab: &Pubkey) -> Result<()> {
-    // Place 5 orders at different price levels
-    let prices = vec![98.0, 98.5, 99.0, 99.5, 100.0];
+    // Place 5 orders at different price levels (aligned to tick size 20)
+    let prices = vec![80.0, 100.0, 120.0, 140.0, 160.0];
 
     for price in prices {
         trading::place_slab_order(
@@ -1218,15 +1218,15 @@ async fn test_crossing_trade(config: &NetworkConfig, slab: &Pubkey) -> Result<()
 }
 
 async fn test_price_priority(config: &NetworkConfig, slab: &Pubkey) -> Result<()> {
-    // Place orders at different prices
-    trading::place_slab_order(config, slab.to_string(), "buy".to_string(), 99.0, 1000).await?;
+    // Place orders at different prices (aligned to tick size 20)
+    trading::place_slab_order(config, slab.to_string(), "buy".to_string(), 80.0, 1000).await?;
     thread::sleep(Duration::from_millis(100));
 
     trading::place_slab_order(config, slab.to_string(), "buy".to_string(), 100.0, 1000).await?;
     thread::sleep(Duration::from_millis(100));
 
     // Sell order should match with best price (100.0)
-    trading::place_slab_order(config, slab.to_string(), "sell".to_string(), 99.5, 1000).await?;
+    trading::place_slab_order(config, slab.to_string(), "sell".to_string(), 100.0, 1000).await?;
 
     Ok(())
 }
