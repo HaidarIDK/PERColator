@@ -66,7 +66,7 @@ pub async fn place_limit_order(
 
     // Convert price and size to fixed-point (1e6 scale)
     let price_fixed = (price * 1_000_000.0) as i64;
-    let qty_fixed = size as i64;
+    let qty_fixed = (size as f64 * 1_000_000.0) as i64; // Quantities also use 1e6 scale
 
     println!("\n{}", "Building transaction...".dimmed());
 
@@ -443,7 +443,7 @@ pub async fn place_slab_order(
 
     // Convert price and size to fixed-point (1e6 scale)
     let price_fixed = (price * 1_000_000.0) as i64;
-    let qty_fixed = size as i64;
+    let qty_fixed = (size as f64 * 1_000_000.0) as i64; // Quantities also use 1e6 scale
 
     // Validation
     if price_fixed <= 0 {
