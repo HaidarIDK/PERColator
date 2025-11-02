@@ -793,7 +793,8 @@ async fn test_deposit(config: &NetworkConfig) -> Result<()> {
         .map(|acc| acc.lamports)
         .unwrap_or(0);
 
-    let deposit_amount = LAMPORTS_PER_SOL / 5; // 0.2 SOL (ensures enough for withdrawal + rent)
+    // Deposit 0.05 SOL (50M lamports) - well under 100M limit
+    let deposit_amount = LAMPORTS_PER_SOL / 20; // 0.05 SOL
 
     margin::deposit_collateral(config, deposit_amount, None).await?;
 
