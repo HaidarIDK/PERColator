@@ -27,11 +27,19 @@ Cargo.lock
 *~
 .DS_Store
 
-# Node/NPM (if used for tooling)
+# Node/NPM
 node_modules/
 package-lock.json
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# TypeScript/JavaScript build outputs
+dist/
+build/
+*.tsbuildinfo
 
 # Temporary files
 *.tmp
@@ -62,7 +70,13 @@ desktop.ini
 # Local configuration
 .env
 .env.local
+.env.*.local
 .percolator/
 tests/e2e/test-ledger/
 test-ledger/
 target/
+
+# Next.js (covered by root .gitignore patterns)
+.next/
+out/
+.vercel/

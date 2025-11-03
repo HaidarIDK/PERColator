@@ -1,0 +1,3 @@
+# API-specific build output (dist/ is relative to this folder)
+/dist/
+
