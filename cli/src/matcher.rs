@@ -148,8 +148,13 @@ pub async fn create_matcher(
     // lp_owner: Use payer as the LP owner
     instruction_data.extend_from_slice(&payer.pubkey().to_bytes());
 
-    // router_id: Use router program ID
-    instruction_data.extend_from_slice(&config.router_program_id.to_bytes());
+    // router_id: Use router authority PDA (for CPI signing)
+    // The slab will verify this PDA signs the CommitFill CPI
+    let (router_authority_pda, _) = Pubkey::find_program_address(
+        &[b"authority"],
+        &config.router_program_id
+    );
+    instruction_data.extend_from_slice(&router_authority_pda.to_bytes());
 
     // instrument: Use a dummy instrument ID (system program for now)
     let instrument = solana_sdk::system_program::id();

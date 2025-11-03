@@ -267,6 +267,8 @@ pub fn process_execute_cross_slab(
         ];
         let signer = Signer::from(seeds);
 
+        msg!("About to invoke CPI to slab program");
+
         pinocchio::program::invoke_signed(
             &instruction,
             &[slab_account, receipt_account, router_authority, user_account],

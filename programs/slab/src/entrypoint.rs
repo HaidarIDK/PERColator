@@ -183,6 +183,7 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
     validate_owner(slab_account, program_id)?;
     validate_writable(slab_account)?;
     validate_writable(receipt_account)?;
+    validate_signer(router_signer)?;
 
     // Borrow slab state mutably
     let slab = unsafe { borrow_account_data_mut::<SlabState>(slab_account)? };

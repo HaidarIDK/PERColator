@@ -2,7 +2,7 @@
 
 use crate::state::{Portfolio, SlabRegistry, Vault};
 use percolator_common::*;
-use pinocchio::{account_info::AccountInfo, msg};
+use pinocchio::{account_info::AccountInfo, msg, pubkey::Pubkey};
 
 /// Helper to convert verification errors from KANI verified functions
 ///
@@ -422,6 +422,7 @@ fn liquidate_amm_lp_buckets(
 /// * Enforces reduce-only (no position increases)
 /// * All-or-nothing atomicity
 pub fn process_liquidate_user(
+    program_id: &Pubkey,
     portfolio: &mut Portfolio,
     portfolio_account: &AccountInfo,
     registry: &mut SlabRegistry,
@@ -587,6 +588,7 @@ pub fn process_liquidate_user(
     // and the slab program uses this to track the taker owner in the receipt PDA.
     use crate::instructions::process_execute_cross_slab;
     process_execute_cross_slab(
+        program_id,
         portfolio,
         portfolio_account,
         vault,
