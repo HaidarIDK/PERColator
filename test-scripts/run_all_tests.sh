@@ -51,25 +51,25 @@ run_test() {
 echo -e "${YELLOW}=== Core Orderbook Tests (6) ===${NC}"
 echo ""
 
-run_test "test_core_scenarios" ./test_core_scenarios.sh
-run_test "test_modify_order" ./test_modify_order.sh
-run_test "test_orderbook_extended" ./test_orderbook_extended.sh
-run_test "test_matching_engine" ./test_matching_engine.sh
-run_test "test_matching_scenarios" ./test_matching_scenarios.sh
-run_test "test_orderbook_comprehensive" ./test_orderbook_comprehensive.sh
+run_test "test_core_scenarios" ./test-scripts/test_core_scenarios.sh
+run_test "test_modify_order" ./test-scripts/test_modify_order.sh
+run_test "test_orderbook_extended" ./test-scripts/test_orderbook_extended.sh
+run_test "test_matching_engine" ./test-scripts/test_matching_engine.sh
+run_test "test_matching_scenarios" ./test-scripts/test_matching_scenarios.sh
+run_test "test_orderbook_comprehensive" ./test-scripts/test_orderbook_comprehensive.sh
 
 echo -e "${YELLOW}=== Additional Orderbook Tests (3) ===${NC}"
 echo ""
 
-run_test "test_halt_resume" ./test_halt_resume.sh
-run_test "test_orderbook_simple" ./test_orderbook_simple.sh
-run_test "test_orderbook_working" ./test_orderbook_working.sh
+run_test "test_halt_resume" ./test-scripts/test_halt_resume.sh
+run_test "test_orderbook_simple" ./test-scripts/test_orderbook_simple.sh
+run_test "test_orderbook_working" ./test-scripts/test_orderbook_working.sh
 
 echo -e "${YELLOW}=== Funding Tests (2) ===${NC}"
 echo ""
 
-run_test "test_funding_simple" ./test_funding_simple.sh
-run_test "test_funding_working" ./test_funding_working.sh
+run_test "test_funding_simple" ./test-scripts/test_funding_simple.sh
+run_test "test_funding_working" ./test-scripts/test_funding_working.sh
 
 echo ""
 echo -e "${YELLOW}======================================${NC}"

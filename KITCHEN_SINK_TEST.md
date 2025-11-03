@@ -233,7 +233,7 @@ Insurance consumed → Positive PnL haircut → Global γ (no out-of-order)
 ### Standalone Script
 ```bash
 # Dedicated runner with detailed output
-./test_kitchen_sink.sh
+./test-scripts/test_kitchen_sink.sh
 ```
 
 ### Expected Output (Current Skeleton)
