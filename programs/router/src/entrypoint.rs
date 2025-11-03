@@ -443,6 +443,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
 
     // Call the instruction handler
     process_execute_cross_slab(
+        program_id,
         portfolio,
         user_account,
         vault,
@@ -530,6 +531,7 @@ fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], d
 
     // Call the instruction handler
     process_liquidate_user(
+        program_id,
         portfolio,
         portfolio_account,
         registry,

@@ -41,6 +41,7 @@ pub struct SlabSplit {
 /// * Checks margin on net exposure (capital efficiency!)
 /// * All-or-nothing atomicity
 pub fn process_execute_cross_slab(
+    program_id: &Pubkey,
     portfolio: &mut Portfolio,
     user_account: &AccountInfo,
     vault: &mut Vault,
@@ -161,11 +162,11 @@ pub fn process_execute_cross_slab(
     }
 
     // Verify router_authority is the correct PDA
-    // CRITICAL: We must derive the PDA using the router program's ID (router_authority's owner)
+    // CRITICAL: We derive the PDA using the executing program's ID
     // because invoke_signed validates against the executing program_id
     use crate::pda::derive_authority_pda;
-    let router_program_id = router_authority.owner();
-    let (expected_authority, authority_bump) = derive_authority_pda(router_program_id);
+    let (expected_authority, authority_bump) = derive_authority_pda(program_id);
+
     if router_authority.key() != &expected_authority {
         msg!("Error: Invalid router authority PDA");
         return Err(PercolatorError::InvalidAccount);
@@ -213,6 +214,7 @@ pub fn process_execute_cross_slab(
 
         // Get slab program ID from account owner
         let slab_program_id = slab_account.owner();
+        msg!("Slab program ID from owner");
 
         // Read current seqno from slab for TOCTOU protection
         let slab_data = slab_account
@@ -257,7 +259,6 @@ pub fn process_execute_cross_slab(
         };
 
         // Sign CPI with router authority PDA
-        // Use the authority_bump derived from portfolio.router_id at line 165
         use crate::pda::AUTHORITY_SEED;
         let bump_array = [authority_bump];
         let seeds = &[
