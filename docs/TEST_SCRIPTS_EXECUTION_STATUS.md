@@ -138,13 +138,13 @@ All tests can be run to verify infrastructure setup:
 
 ```bash
 # Slab LP test (runs setup, documents LP operations)
-./test_router_lp_slab.sh
+./test-scripts/test_router_lp_slab.sh
 
 # AMM LP test (runs setup, documents LP operations)
-./test_router_lp_amm.sh
+./test-scripts/test_router_lp_amm.sh
 
 # Cross-margining test (runs setup, demonstrates architecture)
-./test_router_lp_mixed.sh
+./test-scripts/test_router_lp_mixed.sh
 ```
 
 ### Expected Output

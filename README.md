@@ -331,8 +331,8 @@ cargo test -- --nocapture
 ./target/release/percolator -n localnet test --funding       # Funding mechanics
 
 # Standalone crisis test scripts
-./test_insurance_crisis.sh                    # Insurance topup/withdrawal
-./test_comprehensive_crisis.sh                # E2E insurance exhaustion + haircut
+./test-scripts/test_insurance_crisis.sh                    # Insurance topup/withdrawal
+./test-scripts/test_comprehensive_crisis.sh                # E2E insurance exhaustion + haircut
 ```
 
 **New Insurance Crisis Tests**:

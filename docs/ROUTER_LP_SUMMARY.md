@@ -255,13 +255,13 @@ Trader → ExecuteCrossSlab → CommitFill matches LP order
 
 ```bash
 # Slab LP (isolated)
-./test_router_lp_slab.sh
+./test-scripts/test_router_lp_slab.sh
 
 # AMM LP (isolated)
-./test_router_lp_amm.sh
+./test-scripts/test_router_lp_amm.sh
 
 # Cross-margining (mixed)
-./test_router_lp_mixed.sh
+./test-scripts/test_router_lp_mixed.sh
 ```
 
 ## Next Steps for Production

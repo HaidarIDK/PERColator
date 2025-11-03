@@ -39,7 +39,7 @@ echo ""
 
 # Test 1: Core scenarios
 echo -e "${CYAN}[1/6] Running test_core_scenarios.sh...${NC}"
-if ./test_core_scenarios.sh > /tmp/test_core.log 2>&1; then
+if ./test-scripts/test_core_scenarios.sh > /tmp/test_core.log 2>&1; then
     echo -e "${GREEN}✓ test_core_scenarios.sh PASSED${NC}"
     echo "  Scenarios: 1, 2, 5, 18, 24, 28"
     ((PASSED_TESTS++))
@@ -52,7 +52,7 @@ echo ""
 
 # Test 2: Modify order
 echo -e "${CYAN}[2/6] Running test_modify_order.sh...${NC}"
-if ./test_modify_order.sh > /tmp/test_modify.log 2>&1; then
+if ./test-scripts/test_modify_order.sh > /tmp/test_modify.log 2>&1; then
     echo -e "${GREEN}✓ test_modify_order.sh PASSED${NC}"
     echo "  Scenarios: 6, 7, 31, 32"
     ((PASSED_TESTS++))
@@ -65,7 +65,7 @@ echo ""
 
 # Test 3: Extended order types
 echo -e "${CYAN}[3/6] Running test_orderbook_extended.sh...${NC}"
-if ./test_orderbook_extended.sh > /tmp/test_extended.log 2>&1; then
+if ./test-scripts/test_orderbook_extended.sh > /tmp/test_extended.log 2>&1; then
     echo -e "${GREEN}✓ test_orderbook_extended.sh PASSED${NC}"
     echo "  Scenarios: 8, 9, 12, 15, 16"
     ((PASSED_TESTS++))
@@ -78,7 +78,7 @@ echo ""
 
 # Test 4: Matching engine
 echo -e "${CYAN}[4/6] Running test_matching_engine.sh...${NC}"
-if ./test_matching_engine.sh > /tmp/test_matching_engine.log 2>&1; then
+if ./test-scripts/test_matching_engine.sh > /tmp/test_matching_engine.log 2>&1; then
     echo -e "${GREEN}✓ test_matching_engine.sh PASSED${NC}"
     echo "  Scenarios: 10, 11, 13, 14, 26"
     ((PASSED_TESTS++))
@@ -91,7 +91,7 @@ echo ""
 
 # Test 5: Matching scenarios
 echo -e "${CYAN}[5/6] Running test_matching_scenarios.sh...${NC}"
-if ./test_matching_scenarios.sh > /tmp/test_matching_scenarios.log 2>&1; then
+if ./test-scripts/test_matching_scenarios.sh > /tmp/test_matching_scenarios.log 2>&1; then
     echo -e "${GREEN}✓ test_matching_scenarios.sh PASSED${NC}"
     echo "  Scenarios: 3, 4, 19, 20, 27, 29, 33"
     ((PASSED_TESTS++))
@@ -104,7 +104,7 @@ echo ""
 
 # Test 6: Comprehensive edge cases
 echo -e "${CYAN}[6/6] Running test_orderbook_comprehensive.sh...${NC}"
-if ./test_orderbook_comprehensive.sh > /tmp/test_comprehensive.log 2>&1; then
+if ./test-scripts/test_orderbook_comprehensive.sh > /tmp/test_comprehensive.log 2>&1; then
     echo -e "${GREEN}✓ test_orderbook_comprehensive.sh PASSED${NC}"
     echo "  Scenarios: 22, 23, 25, 30, 34, 38, 39"
     ((PASSED_TESTS++))
