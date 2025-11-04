@@ -57,12 +57,14 @@ echo ""
 ROUTER_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_router-keypair.json)
 SLAB_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_slab-keypair.json)
 AMM_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_amm-keypair.json)
+ORACLE_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_oracle-keypair.json)
 
 # Close any existing programs to allow fresh deployment
 echo "🧹 Closing any existing program deployments..."
 solana program close "$ROUTER_PROGRAM_ID" 2>/dev/null || true
 solana program close "$SLAB_PROGRAM_ID" 2>/dev/null || true
 solana program close "$AMM_PROGRAM_ID" 2>/dev/null || true
+solana program close "$ORACLE_PROGRAM_ID" 2>/dev/null || true
 echo "✓ Cleanup complete"
 echo ""
 
@@ -89,6 +91,14 @@ echo "  Deploying AMM program..."
 solana program deploy target/deploy/percolator_amm.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_amm-keypair.json
 if [ $? -ne 0 ]; then
     echo "✗ AMM deployment failed"
+    exit 1
+fi
+echo ""
+
+echo "  Deploying oracle program..."
+solana program deploy target/deploy/percolator_oracle.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_oracle-keypair.json
+if [ $? -ne 0 ]; then
+    echo "✗ Oracle deployment failed"
     exit 1
 fi
 echo ""
