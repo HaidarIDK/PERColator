@@ -244,11 +244,13 @@ pub fn process_execute_cross_slab(
         instruction_data[23] = 0; // self_trade_prevention = None (default)
 
         // Build CPI accounts: [slab_account, receipt_account, router_authority, taker_owner]
+        // NOTE: router_authority is a PDA that will be signed via invoke_signed's signer parameter.
+        // Pinocchio's invoke_signed automatically marks it as a signer in the CPI.
         use pinocchio::instruction::{AccountMeta, Instruction, Seed, Signer};
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
-            AccountMeta::readonly_signer(router_authority.key()),
+            AccountMeta::writable_signer(router_authority.key()),
             AccountMeta::readonly(user_account.key()),
         ];
 
@@ -268,13 +270,20 @@ pub fn process_execute_cross_slab(
         let signer = Signer::from(seeds);
 
         msg!("About to invoke CPI to slab program");
+        msg!("Number of account metas: 4");
+        msg!("Number of account infos: 4");
+        msg!("Number of signers: 1");
 
-        pinocchio::program::invoke_signed(
+        if let Err(e) = pinocchio::program::invoke_signed(
             &instruction,
             &[slab_account, receipt_account, router_authority, user_account],
             &[signer],
-        )
-        .map_err(|_| PercolatorError::CpiFailed)?;
+        ) {
+            msg!("CPI to slab program failed - error will be logged by Solana runtime");
+            return Err(PercolatorError::CpiFailed.into());
+        }
+
+        msg!("CPI completed successfully");
     }
 
     // Phase 3: Aggregate fills and update portfolio

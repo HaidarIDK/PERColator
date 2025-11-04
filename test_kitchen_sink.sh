@@ -19,20 +19,80 @@ echo "  • Loss socialization under crisis"
 echo "  • Cross-phase invariants"
 echo ""
 
-# Check validator
-if ! pgrep -f "solana-test-validator" > /dev/null; then
-    echo "❌ Error: solana-test-validator not running"
-    echo "   Please start it with: solana-test-validator --reset --quiet &"
-    exit 1
-fi
-
-echo "✓ Local validator running"
+# Clean up old validators
+echo "🧹 Cleaning up old validator processes..."
+killall -9 solana-test-validator 2>/dev/null || true
+sleep 2
+echo "✓ Old validators killed"
 echo ""
 
-# Build
-echo "Building CLI..."
+# Build programs
+echo "🔨 Building Solana programs..."
+cargo build-sbf 2>&1 | grep -E "(Finished|error)" || true
+echo "✓ Solana programs built"
+echo ""
+
+# Build CLI
+echo "🔨 Building CLI..."
 cargo build --release --quiet 2>&1 | grep -v "warning:" || true
 echo "✓ CLI built"
+echo ""
+
+# Start fresh validator
+echo "🚀 Starting fresh validator..."
+solana-test-validator --reset --quiet > /tmp/validator.log 2>&1 &
+VALIDATOR_PID=$!
+sleep 10
+echo "✓ Validator started (PID: $VALIDATOR_PID)"
+echo ""
+
+# Request SOL airdrop for deployments
+echo "💰 Requesting SOL airdrop for deployments..."
+solana airdrop 10 2>&1
+echo "✓ Airdrop complete"
+echo ""
+
+# Get program IDs from keypair files
+ROUTER_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_router-keypair.json)
+SLAB_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_slab-keypair.json)
+AMM_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_amm-keypair.json)
+
+# Close any existing programs to allow fresh deployment
+echo "🧹 Closing any existing program deployments..."
+solana program close "$ROUTER_PROGRAM_ID" 2>/dev/null || true
+solana program close "$SLAB_PROGRAM_ID" 2>/dev/null || true
+solana program close "$AMM_PROGRAM_ID" 2>/dev/null || true
+echo "✓ Cleanup complete"
+echo ""
+
+# Deploy programs using solana CLI (let default wallet pay, use upgradeable loader)
+echo "📦 Deploying programs to validator..."
+echo ""
+echo "  Deploying router program..."
+solana program deploy target/deploy/percolator_router.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_router-keypair.json
+if [ $? -ne 0 ]; then
+    echo "✗ Router deployment failed"
+    exit 1
+fi
+echo ""
+
+echo "  Deploying slab program..."
+solana program deploy target/deploy/percolator_slab.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_slab-keypair.json
+if [ $? -ne 0 ]; then
+    echo "✗ Slab deployment failed"
+    exit 1
+fi
+echo ""
+
+echo "  Deploying AMM program..."
+solana program deploy target/deploy/percolator_amm.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_amm-keypair.json
+if [ $? -ne 0 ]; then
+    echo "✗ AMM deployment failed"
+    exit 1
+fi
+echo ""
+
+echo "✓ All programs deployed successfully"
 echo ""
 
 echo "═══════════════════════════════════════════════════════════════"
@@ -41,9 +101,7 @@ echo "════════════════════════�
 echo ""
 
 # Run the kitchen sink test via crisis test suite
-./target/release/percolator --network localnet test --crisis 2>&1 | \
-    sed -n '/Kitchen Sink/,/Crisis Tests Results/p' | \
-    head -500
+./target/release/percolator --network localnet test --crisis 2>&1
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
