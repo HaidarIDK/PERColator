@@ -75,7 +75,7 @@ log "${GREEN}  ✓ Validator is ready${NC}"
 log ""
 log "${YELLOW}═══ Step 4: Deploying Programs${NC}"
 
-# Find and deploy all .so files
+# Deploy each program explicitly to avoid loop issues
 PROGRAMS_DIR="target/deploy"
 if [ ! -d "$PROGRAMS_DIR" ]; then
     log "${RED}Programs directory not found: $PROGRAMS_DIR${NC}"
@@ -85,20 +85,57 @@ fi
 DEPLOYED=0
 FAILED=0
 
-for program in "$PROGRAMS_DIR"/*.so; do
-    if [ -f "$program" ]; then
-        PROGRAM_NAME=$(basename "$program" .so)
-        log "${BLUE}  Deploying ${PROGRAM_NAME}...${NC}"
-        if solana program deploy "$program" >> "$LOG_FILE" 2>&1; then
-            PROGRAM_ID=$(solana-keygen pubkey "$PROGRAMS_DIR/$PROGRAM_NAME-keypair.json" 2>/dev/null || echo "unknown")
-            log "${GREEN}    ✓ Deployed ${PROGRAM_NAME} (${PROGRAM_ID})${NC}"
-            ((DEPLOYED++))
-        else
-            log "${RED}    ✗ Failed to deploy ${PROGRAM_NAME}${NC}"
-            ((FAILED++))
-        fi
+# Deploy percolator_amm
+if [ -f "$PROGRAMS_DIR/percolator_amm.so" ]; then
+    log "${BLUE}  Deploying percolator_amm...${NC}"
+    if solana program deploy "$PROGRAMS_DIR/percolator_amm.so" >> "$LOG_FILE" 2>&1; then
+        PROGRAM_ID=$(solana-keygen pubkey "$PROGRAMS_DIR/percolator_amm-keypair.json" 2>/dev/null || echo "unknown")
+        log "${GREEN}    ✓ Deployed percolator_amm (${PROGRAM_ID})${NC}"
+        DEPLOYED=$((DEPLOYED + 1))
+    else
+        log "${RED}    ✗ Failed to deploy percolator_amm${NC}"
+        FAILED=$((FAILED + 1))
     fi
-done
+fi
+
+# Deploy percolator_oracle
+if [ -f "$PROGRAMS_DIR/percolator_oracle.so" ]; then
+    log "${BLUE}  Deploying percolator_oracle...${NC}"
+    if solana program deploy "$PROGRAMS_DIR/percolator_oracle.so" >> "$LOG_FILE" 2>&1; then
+        PROGRAM_ID=$(solana-keygen pubkey "$PROGRAMS_DIR/percolator_oracle-keypair.json" 2>/dev/null || echo "unknown")
+        log "${GREEN}    ✓ Deployed percolator_oracle (${PROGRAM_ID})${NC}"
+        DEPLOYED=$((DEPLOYED + 1))
+    else
+        log "${RED}    ✗ Failed to deploy percolator_oracle${NC}"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
+# Deploy percolator_router
+if [ -f "$PROGRAMS_DIR/percolator_router.so" ]; then
+    log "${BLUE}  Deploying percolator_router...${NC}"
+    if solana program deploy "$PROGRAMS_DIR/percolator_router.so" >> "$LOG_FILE" 2>&1; then
+        PROGRAM_ID=$(solana-keygen pubkey "$PROGRAMS_DIR/percolator_router-keypair.json" 2>/dev/null || echo "unknown")
+        log "${GREEN}    ✓ Deployed percolator_router (${PROGRAM_ID})${NC}"
+        DEPLOYED=$((DEPLOYED + 1))
+    else
+        log "${RED}    ✗ Failed to deploy percolator_router${NC}"
+        FAILED=$((FAILED + 1))
+    fi
+fi
+
+# Deploy percolator_slab
+if [ -f "$PROGRAMS_DIR/percolator_slab.so" ]; then
+    log "${BLUE}  Deploying percolator_slab...${NC}"
+    if solana program deploy "$PROGRAMS_DIR/percolator_slab.so" >> "$LOG_FILE" 2>&1; then
+        PROGRAM_ID=$(solana-keygen pubkey "$PROGRAMS_DIR/percolator_slab-keypair.json" 2>/dev/null || echo "unknown")
+        log "${GREEN}    ✓ Deployed percolator_slab (${PROGRAM_ID})${NC}"
+        DEPLOYED=$((DEPLOYED + 1))
+    else
+        log "${RED}    ✗ Failed to deploy percolator_slab${NC}"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 
 log ""
 log "${GREEN}Deployed: ${DEPLOYED} programs${NC}"

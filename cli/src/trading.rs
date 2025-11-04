@@ -78,8 +78,32 @@ pub async fn place_limit_order(
     let (router_authority_pda, _) = derive_router_authority_pda(&config.router_program_id);
     let (receipt_pda, _) = derive_receipt_pda(&portfolio_pda, &slab_pubkey, &config.router_program_id);
 
+    // Derive oracle PDA for this slab
+    // Oracle PDA = find_program_address([b"oracle", instrument_pubkey], oracle_program_id)
+    // We need to read the slab account to get the instrument pubkey
+    let rpc_client = client::create_rpc_client(config);
+    let slab_account_data = rpc_client.get_account_data(&slab_pubkey)
+        .context("Failed to fetch slab account")?;
+
+    // SlabHeader layout: magic(8) + version(4) + seqno(4) + program_id(32) + lp_owner(32) + router_id(32) + instrument(32)
+    // Instrument is at offset 108 (8+4+4+32+32+32)
+    const INSTRUMENT_OFFSET: usize = 108;
+    if slab_account_data.len() < INSTRUMENT_OFFSET + 32 {
+        return Err(anyhow!("Slab account data too small"));
+    }
+    let instrument_bytes: [u8; 32] = slab_account_data[INSTRUMENT_OFFSET..INSTRUMENT_OFFSET+32]
+        .try_into()
+        .map_err(|_| anyhow!("Failed to read instrument bytes"))?;
+    let instrument_pubkey = Pubkey::new_from_array(instrument_bytes);
+
+    let (oracle_pda, _) = Pubkey::find_program_address(
+        &[b"oracle", instrument_pubkey.as_ref()],
+        &config.oracle_program_id,
+    );
+
     println!("{} {}", "Portfolio PDA:".bright_cyan(), portfolio_pda);
     println!("{} {}", "Slab:".bright_cyan(), slab_pubkey);
+    println!("{} {}", "Oracle PDA:".bright_cyan(), oracle_pda);
     println!("{} {}", "Receipt PDA:".bright_cyan(), receipt_pda);
 
     // Build instruction data for ExecuteCrossSlab
@@ -87,7 +111,7 @@ pub async fn place_limit_order(
     let num_splits: u8 = 1;
 
     let mut instruction_data = Vec::with_capacity(1 + 1 + 17);
-    instruction_data.push(4u8); // RouterInstruction::ExecuteCrossSlab discriminator
+    instruction_data.push(5u8); // RouterInstruction::ExecuteCrossSlab discriminator (FIXED: was 4, should be 5)
     instruction_data.push(num_splits); // Number of splits
 
     // Split data: side (1 byte) + qty (8 bytes) + limit_px (8 bytes)
@@ -96,20 +120,26 @@ pub async fn place_limit_order(
     instruction_data.extend_from_slice(&price_fixed.to_le_bytes());
 
     // Build account list
+    // FIXED: Added system_program at index 5, oracle at index 6, and made slab writable
     // 0. [writable] Portfolio account
     // 1. [signer] User account
     // 2. [writable] Vault account
     // 3. [writable] Registry account
     // 4. [] Router authority PDA
-    // 5. [] Slab account
-    // 6. [writable] Receipt PDA
+    // 5. [] System program
+    // 6. [] Oracle account
+    // 7. [writable] Slab account (FIXED: was readonly, should be writable)
+    // 8. [writable] Receipt PDA
+    use solana_sdk::system_program;
     let accounts = vec![
         AccountMeta::new(portfolio_pda, false),
         AccountMeta::new_readonly(user_pubkey, true),
         AccountMeta::new(vault_pda, false),
         AccountMeta::new(registry_pda, false),
         AccountMeta::new_readonly(router_authority_pda, false),
-        AccountMeta::new_readonly(slab_pubkey, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+        AccountMeta::new_readonly(oracle_pda, false),
+        AccountMeta::new(slab_pubkey, false),
         AccountMeta::new(receipt_pda, false),
     ];
 

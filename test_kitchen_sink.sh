@@ -20,11 +20,12 @@ echo "  • Cross-phase invariants"
 echo ""
 
 # Clean up old validators
-echo "🧹 Cleaning up old validator processes..."
-killall -9 solana-test-validator 2>/dev/null || true
-sleep 2
-echo "✓ Old validators killed"
-echo ""
+trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+# echo "🧹 Cleaning up old validator processes..."
+# killall -9 solana-test-validator 2>/dev/null || true
+# sleep 2
+# echo "✓ Old validators killed"
+# echo ""
 
 # Build programs
 echo "🔨 Building Solana programs..."
