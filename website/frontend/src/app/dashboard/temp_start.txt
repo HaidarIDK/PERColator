@@ -1,0 +1,70 @@
+"use client"
+
+import { Particles } from "@/components/ui/particles"
+import { AuroraText } from "@/components/ui/aurora-text"
+import { motion } from "motion/react"
+import { cn } from "@/lib/utils"
+import { PROGRAM_IDS, formatAddress } from "@/lib/program-config"
+import { 
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { 
+  TrendingUp, 
+  TrendingDown, 
+  BarChart3, 
+  PieChart, 
+  ArrowUpRight, 
+  ArrowDownRight,
+  ArrowDown,
+  ChevronDown,
+  Settings,
+  Wallet,
+  DollarSign,
+  Activity,
+  Users,
+  Zap,
+  Shield,
+  Target,
+  Eye,
+  EyeOff,
+  LineChart,
+  AlertCircle,
+  Home
+} from "lucide-react"
+import { FaBitcoin, FaEthereum } from "react-icons/fa"
+import { SiSolana } from "react-icons/si"
+import { useState, useEffect, useRef, memo } from "react"
+import { useWallet, useConnection } from "@solana/wallet-adapter-react"
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui"
+import { Transaction, Connection, clusterApiUrl, SystemProgram, TransactionInstruction, PublicKey as SolanaPublicKey } from "@solana/web3.js"
+import { Buffer } from "buffer"
+import { CustomChart, TimeframeSelector } from "@/components/ui/custom-chart"
+import { CustomDataService } from "@/lib/data-service"
+import { apiClient, type MarketData, type Orderbook, type OrderbookLevel } from "@/lib/api-client"
+import Link from "next/link"
+import { ToastContainer } from "@/components/ui/toast"
+import { TradingViewChartComponent } from "@/components/charts/TradingViewChart"
+import { OrderBook } from "@/components/trading/OrderBook"
+import { PastTrades } from "@/components/trading/PastTrades"
+import { AMMInterface } from "@/components/trading/AMMInterface"
+import { CrossSlabTrader } from "@/components/trading/CrossSlabTrader"
+import { OrderForm } from "@/components/trading/OrderForm"
+import { StatusFooter } from "@/components/StatusFooter"
+
+// All components have been extracted to separate files
+
+export default function TradingDashboard() {
+  // Default to ETH chart
+  const [selectedCoin, setSelectedCoin] = useState<"ethereum" | "bitcoin" | "solana">("ethereum")
+  const [selectedTimeframe, setSelectedTimeframe] = useState<"15" | "60" | "240" | "D">("15")
+  const [ammMode, setAmmMode] = useState<"swap" | "add" | "remove">("swap")
+  const wallet = useWallet();
+  const getServerIntervalFromTimeframe = (timeframe: "15" | "60" | "240" | "D") => {
+    switch(timeframe) {
+      case "15": return "15m";
+      case "60": return "1h";
+      case "240": return "4h";
