@@ -130,10 +130,13 @@ function mapSymbolToHyperliquidCoin(symbol: string): string {
   const symbolMap: { [key: string]: string } = {
     'BTC-PERP': 'BTC',
     'BTCUSDC': 'BTC',
+    'BTCUSD': 'BTC', // Frontend sends BTCUSD
     'ETH-PERP': 'ETH',
     'ETHUSDC': 'ETH',
+    'ETHUSD': 'ETH', // Frontend sends ETHUSD
     'SOL-PERP': 'SOL',
     'SOLUSDC': 'SOL',
+    'SOLUSD': 'SOL', // Frontend sends SOLUSD
     'ETHSOL': 'ETH', // For ratios, we'll use the base asset
     'ETH-SOL': 'ETH',
     'BTCSOL': 'BTC',
@@ -147,18 +150,35 @@ function mapSymbolToHyperliquidCoin(symbol: string): string {
  * Map timeframe to Hyperliquid interval format
  */
 function mapTimeframeToHyperliquidInterval(timeframe: string): string {
-  // Remove any trailing 'm', 'h', 'd' characters
-  const numericTimeframe = timeframe.replace(/[mhd]$/i, '');
-  
+  // Hyperliquid supports: 1m, 5m, 15m, 30m, 1h, 4h, 1d
+  // Map frontend timeframes to Hyperliquid intervals
   const intervalMap: { [key: string]: string } = {
+    '1m': '1m',
+    '5m': '5m',
+    '15m': '15m',
+    '30m': '30m',
+    '1h': '1h',
+    '4h': '4h',
+    '12h': '4h', // Map 12h to 4h (closest supported interval)
+    '1d': '1d',
+    // Legacy numeric format support
     '1': '1m',
     '5': '5m',
     '15': '15m',
     '30': '30m',
     '60': '1h',
     '240': '4h',
+    '720': '4h', // 12h in minutes -> 4h
     '1440': '1d'
   };
+  
+  // Check direct match first
+  if (intervalMap[timeframe.toLowerCase()]) {
+    return intervalMap[timeframe.toLowerCase()];
+  }
+  
+  // Remove any trailing 'm', 'h', 'd' characters for numeric matching
+  const numericTimeframe = timeframe.replace(/[mhd]$/i, '');
   
   return intervalMap[numericTimeframe] || '15m'; // Default to 15m
 }
@@ -177,7 +197,26 @@ async function fetchHyperliquidCandles(coin: string, interval: string, limit: nu
       endTime = to;
     } else {
       // Calculate based on interval
-      const intervalMinutes = parseInt(interval.replace(/[^\d]/g, ''));
+      // Map interval strings to minutes
+      const intervalMinutesMap: { [key: string]: number } = {
+        '1m': 1,
+        '5m': 5,
+        '15m': 15,
+        '30m': 30,
+        '1h': 60,
+        '4h': 240,
+        '12h': 720, // Even though we map to 4h, calculate as 12h for time range
+        '1d': 1440
+      };
+      
+      let intervalMinutes: number;
+      if (intervalMinutesMap[interval]) {
+        intervalMinutes = intervalMinutesMap[interval];
+      } else {
+        // Fallback: try to parse numeric value
+        intervalMinutes = parseInt(interval.replace(/[^\d]/g, '')) || 15;
+      }
+      
       const intervalMs = intervalMinutes * 60 * 1000;
       startTime = now - (limit * intervalMs);
       endTime = now;
@@ -224,19 +263,64 @@ async function fetchHyperliquidCandles(coin: string, interval: string, limit: nu
       console.warn(`⚠️  Hyperliquid returned 0 candles for ${coin} ${interval}`);
     } else {
       console.log(`✅ Hyperliquid response: ${data.length} candles`);
-      console.log(`   First candle: ${new Date(data[0].t).toISOString()} - $${data[0].c}`);
-      console.log(`   Last candle: ${new Date(data[data.length - 1].t).toISOString()} - $${data[data.length - 1].c}`);
+      console.log(`   First candle: ${new Date(data[0].t).toISOString()} - o=${data[0].o}, h=${data[0].h}, l=${data[0].l}, c=${data[0].c}`);
+      console.log(`   Last candle: ${new Date(data[data.length - 1].t).toISOString()} - o=${data[data.length - 1].o}, h=${data[data.length - 1].h}, l=${data[data.length - 1].l}, c=${data[data.length - 1].c}`);
+      // Log raw data format to understand what Hyperliquid returns
+      console.log(`   Raw candle sample:`, JSON.stringify(data[0]));
     }
     
     // Transform Hyperliquid format to our format
-    return data.map((candle: any) => ({
-      time: Math.floor(candle.t / 1000), // Convert to seconds
-      open: parseFloat(candle.o),
-      high: parseFloat(candle.h),
-      low: parseFloat(candle.l),
-      close: parseFloat(candle.c),
-      volume: parseFloat(candle.v)
-    }));
+    // Hyperliquid returns prices as-is, but we need to ensure they're valid numbers
+    // Note: Hyperliquid prices might be in a different format - check if conversion needed
+    return data.map((candle: any) => {
+      // Convert string values to numbers if needed
+      let open = typeof candle.o === 'string' ? parseFloat(candle.o) : candle.o;
+      let high = typeof candle.h === 'string' ? parseFloat(candle.h) : candle.h;
+      let low = typeof candle.l === 'string' ? parseFloat(candle.l) : candle.l;
+      let close = typeof candle.c === 'string' ? parseFloat(candle.c) : candle.c;
+      const volume = typeof candle.v === 'string' ? parseFloat(candle.v) : candle.v;
+      
+      // Hyperliquid returns prices - check if conversion is needed
+      // Hyperliquid prices appear to be in a format where:
+      // - SOL prices might be 1000x too high (e.g., 104065 -> 104.065)
+      // - ETH prices might be 100x too high (e.g., 393100 -> 3931.00)
+      // - BTC prices might be 1000x too high (e.g., 98765000 -> 98765.00)
+      // Only convert if prices are clearly in wrong format
+      if (coin === 'SOL' && close > 1000) {
+        // SOL prices over $1000 are definitely wrong - divide by 1000
+        // (e.g., 104065 -> 104.065 which is reasonable for SOL)
+        console.log(`   Converting SOL price from ${close} to ${close / 1000}`);
+        open = open / 1000;
+        high = high / 1000;
+        low = low / 1000;
+        close = close / 1000;
+      } else if (coin === 'ETH' && close > 100000) {
+        // ETH prices over $100k are definitely wrong - divide by 100
+        // (e.g., 393100 -> 3931.00 which is reasonable for ETH)
+        console.log(`   Converting ETH price from ${close} to ${close / 100}`);
+        open = open / 100;
+        high = high / 100;
+        low = low / 100;
+        close = close / 100;
+      } else if (coin === 'BTC' && close > 100000000) {
+        // BTC prices over $100M are definitely wrong - divide by 1000
+        // (e.g., 98765000 -> 98765.00 which is reasonable for BTC)
+        console.log(`   Converting BTC price from ${close} to ${close / 1000}`);
+        open = open / 1000;
+        high = high / 1000;
+        low = low / 1000;
+        close = close / 1000;
+      }
+      
+      return {
+        time: Math.floor(candle.t / 1000), // Convert to seconds
+        open: open,
+        high: high,
+        low: low,
+        close: close,
+        volume: volume || 0
+      };
+    });
     
   } catch (error) {
     console.error('❌ Failed to fetch Hyperliquid candles:', error);

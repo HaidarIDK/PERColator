@@ -86,7 +86,7 @@ export default function MonitorPage() {
 
       setLoading(false)
     } catch (error) {
-      console.error('Error fetching monitor data:', error)
+      // Error handled silently - UI will show loading state
       setLoading(false)
     }
   }

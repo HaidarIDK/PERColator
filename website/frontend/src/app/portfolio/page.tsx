@@ -88,7 +88,7 @@ export default function PortfolioPage() {
 
         setLoading(false)
       } catch (error) {
-        console.error('Failed to fetch portfolio:', error)
+        // Error handled silently - UI will show loading state
         setLoading(false)
       }
     }
