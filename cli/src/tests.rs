@@ -4217,8 +4217,9 @@ async fn place_taker_order_as(
     );
     // PRODUCTION FIX: Receipt PDA must be owned by slab program, not router
     // The slab program writes to this account in commit_fill
+    // Seeds: [b"receipt", portfolio, slab] - matches derive_receipt_pda in trading.rs
     let (receipt_pda, receipt_bump) = Pubkey::find_program_address(
-        &[b"receipt", slab.as_ref(), actor_pubkey.as_ref()],
+        &[b"receipt", portfolio_pda.as_ref(), slab.as_ref()],
         &config.slab_program_id  // Must be slab program, not router
     );
 
@@ -4239,8 +4240,8 @@ async fn place_taker_order_as(
 
         let init_receipt_accounts = vec![
             AccountMeta::new(receipt_pda, false),                    // 0: Receipt PDA (to be created)
-            AccountMeta::new_readonly(*slab, false),                 // 1: Slab account (for PDA derivation)
-            AccountMeta::new_readonly(actor_pubkey, false),          // 2: User account (for PDA derivation)
+            AccountMeta::new_readonly(*slab, false),                 // 1: Slab account
+            AccountMeta::new_readonly(portfolio_pda, false),         // 2: Portfolio PDA (for receipt PDA derivation)
             AccountMeta::new(actor_pubkey, true),                    // 3: Payer (signer)
             AccountMeta::new_readonly(system_program::ID, false),    // 4: System program
         ];
@@ -4275,6 +4276,7 @@ async fn place_taker_order_as(
     // Build account list
     // ExecuteCrossSlab expects: portfolio, user, vault, registry, router_authority, system_program,
     // then oracle accounts (1 per split), slab accounts (1 per split), receipt PDAs (1 per split)
+    // Note: Slab program ID is NOT passed in accounts - it's derived from slab.owner() in the router
     let accounts = vec![
         AccountMeta::new(portfolio_pda, false),           // 0: Portfolio
         AccountMeta::new_readonly(actor_pubkey, true),    // 1: User (signer & payer for PDA creation)
@@ -4283,7 +4285,7 @@ async fn place_taker_order_as(
         AccountMeta::new_readonly(router_authority_pda, false), // 4: Router authority (PDA for CPI signing)
         AccountMeta::new_readonly(system_program::ID, false),   // 5: System Program (for PDA creation)
         AccountMeta::new_readonly(*oracle, false),        // 6: Oracle account
-        AccountMeta::new(*slab, false),                   // 7: Slab
+        AccountMeta::new(*slab, false),                   // 7: Slab data account
         AccountMeta::new(receipt_pda, false),             // 8: Receipt PDA
     ];
 

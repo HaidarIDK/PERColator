@@ -250,7 +250,7 @@ pub fn process_execute_cross_slab(
         let account_metas = [
             AccountMeta::writable(slab_account.key()),
             AccountMeta::writable(receipt_account.key()),
-            AccountMeta::writable_signer(router_authority.key()),
+            AccountMeta::readonly_signer(router_authority.key()),
             AccountMeta::readonly(user_account.key()),
         ];
 
@@ -270,6 +270,7 @@ pub fn process_execute_cross_slab(
         let signer = Signer::from(seeds);
 
         msg!("About to invoke CPI to slab program");
+        msg!("Router authority is_signer before CPI");
         msg!("Number of account metas: 4");
         msg!("Number of account infos: 4");
         msg!("Number of signers: 1");

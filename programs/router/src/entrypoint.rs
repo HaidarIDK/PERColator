@@ -396,7 +396,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Split accounts into oracles, slabs, and receipts (starting at index 6 now)
+    // Split accounts into oracles, slabs, and receipts (starting at index 6)
     let oracle_accounts = &accounts[6..6 + num_splits];
     let slab_accounts = &accounts[6 + num_splits..6 + (num_splits * 2)];
     let receipt_accounts = &accounts[6 + (num_splits * 2)..6 + (num_splits * 3)];
