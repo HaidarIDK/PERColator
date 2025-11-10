@@ -25,6 +25,7 @@ mod crisis;
 mod keeper;
 mod tests;
 mod tests_funding;
+mod interactive;
 
 use config::NetworkConfig;
 
@@ -215,6 +216,9 @@ enum Commands {
         #[arg(short, long)]
         detailed: bool,
     },
+
+    /// Interactive CLI mode with menus
+    Interactive,
 }
 
 #[derive(Subcommand)]
@@ -977,6 +981,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status { exchange, detailed } => {
             exchange::query_registry_status(&config, exchange, detailed).await?;
+        }
+        Commands::Interactive => {
+            interactive::run_interactive(&config).await?;
         }
     }
 
