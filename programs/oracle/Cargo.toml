@@ -6,8 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# oracle is a library dependency only, not a standalone BPF program
-crate-type = ["lib"]
+# Oracle is a deployed BPF program used for price feeds and PDA derivation
+crate-type = ["cdylib", "lib"]
 name = "percolator_oracle"
 
 [dependencies]

@@ -20,7 +20,7 @@ default-members = [
     "programs/router",
     "programs/slab",
     "programs/amm",
-    # oracle is a library dependency, not a standalone program
+    "programs/oracle",
     "programs/common",
 ]
 

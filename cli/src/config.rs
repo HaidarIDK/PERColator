@@ -52,15 +52,12 @@ impl NetworkConfig {
 
         let keypair = load_keypair(&keypair_path)?;
 
-        // Use deployed program IDs (localnet addresses)
-        let router_program_id = Pubkey::from_str("FqyPRML6ccZdH1xjMbe5CePx81wVJfZXxGANKfageW5Q")
-            .expect("Invalid router program ID");
-        let slab_program_id = Pubkey::from_str("2qQsQvBDQCCBm3sULZhczQWgQekxxbgtvrJFmLGs1csJ")
-            .expect("Invalid slab program ID");
-        let amm_program_id = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
-            .expect("Invalid AMM program ID");
-        let oracle_program_id = Pubkey::from_str("BaB5cSBUFe47i1NQ5V3ijaGWmx6BCdW8yJB65hHcQRtX")
-            .expect("Invalid oracle program ID");
+        // Load deployed program IDs from keypair files
+        // These are generated during deployment and used by all commands
+        let router_program_id = load_program_id_from_keypair("target/deploy/percolator_router-keypair.json")?;
+        let slab_program_id = load_program_id_from_keypair("target/deploy/percolator_slab-keypair.json")?;
+        let amm_program_id = load_program_id_from_keypair("target/deploy/percolator_amm-keypair.json")?;
+        let oracle_program_id = load_program_id_from_keypair("target/deploy/percolator_oracle-keypair.json")?;
 
         Ok(Self {
             network: network.to_string(),
@@ -99,6 +96,21 @@ fn load_keypair(path: &Path) -> Result<Keypair> {
 
     Keypair::from_bytes(&bytes)
         .with_context(|| format!("Invalid keypair data in: {}", path.display()))
+}
+
+/// Load a program ID from a keypair file (derives public key)
+fn load_program_id_from_keypair(path: &str) -> Result<Pubkey> {
+    let full_path = Path::new(path);
+    if !full_path.exists() {
+        anyhow::bail!(
+            "Program keypair file not found: {}\n\
+             Programs must be deployed first with: cargo build-sbf && solana program deploy",
+            path
+        );
+    }
+
+    let keypair = load_keypair(full_path)?;
+    Ok(keypair.pubkey())
 }
 
 #[cfg(test)]
