@@ -11,8 +11,12 @@ import { routerRouter } from './routes/router';
 import { claimsRouter } from './routes/claims';
 import { faucetRouter } from './routes/faucet';
 import { monitorRouter } from './routes/monitor';
+import { cliRouter } from './routes/cli';
+import { aiAssistantRouter } from './routes/ai-assistant';
 import { initializeSolana } from './services/solana';
 import { initializeWebSocketServer } from './services/websocket-server';
+import WebSocket from 'ws';
+import { cliWebSocketHandler } from './services/cli-websocket';
 
 dotenv.config();
 
@@ -26,8 +30,11 @@ const allowedOrigins = [
   'http://localhost:5000',
   'http://localhost:3001',
   'http://localhost:3000',
-  'https://dex.percolator.site', // Production frontend URL
+  'https://percolator.site', // Production frontend URL
+  'https://www.percolator.site', // WWW variant
+  'https://dex.percolator.site', // Alternative production URL
   'https://www.dex.percolator.site', // WWW variant
+  'https://frontend-1kpt12t6l-haidars-projects-a4025cbc.vercel.app', // Vercel deployment URL
   process.env.FRONTEND_URL, // Additional custom frontend URL
   'https://percolator-frontend.onrender.com', // Default Render URL
 ];
@@ -69,6 +76,8 @@ app.get('/', (req, res) => {
       claims: '/api/claims/*',
       faucet: '/api/faucet/*',
       monitor: '/api/monitor/*',
+      cli: '/api/cli/*',
+      aiAssistant: '/api/ai-assistant/*',
       hyperliquid: '/api/hyperliquid/*',
       websocket: 'ws://localhost:5001/ws'
     },
@@ -88,6 +97,8 @@ app.use('/api/router', routerRouter);
 app.use('/api/claims', claimsRouter);
 app.use('/api/faucet', faucetRouter);
 app.use('/api/monitor', monitorRouter);
+app.use('/api/cli', cliRouter);
+app.use('/api/ai-assistant', aiAssistantRouter);
 
 // 404 handler for unknown routes
 app.use((req, res) => {
@@ -122,8 +133,44 @@ async function start() {
       console.log(`🔗 RPC: ${process.env.SOLANA_RPC_URL}`);
     });
 
-    // Start WebSocket server
+    // Start WebSocket server for market data
     initializeWebSocketServer(server);
+
+    // Start CLI WebSocket server
+    const cliWss = new WebSocket.Server({
+      server,
+      path: '/ws/cli',
+    });
+
+    cliWss.on('connection', (ws: WebSocket, req) => {
+      console.log(`🔌 CLI WebSocket client connected from ${req.socket.remoteAddress}`);
+
+      // Send welcome message
+      ws.send(JSON.stringify({
+        type: 'connected',
+        message: 'Connected to Percolator CLI WebSocket',
+        timestamp: Date.now(),
+      }));
+
+      // Handle messages
+      ws.on('message', (data: Buffer) => {
+        cliWebSocketHandler.handleMessage(ws, data);
+      });
+
+      // Handle disconnect
+      ws.on('close', () => {
+        console.log('🔌 CLI WebSocket client disconnected');
+        cliWebSocketHandler.handleDisconnect(ws);
+      });
+
+      // Handle errors
+      ws.on('error', (error) => {
+        console.error('❌ CLI WebSocket error:', error);
+        cliWebSocketHandler.handleDisconnect(ws);
+      });
+    });
+
+    console.log('✅ CLI WebSocket server started on /ws/cli');
 
   } catch (error) {
     console.error('❌ Failed to start server:', error);
@@ -131,5 +178,11 @@ async function start() {
   }
 }
 
-start();
+// Export the app for Vercel serverless functions
+export default app;
+
+// Only start the server if not in Vercel environment
+if (process.env.VERCEL !== '1') {
+  start();
+}
 
