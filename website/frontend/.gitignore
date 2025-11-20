@@ -1,13 +1,31 @@
-# Next.js - Folder-specific patterns (relative to frontend/)
-# Root .gitignore covers most patterns globally
-# This file keeps Next.js-specific patterns for clarity
+# Dependencies
+node_modules/
+package-lock.json
 
-# Next.js build outputs (relative to this folder)
+# Next.js build outputs
 /.next/
 /out/
 
-# Vercel deployment
+# Environment variables
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Vercel
 /.vercel
 
-# Next.js generated type file
+# Next.js generated files
 next-env.d.ts
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

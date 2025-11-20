@@ -1,3 +1,29 @@
-# API-specific build output (dist/ is relative to this folder)
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
 /dist/
 
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Vercel
+.vercel
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test files
+test-*.js
