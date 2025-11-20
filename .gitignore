@@ -66,6 +66,8 @@ desktop.ini
 !**/test-fixtures/**/*.json
 !sbf-solana-solana.json
 !Surfpool.toml
+!vercel.json
+!**/vercel.json
 
 # Local configuration
 .env
