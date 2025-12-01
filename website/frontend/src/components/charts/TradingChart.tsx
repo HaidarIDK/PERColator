@@ -89,21 +89,29 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
       width: Math.max(containerWidth, 300),
       height: Math.max(containerHeight, 300),
       layout: {
-        background: { type: ColorType.Solid, color: '#0a0e1a' },
-        textColor: '#9ca3af',
+        background: { type: ColorType.Solid, color: '#000000' },
+        textColor: '#71717a', // zinc-500
       },
       grid: {
-        vertLines: { color: '#1f2937' },
-        horzLines: { color: '#1f2937' },
+        vertLines: { color: '#18181b' }, // zinc-900
+        horzLines: { color: '#18181b' }, // zinc-900
       },
       crosshair: {
         mode: 0,
+        vertLine: {
+          color: '#27272a', // zinc-800
+          labelBackgroundColor: '#27272a',
+        },
+        horzLine: {
+          color: '#27272a', // zinc-800
+          labelBackgroundColor: '#27272a',
+        },
       },
       rightPriceScale: {
-        borderColor: '#1f2937',
+        borderColor: '#18181b', // zinc-900
       },
       timeScale: {
-        borderColor: '#1f2937',
+        borderColor: '#18181b', // zinc-900
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 12,
@@ -112,17 +120,17 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
         fixRightEdge: false,
         lockVisibleTimeRangeOnResize: false,
         allowShiftVisibleRangeOnWhitespaceReplacement: true,
-        allowBoldLabels: true,
+        allowBoldLabels: false,
         shiftVisibleRangeOnNewBar: false,
-        barSpacing: 3,
+        barSpacing: 6,
         minBarSpacing: 0.5,
       },
     });
 
     // Add candlestick series
     const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#10b981',
-      downColor: '#ef4444',
+      upColor: '#10b981', // emerald-500
+      downColor: '#ef4444', // red-500
       borderUpColor: '#10b981',
       borderDownColor: '#ef4444',
       wickUpColor: '#10b981',
@@ -388,19 +396,19 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
   }, [coin, selectedTimeframe]); // Removed onPriceUpdate from dependencies to prevent unnecessary re-renders
 
   return (
-    <div className="flex flex-col h-full w-full bg-gray-900 rounded-lg border border-gray-800">
+    <div className="flex flex-col h-full w-full bg-transparent">
       {/* Header - Responsive Layout */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 sm:py-3 border-b border-gray-800 gap-2 sm:gap-0">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2 border-b border-white/5 gap-2 sm:gap-0 bg-zinc-950/50">
         {/* Price Info */}
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <h3 className="text-sm sm:text-lg font-bold text-white whitespace-nowrap">{coin}/USDC</h3>
-          <div className="flex items-center gap-1 sm:gap-1.5">
-            <span className="text-base sm:text-xl font-bold text-white">
+        <div className="flex items-center gap-3 min-w-0">
+          <h3 className="text-sm font-bold text-zinc-100 whitespace-nowrap tracking-tight">{coin}-USDC</h3>
+          <div className="flex items-center gap-2">
+            <span className="text-base font-mono font-bold text-zinc-100">
               ${currentPrice.toFixed(2)}
             </span>
             {priceChange !== 0 && (
-              <div className={`flex items-center gap-0.5 text-[10px] sm:text-xs font-semibold ${
-                priceChange >= 0 ? 'text-green-500' : 'text-red-500'
+              <div className={`flex items-center gap-0.5 text-xs font-medium px-1.5 py-0.5 rounded ${
+                priceChange >= 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-red-500/10 text-red-500'
               }`}>
                 {priceChange >= 0 ? (
                   <TrendingUp className="w-3 h-3" />
@@ -416,15 +424,15 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
         {/* Controls - Horizontal scroll on mobile */}
         <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide -mx-3 px-3 sm:mx-0 sm:px-0 sm:overflow-visible">
           {/* Coin Selector */}
-          <div className="flex gap-0.5 bg-gray-800 rounded-md p-0.5 shrink-0">
+          <div className="flex gap-1 p-0.5 shrink-0">
             {coins.map((c) => (
               <button
                 key={c.value}
                 onClick={() => onCoinChange?.(c.value)}
-                className={`px-2.5 sm:px-3 py-1 sm:py-1.5 text-[11px] sm:text-xs font-medium rounded-sm transition-all touch-manipulation ${
+                className={`px-3 py-1 text-[10px] font-medium rounded transition-all touch-manipulation ${
                   coin === c.value
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50 active:bg-gray-700'
+                    ? 'bg-zinc-800 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
                 }`}
               >
                 {c.label}
@@ -432,16 +440,18 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
             ))}
           </div>
 
+          <div className="w-px h-4 bg-white/10" />
+
           {/* Timeframe Selector */}
-          <div className="flex gap-0.5 bg-gray-800 rounded-md p-0.5 shrink-0">
+          <div className="flex gap-1 p-0.5 shrink-0">
             {timeframes.map((tf) => (
               <button
                 key={tf.value}
                 onClick={() => setSelectedTimeframe(tf.value)}
-                className={`px-2.5 sm:px-3 py-1 sm:py-1.5 text-[11px] sm:text-xs font-medium rounded-sm transition-all touch-manipulation ${
+                className={`px-3 py-1 text-[10px] font-medium rounded transition-all touch-manipulation ${
                   selectedTimeframe === tf.value
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-white hover:bg-gray-700/50 active:bg-gray-700'
+                    ? 'bg-zinc-800 text-white'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
                 }`}
               >
                 {tf.label}
@@ -462,10 +472,10 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
         }}
       >
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80 z-10">
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm z-10">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-8 w-8 sm:h-12 sm:w-12 border-b-2 border-blue-600 mx-auto mb-3 sm:mb-4"></div>
-              <p className="text-xs sm:text-sm text-gray-400">Loading chart data...</p>
+              <div className="animate-spin rounded-full h-8 w-8 sm:h-10 sm:w-10 border-b-2 border-white/20 mx-auto mb-3"></div>
+              <p className="text-xs font-medium text-zinc-400 animate-pulse">Loading Market Data...</p>
             </div>
           </div>
         )}

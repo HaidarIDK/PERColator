@@ -455,122 +455,162 @@ export default function CLIPage() {
       <TestnetBanner />
       
       {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-900">
+      <header className="border-b border-white/5 bg-zinc-950/80 backdrop-blur-md sticky top-0 z-50">
         <div className="px-4 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Link href="/">
-                <button className="px-3 py-2 rounded-lg bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 hover:border-[#B8B8FF]/50 text-[#B8B8FF] text-sm font-bold transition-all flex items-center gap-1.5">
-                  <Home className="w-4 h-4" />
-                  <span>Home</span>
-                </button>
+            <div className="flex items-center gap-4">
+              <Link href="/" className="group">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-zinc-800 transition-all">
+                  <Home className="w-4 h-4 text-zinc-400 group-hover:text-white" />
+                  <span className="text-sm font-medium text-zinc-400 group-hover:text-white hidden sm:inline">Home</span>
+                </div>
               </Link>
-              <h1 className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-teal-500 bg-clip-text text-transparent flex items-center gap-2">
-                <Terminal className="w-5 h-5 text-emerald-400" />
-                Percolator CLI
-              </h1>
-              <span className="px-2 py-1 text-xs font-semibold bg-blue-600 rounded">
-                DEVNET
-              </span>
+              
+              <div className="h-6 w-[1px] bg-white/5 hidden sm:block" />
+              
+              <div className="flex items-center gap-3">
+                <div className="p-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                  <Terminal className="w-4 h-4 text-emerald-400" />
+                </div>
+                <h1 className="text-lg font-bold tracking-tight text-zinc-100">
+                  CLI Interface
+                </h1>
+                <span className="px-2 py-0.5 text-[10px] font-bold tracking-wide bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full uppercase">
+                  Devnet
+                </span>
+              </div>
             </div>
-            <WalletMultiButton />
+            <WalletMultiButton className="!bg-zinc-900 !border !border-white/10 !rounded-full !h-9 !px-4 !text-sm !font-medium hover:!bg-zinc-800 !transition-all" />
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col lg:flex-row gap-4 p-4">
+      <div className="flex-1 flex flex-col lg:flex-row gap-6 p-6 max-w-[1800px] mx-auto w-full">
         {/* Terminal */}
-        <div className="flex-1 flex flex-col bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
-          <div className="bg-gray-800 px-4 py-2 border-b border-gray-700 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="flex gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-                <div className="w-3 h-3 rounded-full bg-green-500"></div>
+        <div className="flex-1 flex flex-col bg-zinc-950 rounded-xl border border-white/5 overflow-hidden shadow-2xl shadow-black/50 ring-1 ring-white/5 relative group">
+          {/* Terminal Header */}
+          <div className="bg-zinc-900/50 backdrop-blur-md px-4 py-3 border-b border-white/5 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="flex gap-2">
+                <div className="w-3 h-3 rounded-full bg-[#ff5f56] border border-[#e0443e] shadow-inner"></div>
+                <div className="w-3 h-3 rounded-full bg-[#ffbd2e] border border-[#dea123] shadow-inner"></div>
+                <div className="w-3 h-3 rounded-full bg-[#27c93f] border border-[#1aab29] shadow-inner"></div>
               </div>
-              <span className="text-sm text-gray-400 ml-2">Terminal</span>
-              <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-400 rounded">
-                CLI Ready
-              </span>
+              <div className="h-4 w-[1px] bg-white/5" />
+              <div className="flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5 text-zinc-500" />
+                <span className="text-xs font-medium text-zinc-400">percolator-cli — -n localnet</span>
+              </div>
             </div>
-            <span className="text-xs text-gray-500">Press ↑/↓ for command history</span>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline-block">v0.1.0</span>
+              <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full border ${
+                wsConnected 
+                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
+                  : 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+              }`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                <span className="text-[10px] font-bold tracking-wide uppercase">
+                  {wsConnected ? 'Online' : 'Connecting'}
+                </span>
+              </div>
+            </div>
           </div>
           
+          {/* Terminal Body */}
           <div 
             ref={terminalRef}
-            className="flex-1 p-4 overflow-y-auto font-mono text-sm"
+            className="flex-1 p-4 overflow-y-auto font-mono text-sm bg-black/50 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent"
             onClick={() => inputRef.current?.focus()}
           >
             {/* Welcome Message */}
-            <div className="text-emerald-400 mb-4">
-              <p>Welcome to Percolator CLI Interface</p>
-              <p className="text-gray-500 text-xs mt-1">Connected to: {publicKey ? publicKey.toBase58() : 'No wallet connected'}</p>
-              <p className="text-gray-500 text-xs mt-1">Type commands below or use the examples on the right →</p>
+            <div className="mb-6 pb-6 border-b border-white/5">
+              <div className="text-emerald-400 font-bold mb-2 text-base">Welcome to Percolator CLI Interface</div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-zinc-500 text-xs max-w-md">
+                <div className="flex justify-between"><span>Environment:</span> <span className="text-zinc-400">WebAssembly / Browser</span></div>
+                <div className="flex justify-between"><span>Network:</span> <span className="text-zinc-400">Devnet</span></div>
+                <div className="flex justify-between"><span>Wallet:</span> <span className="text-zinc-400">{publicKey ? `${publicKey.toBase58().slice(0,8)}...${publicKey.toBase58().slice(-8)}` : 'Not Connected'}</span></div>
+                <div className="flex justify-between"><span>Status:</span> <span className="text-zinc-400">Ready</span></div>
+              </div>
+              <div className="mt-4 text-xs text-zinc-600 italic">
+                Type <span className="text-emerald-500 bg-emerald-500/10 px-1 rounded">--help</span> for a list of commands or try the AI Assistant.
+              </div>
             </div>
 
             {/* Command History */}
-            {history.map((entry, idx) => (
-              <div key={idx} className="mb-3">
-                <div className="flex items-start gap-2">
-                  <span className={entry.success ? "text-emerald-400" : "text-red-400"}>$</span>
-                  <span className="text-gray-300">{entry.cmd}</span>
-                  {entry.success ? (
-                    <span className="text-green-500 text-xs">✓</span>
-                  ) : (
-                    <span className="text-red-500 text-xs">✗</span>
-                  )}
+            <div className="space-y-4">
+              {history.map((entry, idx) => (
+                <div key={idx} className="group/cmd">
+                  <div className="flex items-start gap-3">
+                    <span className="text-emerald-500 font-bold select-none mt-0.5">➜</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3">
+                        <span className="text-zinc-100 font-medium">{entry.cmd}</span>
+                        <span className="text-[10px] text-zinc-600 select-none opacity-0 group-hover/cmd:opacity-100 transition-opacity">
+                          {entry.timestamp.toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className={`mt-2 whitespace-pre-wrap leading-relaxed ${
+                        entry.success ? 'text-zinc-400' : 'text-red-400 bg-red-500/5 p-2 rounded border border-red-500/10'
+                      }`}>
+                        {entry.output}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className={`ml-4 whitespace-pre-wrap mt-1 ${entry.success ? 'text-gray-400' : 'text-red-400'}`}>
-                  {entry.output}
-                </div>
-                <div className="ml-4 text-gray-600 text-xs mt-1">
-                  {entry.timestamp.toLocaleTimeString()}
-                </div>
-              </div>
-            ))}
+              ))}
 
-            {/* Executing indicator */}
-            {isExecuting && (
-              <div className="flex items-center gap-2 text-yellow-400 mb-3">
-                <span className="animate-pulse">⏳</span>
-                <span className="text-sm">Executing command...</span>
-              </div>
-            )}
+              {/* Executing indicator */}
+              {isExecuting && (
+                <div className="flex items-center gap-3">
+                   <span className="text-emerald-500 font-bold select-none">➜</span>
+                   <div className="flex items-center gap-2 text-amber-400">
+                    <div className="w-2 h-2 bg-amber-400 rounded-full animate-ping" />
+                    <span className="text-sm">Processing transaction...</span>
+                  </div>
+                </div>
+              )}
 
-            {/* Input Line */}
-            <div className="flex items-center gap-2">
-              <span className="text-emerald-400">$</span>
-              <input
-                ref={inputRef}
-                type="text"
-                value={command}
-                onChange={(e) => setCommand(e.target.value)}
-                onKeyDown={handleKeyDown}
-                className="flex-1 bg-transparent border-none outline-none text-gray-300 disabled:opacity-50"
-                placeholder="Enter command..."
-                disabled={isExecuting}
-                autoFocus
-              />
+              {/* Input Line */}
+              <div className="flex items-center gap-3 pt-2 sticky bottom-0 bg-transparent">
+                <span className="text-emerald-500 font-bold select-none text-base animate-pulse">➜</span>
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={command}
+                  onChange={(e) => setCommand(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  className="flex-1 bg-transparent border-none outline-none text-zinc-100 placeholder-zinc-700 font-medium text-base disabled:opacity-50 caret-emerald-500"
+                  placeholder="Enter command..."
+                  disabled={isExecuting}
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck="false"
+                />
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Examples Sidebar */}
-        <div className="lg:w-96 space-y-4">
+        {/* Sidebar */}
+        <div className="lg:w-[400px] space-y-6 shrink-0">
           {/* AI Assistant */}
-          <div className="bg-gradient-to-br from-purple-900/30 to-blue-900/30 rounded-lg border border-purple-500/30 p-4">
-            <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-purple-400" />
-              AI Assistant
-            </h3>
+          <div className="bg-zinc-900/50 rounded-xl border border-violet-500/20 p-5 relative overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 to-blue-500/5 pointer-events-none" />
             
-            <p className="text-xs text-gray-400 mb-3">
-              Ask in plain English and I'll suggest the right command!
-            </p>
+            <div className="flex items-center gap-2 mb-4 relative z-10">
+              <div className="p-1.5 bg-violet-500/10 rounded-lg border border-violet-500/20">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-zinc-100">AI Assistant</h3>
+                <p className="text-[10px] text-zinc-500">Powered by GPT-4</p>
+              </div>
+            </div>
             
-            <div className="space-y-3">
-              <div className="relative">
+            <div className="space-y-3 relative z-10">
+              <div className="relative group">
                 <input
                   type="text"
                   value={aiQuestion}
@@ -580,54 +620,52 @@ export default function CLIPage() {
                       askAI();
                     }
                   }}
-                  placeholder="e.g., How do I create a new market?"
-                  className="w-full px-3 py-2 pr-10 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                  placeholder="How do I place a limit order?"
+                  className="w-full px-4 py-3 pr-12 bg-zinc-950 border border-white/10 rounded-xl text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20 transition-all"
                   disabled={aiLoading}
                 />
                 <button
                   onClick={askAI}
                   disabled={aiLoading || !aiQuestion.trim()}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded bg-purple-500 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-violet-500 hover:bg-violet-600 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-violet-500/20"
                 >
-                  <Send className="w-4 h-4" />
+                  {aiLoading ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
                 </button>
               </div>
               
-              {aiLoading && (
-                <div className="p-3 bg-gray-800/50 rounded border border-gray-700 text-center">
-                  <div className="animate-pulse text-purple-400 text-sm">
-                    🤔 Thinking...
-                  </div>
-                </div>
-              )}
-              
               {aiResponse && !aiLoading && (
-                <div className="p-3 bg-gray-800 rounded border border-purple-500/50 space-y-2">
-                  <div className="flex items-start gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
-                    <div className="flex-1 space-y-2">
-                      <p className="text-xs text-gray-400">{aiResponse.explanation}</p>
-                      <div
-                        onClick={() => {
-                          setCommand(`-n localnet ${aiResponse.example}`);
-                          inputRef.current?.focus();
-                        }}
-                        className="p-2 bg-gray-900 rounded border border-gray-700 hover:border-emerald-500 cursor-pointer transition-all group"
-                      >
-                        <code className="text-xs text-emerald-400 break-all group-hover:text-emerald-300">
-                          {aiResponse.example}
-                        </code>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setCommand(`-n localnet ${aiResponse.example}`);
-                          inputRef.current?.focus();
-                        }}
-                        className="w-full px-3 py-1.5 bg-purple-500 hover:bg-purple-600 rounded text-xs font-semibold transition-all"
-                      >
-                        Copy to Terminal
-                      </button>
+                <div className="p-4 bg-zinc-950 rounded-xl border border-violet-500/30 space-y-3 animate-in fade-in slide-in-from-top-2">
+                  <p className="text-xs text-zinc-400 leading-relaxed border-l-2 border-violet-500/30 pl-3">
+                    {aiResponse.explanation}
+                  </p>
+                  
+                  <div className="space-y-2">
+                    <div
+                      onClick={() => {
+                        setCommand(aiResponse.example);
+                        inputRef.current?.focus();
+                      }}
+                      className="p-3 bg-zinc-900 rounded-lg border border-white/5 hover:border-violet-500/50 cursor-pointer transition-all group"
+                    >
+                      <code className="text-xs text-emerald-400 font-mono break-all group-hover:text-emerald-300 flex gap-2">
+                        <span className="text-zinc-600 shrink-0">$</span>
+                        {aiResponse.example}
+                      </code>
                     </div>
+                    <button
+                      onClick={() => {
+                        setCommand(aiResponse.example);
+                        inputRef.current?.focus();
+                      }}
+                      className="w-full py-2 bg-violet-500/10 hover:bg-violet-500/20 text-violet-300 text-xs font-medium rounded-lg border border-violet-500/20 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Terminal className="w-3 h-3" />
+                      Use Command
+                    </button>
                   </div>
                 </div>
               )}
@@ -635,61 +673,68 @@ export default function CLIPage() {
           </div>
 
           {/* Example Commands */}
-          <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-              <Terminal className="w-5 h-5 text-emerald-400" />
-              Example Commands
-            </h3>
-          
-          <div className="space-y-3">
-            {exampleCommands.map((example, idx) => (
-              <div 
-                key={idx}
-                className="p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-emerald-500/50 transition-all cursor-pointer group"
-                onClick={() => copyExample(example.cmd)}
-              >
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <code className="text-xs text-emerald-400 break-all flex-1">
-                    {example.cmd}
-                  </code>
-                  {copied ? (
-                    <CheckCircle2 className="w-4 h-4 text-green-500 shrink-0" />
-                  ) : (
-                    <Copy className="w-4 h-4 text-gray-500 group-hover:text-emerald-400 shrink-0" />
-                  )}
-                </div>
-                <p className="text-xs text-gray-400">{example.desc}</p>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-6 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-            <h4 className="text-sm font-semibold text-blue-400 mb-2">💡 Quick Start</h4>
-            <p className="text-xs text-gray-400 mb-2">
-              Use <code className="bg-gray-800 px-1 rounded">--help</code> on any command to see its options.
-            </p>
-            <div className="space-y-1 text-xs text-gray-500">
-              <p>• View options: <code className="bg-gray-800 px-1 rounded">command --help</code></p>
-              <p>• Initialize: <code className="bg-gray-800 px-1 rounded">init --name MyExchange</code></p>
-              <p>• Run tests: <code className="bg-gray-800 px-1 rounded">test --crisis</code></p>
-              <p>• Interactive mode: <code className="bg-gray-800 px-1 rounded">interactive</code></p>
+          <div className="bg-zinc-900/50 rounded-xl border border-white/5 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-zinc-500" />
+                Quick Commands
+              </h3>
+              <span className="text-[10px] text-zinc-500 bg-zinc-900 px-2 py-0.5 rounded border border-white/5">Click to use</span>
             </div>
-          </div>
           
-          <div className="mt-4 p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
-            <h4 className="text-sm font-semibold text-emerald-400 mb-2">🚀 Local Binary</h4>
-            <p className="text-xs text-gray-400 mb-1">
-              For production, use the CLI directly:
-            </p>
-            <code className="text-xs text-gray-500 block bg-gray-800 p-2 rounded">
-              ./target/release/percolator -n localnet status MyExchange
-            </code>
-          </div>
+            <div className="grid gap-2">
+              {exampleCommands.map((example, idx) => (
+                <button
+                  key={idx}
+                  className="flex items-center justify-between p-3 bg-zinc-950 hover:bg-zinc-900 border border-white/5 hover:border-emerald-500/30 rounded-lg transition-all group text-left"
+                  onClick={() => copyExample(example.cmd)}
+                >
+                  <div className="flex flex-col min-w-0">
+                    <code className="text-xs text-emerald-500/80 group-hover:text-emerald-400 font-mono mb-0.5 truncate">
+                      {example.cmd}
+                    </code>
+                    <span className="text-[10px] text-zinc-500 group-hover:text-zinc-400 truncate">
+                      {example.desc}
+                    </span>
+                  </div>
+                  {copied ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5 text-zinc-700 group-hover:text-emerald-500/50 shrink-0 transition-colors" />
+                  )}
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-white/5">
+              <div className="p-3 bg-blue-500/5 border border-blue-500/10 rounded-lg">
+                <h4 className="text-xs font-semibold text-blue-400 mb-2 flex items-center gap-1.5">
+                  <span className="w-1 h-1 rounded-full bg-blue-400" />
+                  Quick Tips
+                </h4>
+                <div className="space-y-1.5">
+                  <div className="flex items-baseline gap-2 text-[10px] text-zinc-400">
+                    <code className="bg-blue-500/10 px-1 rounded text-blue-300 min-w-[45px] text-center">--help</code>
+                    <span>View options for any command</span>
+                  </div>
+                  <div className="flex items-baseline gap-2 text-[10px] text-zinc-400">
+                    <code className="bg-blue-500/10 px-1 rounded text-blue-300 min-w-[45px] text-center">init</code>
+                    <span>Initialize a new exchange instance</span>
+                  </div>
+                  <div className="flex items-baseline gap-2 text-[10px] text-zinc-400">
+                    <code className="bg-blue-500/10 px-1 rounded text-blue-300 min-w-[45px] text-center">↑ / ↓</code>
+                    <span>Navigate command history</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      <StatusFooter />
+      <div className="border-t border-white/5 bg-zinc-950 mt-auto">
+        <StatusFooter />
+      </div>
     </div>
   );
 }

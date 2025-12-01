@@ -90,53 +90,67 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="h-screen bg-black text-white flex flex-col overflow-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+    <div className="h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden">
       {/* Testnet Warning Banner */}
       <TestnetBanner />
 
       {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-900 shrink-0">
-        <div className="px-3 sm:px-4 py-2 sm:py-3">
+      <header className="border-b border-white/5 bg-zinc-950/80 backdrop-blur-md shrink-0 z-50">
+        <div className="px-4 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 sm:gap-3">
-              <Link href="/">
-                <button className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 hover:border-[#B8B8FF]/50 text-[#B8B8FF] text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5">
-                  <Home className="w-4 h-4" />
-                  <span className="hidden sm:inline">Home</span>
-              </button>
+            <div className="flex items-center gap-4">
+              <Link href="/" className="group">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-zinc-800 transition-all">
+                  <Home className="w-4 h-4 text-zinc-400 group-hover:text-white" />
+                  <span className="text-sm font-medium text-zinc-400 group-hover:text-white hidden sm:inline">Home</span>
+                </div>
               </Link>
-              <h1 className="text-base sm:text-xl font-bold bg-gradient-to-r from-blue-500 to-purple-600 bg-clip-text text-transparent">
-                Percolator
-              </h1>
-              <span className="px-1.5 sm:px-2 py-0.5 sm:py-1 text-[10px] sm:text-xs font-semibold bg-blue-600 rounded">
-                DEVNET
-          </span>
-        </div>
-            <div className="flex items-center gap-2 sm:gap-3">
-              <Link href="/portfolio">
-                <button className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg bg-[#B8B8FF]/10 hover:bg-[#B8B8FF]/20 border border-[#B8B8FF]/30 hover:border-[#B8B8FF]/50 text-[#B8B8FF] text-xs sm:text-sm font-bold transition-all flex items-center gap-1.5">
-                  <Wallet className="w-4 h-4" />
-                  <span className="hidden sm:inline">Portfolio</span>
-                </button>
-              </Link>
-              <WalletMultiButton />
-      </div>
+              
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-[1px] bg-white/5 mx-2 hidden sm:block" />
+                <h1 className="text-lg font-bold tracking-tight">
+                  <span className="bg-gradient-to-r from-blue-400 to-violet-500 bg-clip-text text-transparent">Percolator</span>
+                </h1>
+                <span className="px-2 py-0.5 text-[10px] font-bold tracking-wide bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-full uppercase">
+                  Devnet
+                </span>
+              </div>
             </div>
-                    </div>
+
+            <div className="flex items-center gap-3">
+              <Link href="/cli" className="group">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-emerald-500/10 hover:border-emerald-500/20 transition-all">
+                  <Terminal className="w-4 h-4 text-zinc-400 group-hover:text-emerald-400" />
+                  <span className="text-sm font-medium text-zinc-400 group-hover:text-emerald-400 hidden sm:inline">CLI</span>
+                </div>
+              </Link>
+              
+              <Link href="/portfolio" className="group">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-violet-500/10 hover:border-violet-500/20 transition-all">
+                  <Wallet className="w-4 h-4 text-zinc-400 group-hover:text-violet-400" />
+                  <span className="text-sm font-medium text-zinc-400 group-hover:text-violet-400 hidden sm:inline">Portfolio</span>
+                </div>
+              </Link>
+              
+              <div className="h-8 w-[1px] bg-white/5 mx-1" />
+              <WalletMultiButton className="!bg-zinc-900 !border !border-white/10 !rounded-full !h-9 !px-4 !text-sm !font-medium hover:!bg-zinc-800 !transition-all" />
+            </div>
+          </div>
+        </div>
       </header>
 
       {/* Main Content - Responsive Layout */}
       <div 
         ref={containerRef} 
-        className="flex-1 flex flex-col lg:flex-row overflow-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+        className="flex-1 flex flex-col lg:flex-row overflow-hidden relative"
         style={{ 
-          height: 'calc(100vh - 140px)',
+          height: 'calc(100vh - 130px)',
           minHeight: 0
         }}
       >
-        {/* Chart Area - Fixed height on mobile, flex on desktop */}
+        {/* Chart Area */}
         <div 
-          className="w-full lg:flex-1 flex flex-col shrink-0"
+          className="w-full lg:flex-1 flex flex-col shrink-0 bg-zinc-950"
           style={isMounted && typeof window !== 'undefined' && window.innerWidth >= 1024 
             ? { 
                 width: `calc(100% - ${rightPanelWidth}px)`, 
@@ -147,31 +161,32 @@ export default function DashboardPage() {
                 height: '50%',
                 minHeight: '350px',
                 maxHeight: '50%',
-                marginBottom: '28px'
+                marginBottom: '0'
               }
           }
         >
-          <div className="w-full h-full p-2 sm:p-3" style={{ paddingBottom: '0px' }}>
-            <TradingChart 
-              coin={selectedCoin} 
-              onPriceUpdate={setCurrentPrice}
-              onCoinChange={setSelectedCoin}
-            />
-              </div>
+          <div className="w-full h-full p-1">
+            <div className="w-full h-full rounded-xl border border-white/5 overflow-hidden bg-zinc-900/50">
+              <TradingChart 
+                coin={selectedCoin} 
+                onPriceUpdate={setCurrentPrice}
+                onCoinChange={setSelectedCoin}
+              />
             </div>
+          </div>
+        </div>
 
         {/* Resizer Handle - Desktop Only */}
         <div
           onMouseDown={() => setIsResizing(true)}
-          className="hidden lg:block w-1 bg-gray-800 hover:bg-blue-600 cursor-col-resize transition-colors relative group shrink-0"
+          className="hidden lg:flex w-1 items-center justify-center cursor-col-resize group z-10 hover:w-1.5 transition-all duration-300 -ml-[2px]"
         >
-          <div className="absolute inset-y-0 -left-1 -right-1" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-12 bg-gray-600 rounded group-hover:bg-blue-500 transition-colors" />
-                </div>
+          <div className="w-[1px] h-full bg-white/5 group-hover:bg-blue-500/50 transition-colors" />
+        </div>
 
-        {/* Trading Panel - Below chart on mobile, side panel on desktop */}
+        {/* Trading Panel */}
         <div 
-          className="w-full lg:w-auto border-t lg:border-t-0 lg:border-l border-gray-800 bg-gray-900 p-2 sm:p-3 overflow-y-auto shrink-0 lg:min-w-[280px] lg:max-w-[700px] [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+          className="w-full lg:w-auto bg-zinc-950 border-t lg:border-t-0 border-white/5 p-2 overflow-y-auto shrink-0"
           style={isMounted && typeof window !== 'undefined' && window.innerWidth >= 1024 
             ? { 
                 width: `${rightPanelWidth}px`,
@@ -179,75 +194,76 @@ export default function DashboardPage() {
                 maxHeight: '100%'
               } 
             : { 
-                height: 'calc(50% - 28px)',
+                height: '50%',
                 minHeight: '350px',
-                maxHeight: 'calc(50% - 28px)',
-                marginTop: '28px'
+                maxHeight: '50%',
               }
           }
         >
-          <div className="space-y-2 sm:space-y-3">
+          <div className="flex flex-col h-full gap-3">
             {/* Trading Panel Header */}
-                    <div>
-              <h2 className="text-xs sm:text-sm lg:text-base font-bold text-white mb-0.5 truncate">Trade {selectedCoin}/USDC</h2>
-              <p className="text-[10px] sm:text-xs text-gray-400">Price: ${currentPrice.toFixed(2)}</p>
-                    </div>
+            <div className="flex items-center justify-between px-2 pt-1">
+              <div>
+                <h2 className="text-sm font-medium text-zinc-100">Trade {selectedCoin}/USDC</h2>
+                <p className="text-xs text-zinc-500 font-mono mt-0.5">${currentPrice.toFixed(2)}</p>
+              </div>
+              
+              {/* Trading Mode Toggle */}
+              <div className="flex items-center bg-zinc-900 border border-white/5 p-1 rounded-lg">
+                <button
+                  onClick={() => setTradingMode('orderbook')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                    tradingMode === 'orderbook'
+                      ? 'bg-zinc-800 text-white shadow-sm'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  Order Book
+                </button>
+                <button
+                  onClick={() => setTradingMode('amm')}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                    tradingMode === 'amm'
+                      ? 'bg-zinc-800 text-white shadow-sm'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  AMM
+                </button>
+              </div>
+            </div>
 
-            {/* Trading Mode Toggle */}
-            <div className="flex items-center gap-1 bg-black/40 p-1 rounded-lg">
-              <button
-                onClick={() => setTradingMode('orderbook')}
-                className={`flex-1 py-2 px-1 rounded-lg text-[9px] sm:text-[10px] lg:text-xs font-bold transition-all whitespace-nowrap ${
-                  tradingMode === 'orderbook'
-                    ? 'bg-gradient-to-r from-[#B8B8FF]/30 to-purple-500/20 text-white border border-[#B8B8FF]/50'
-                    : 'bg-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                Order Book
-              </button>
-          <button
-                onClick={() => setTradingMode('amm')}
-                className={`flex-1 py-2 px-1 rounded-lg text-[9px] sm:text-[10px] lg:text-xs font-bold transition-all whitespace-nowrap ${
-                  tradingMode === 'amm'
-                    ? 'bg-gradient-to-r from-[#B8B8FF]/30 to-purple-500/20 text-white border border-[#B8B8FF]/50'
-                    : 'bg-transparent text-gray-400 hover:text-white'
-                }`}
-              >
-                AMM
-          </button>
-      </div>
-      
-            {/* Trading Interface based on mode */}
-            {tradingMode === 'orderbook' ? (
-              <>
-                {/* Order Form */}
-                <OrderForm 
-                  coin={getCoinString(selectedCoin)} 
-                  currentPrice={currentPrice} 
-                />
-
-                {/* Order Book */}
-                <OrderBook symbol={getSymbol(selectedCoin)} walletAddress={publicKey?.toBase58()} />
-                    </>
-                  ) : (
-                    <>
-                {/* AMM Interface */}
-                <AMMInterface 
-                  selectedCoin={getCoinString(selectedCoin)} 
-                  mode="swap"
-                  showToast={() => {}}
-                  chartCurrentPrice={currentPrice}
-                />
-              </>
-            )}
-          </div>
+            {/* Trading Interface */}
+            <div className="flex-1 flex flex-col min-h-0 gap-3">
+              {tradingMode === 'orderbook' ? (
+                <>
+                  <OrderForm 
+                    coin={getCoinString(selectedCoin)} 
+                    currentPrice={currentPrice} 
+                  />
+                  <div className="flex-1 min-h-0">
+                    <OrderBook symbol={getSymbol(selectedCoin)} walletAddress={publicKey?.toBase58()} />
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1">
+                  <AMMInterface 
+                    selectedCoin={getCoinString(selectedCoin)} 
+                    mode="swap"
+                    showToast={() => {}}
+                    chartCurrentPrice={currentPrice}
+                  />
+                </div>
+              )}
+            </div>
           </div>
         </div>
-        
-      {/* Status Footer - Hidden on mobile, shown on desktop */}
-      <div className="hidden lg:block shrink-0">
+      </div>
+      
+      {/* Status Footer */}
+      <div className="hidden lg:block shrink-0 border-t border-white/5 bg-zinc-950">
         <StatusFooter />
-    </div>
+      </div>
     </div>
   );
 }

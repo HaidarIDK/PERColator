@@ -210,18 +210,18 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
   const coinV2 = coinToV2(coin);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-2 sm:p-3 border border-gray-700">
+    <div className="bg-zinc-900/50 rounded-xl p-3 border border-white/5">
       {!reservedOrder ? (
-        <form onSubmit={handleReserve} className="space-y-2 sm:space-y-3">
+        <form onSubmit={handleReserve} className="space-y-3">
           {/* Order Side */}
-          <div className="flex gap-1.5">
+          <div className="flex gap-1 p-1 bg-zinc-950 rounded-lg border border-white/5">
             <button
               type="button"
               onClick={() => setOrderSide('buy')}
-              className={`flex-1 py-1.5 sm:py-2 text-[10px] sm:text-xs font-semibold rounded transition-colors touch-manipulation ${
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
                 orderSide === 'buy'
-                  ? 'bg-green-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  ? 'bg-emerald-500/20 text-emerald-400 shadow-sm border border-emerald-500/20'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
               }`}
             >
               Buy
@@ -229,10 +229,10 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
             <button
               type="button"
               onClick={() => setOrderSide('sell')}
-              className={`flex-1 py-1.5 sm:py-2 text-[10px] sm:text-xs font-semibold rounded transition-colors touch-manipulation ${
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
                 orderSide === 'sell'
-                  ? 'bg-red-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  ? 'bg-red-500/20 text-red-400 shadow-sm border border-red-500/20'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
               }`}
             >
               Sell
@@ -240,14 +240,14 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
           </div>
 
           {/* Order Type */}
-          <div className="flex gap-1.5">
+          <div className="flex gap-2">
             <button
               type="button"
               onClick={() => setOrderType('limit')}
-              className={`flex-1 py-1 text-[9px] sm:text-[10px] font-medium rounded transition-colors touch-manipulation ${
+              className={`flex-1 text-[10px] font-medium uppercase tracking-wider border-b-2 pb-1 transition-colors ${
                 orderType === 'limit'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
               }`}
             >
               Limit
@@ -255,35 +255,37 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
             <button
               type="button"
               onClick={() => setOrderType('market')}
-              className={`flex-1 py-1 text-[9px] sm:text-[10px] font-medium rounded transition-colors touch-manipulation ${
+              className={`flex-1 text-[10px] font-medium uppercase tracking-wider border-b-2 pb-1 transition-colors ${
                 orderType === 'market'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
               }`}
             >
               Market
             </button>
           </div>
 
-          {/* Price Input (for limit orders) */}
-          {orderType === 'limit' && (
-            <div>
-              <label className="text-[10px] sm:text-xs text-gray-400 mb-1 block">Price (USDC)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                placeholder={currentPrice > 0 ? currentPrice.toFixed(2) : '0.00'}
-                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-[11px] sm:text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-600"
-                required
-              />
-            </div>
-          )}
+          <div className="space-y-2">
+            {/* Price Input (for limit orders) */}
+            {orderType === 'limit' && (
+              <div className="relative">
+                <label className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-zinc-500 pointer-events-none">Price</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  placeholder={currentPrice > 0 ? currentPrice.toFixed(2) : '0.00'}
+                  className="w-full pl-12 pr-12 py-2 bg-zinc-950 border border-white/5 rounded-lg text-sm text-right text-zinc-100 placeholder-zinc-700 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
+                  required
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-600 pointer-events-none">USDC</span>
+              </div>
+            )}
 
-          {/* Size Input */}
-          <div>
-            <label className="text-[10px] sm:text-xs text-gray-400 mb-1 block">Size ({coinV2})</label>
+            {/* Size Input */}
+            <div className="relative">
+              <label className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-zinc-500 pointer-events-none">Size</label>
               <input
                 type="number"
                 step="0.001"
@@ -291,90 +293,94 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
                 value={size}
                 onChange={(e) => setSize(e.target.value)}
                 placeholder="0.000"
-                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded text-[11px] sm:text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-600"
+                className="w-full pl-12 pr-12 py-2 bg-zinc-950 border border-white/5 rounded-lg text-sm text-right text-zinc-100 placeholder-zinc-700 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
                 required
               />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-600 pointer-events-none">{coinV2}</span>
+            </div>
           </div>
 
           {/* Total Value */}
-          <div className="flex justify-between items-center text-[10px] sm:text-xs">
-            <span className="text-gray-400">Total</span>
-            <span className="text-white font-medium">{totalValue} USDC</span>
+          <div className="flex justify-between items-center px-1">
+            <span className="text-xs text-zinc-500">Total Value</span>
+            <span className="text-xs font-mono text-zinc-300">{totalValue} USDC</span>
           </div>
 
           {/* Reserve Button */}
           <button
             type="submit"
             disabled={loading || !publicKey || !size}
-            className={`w-full py-2 sm:py-2.5 text-[11px] sm:text-xs font-semibold rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation ${
+            className={`w-full py-2.5 text-xs font-bold uppercase tracking-wide rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
               orderSide === 'buy'
-                ? 'bg-green-600 hover:bg-green-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white'
+                ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                : 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20'
             }`}
           >
             {loading ? 'Processing...' : !publicKey ? 'Connect Wallet' : `Reserve ${orderSide === 'buy' ? 'Buy' : 'Sell'}`}
           </button>
         </form>
       ) : (
-        <div className="space-y-2 sm:space-y-3">
+        <div className="space-y-3">
           {/* Reservation Info Banner */}
-          <div className="bg-yellow-900/20 border border-yellow-600/50 rounded-lg p-2">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="w-3 h-3 sm:w-4 sm:h-4 text-yellow-400 mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <p className="text-[10px] sm:text-xs font-semibold text-yellow-300 mb-1">Order Reserved!</p>
-                <p className="text-[10px] sm:text-xs text-yellow-400">Price locked. Commit within 30 seconds or it expires.</p>
+          <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-amber-500 mb-0.5">Order Reserved</p>
+                <p className="text-[10px] text-amber-400/80">Price locked. Commit within 30 seconds.</p>
               </div>
             </div>
           </div>
 
           {/* Countdown Timer */}
-          <div className="bg-gray-900 rounded-lg p-2 sm:p-3 border-2 border-blue-500/50">
-            <div className="flex items-center justify-between mb-2">
-              <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-400" />
-              <span className={`text-lg sm:text-xl font-bold font-mono ${
-                timeRemaining < 10000 ? 'text-red-400 animate-pulse' : 'text-blue-400'
+          <div className="bg-zinc-950 rounded-lg p-3 border border-blue-500/20 relative overflow-hidden">
+            <div className="absolute top-0 left-0 h-0.5 bg-blue-500/50 transition-all duration-1000" style={{ width: `${(timeRemaining / 30000) * 100}%` }} />
+            
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs text-zinc-400">Time Remaining</span>
+              <span className={`text-lg font-mono font-bold ${
+                timeRemaining < 10000 ? 'text-red-400' : 'text-blue-400'
               }`}>
                 {(timeRemaining / 1000).toFixed(1)}s
               </span>
             </div>
             
             {/* Order Details */}
-            <div className="space-y-1 sm:space-y-1.5 text-[10px] sm:text-xs">
-              <div className="flex justify-between">
-                <span className="text-gray-400">Side</span>
-                <span className={`font-bold ${reservedOrder.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-500">Side</span>
+                <span className={`font-bold ${reservedOrder.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>
                   {reservedOrder.side.toUpperCase()}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Price</span>
-                <span className="text-white font-medium">${reservedOrder.price.toFixed(2)}</span>
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-500">Price</span>
+                <span className="text-zinc-200 font-mono">${reservedOrder.price.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Size</span>
-                <span className="text-white font-medium">{reservedOrder.size} {coinV2}</span>
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-500">Size</span>
+                <span className="text-zinc-200 font-mono">{reservedOrder.size} {coinV2}</span>
               </div>
-              <div className="flex justify-between border-t border-gray-700 pt-1.5 sm:pt-2">
-                <span className="text-gray-400">Total</span>
-                <span className="text-white font-bold">${(reservedOrder.price * reservedOrder.size).toFixed(2)} USDC</span>
+              <div className="flex justify-between border-t border-white/5 pt-2 text-xs">
+                <span className="text-zinc-500">Total</span>
+                <span className="text-zinc-100 font-mono font-bold">${(reservedOrder.price * reservedOrder.size).toFixed(2)} USDC</span>
               </div>
             </div>
           </div>
 
           {/* Commit & Cancel Buttons */}
-          <div className="flex gap-1.5">
+          <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleCommit}
               disabled={loading}
-              className="flex-1 py-2 sm:py-2.5 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-bold text-[11px] sm:text-xs rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation"
+              className="py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs rounded-lg transition-all disabled:opacity-50 shadow-lg shadow-emerald-500/20"
             >
-              {loading ? 'Committing...' : 'Commit Order ✓'}
+              {loading ? 'Committing...' : 'Commit'}
             </button>
             <button
               onClick={handleCancel}
               disabled={loading}
-              className="px-2 sm:px-3 py-2 sm:py-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 font-semibold text-[11px] sm:text-xs rounded-lg transition-colors disabled:opacity-50 touch-manipulation"
+              className="py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 font-medium text-xs rounded-lg transition-colors disabled:opacity-50"
             >
               Cancel
             </button>

@@ -89,230 +89,232 @@ export const OrderBook = ({ symbol, walletAddress }: OrderBookProps) => {
     : '0.00'
 
   return (
-    <div className="w-full h-full bg-black/20 rounded-2xl border border-[#181825] overflow-hidden flex flex-col">
-      <div className="h-12 flex items-center justify-between px-4 border-b border-[#181825] flex-shrink-0">
-        <div className="flex space-x-4">
+    <div className="w-full h-full bg-zinc-900/50 rounded-xl border border-white/5 overflow-hidden flex flex-col">
+      <div className="h-10 flex items-center justify-between px-3 border-b border-white/5 flex-shrink-0 bg-zinc-950/50">
+        <div className="flex space-x-1 bg-zinc-900 rounded-lg p-0.5 border border-white/5">
           <button 
             onClick={() => setActiveTab('orderbook')}
             className={cn(
-              "font-medium transition-colors",
-              activeTab === 'orderbook' ? "text-[#B8B8FF]" : "text-gray-400 hover:text-white"
+              "px-3 py-1 text-[10px] font-medium rounded-md transition-all",
+              activeTab === 'orderbook' 
+                ? "bg-zinc-800 text-white shadow-sm" 
+                : "text-zinc-500 hover:text-zinc-300"
             )}
           >
-            Order book
+            Order Book
           </button>
           
           <button 
             onClick={() => setActiveTab('trades')}
             className={cn(
-              "font-medium transition-colors",
-              activeTab === 'trades' ? "text-[#B8B8FF]" : "text-gray-400 hover:text-white"
+              "px-3 py-1 text-[10px] font-medium rounded-md transition-all",
+              activeTab === 'trades' 
+                ? "bg-zinc-800 text-white shadow-sm" 
+                : "text-zinc-500 hover:text-zinc-300"
             )}
           >
-            Last trades
+            Trades
           </button>
-          {loading && <span className="text-xs text-gray-500 ml-2">Loading...</span>}
         </div>
         
         <div className="flex items-center space-x-2">
           <div className={cn(
-            "w-2 h-2 rounded-full",
-            wsConnected ? "bg-green-400 animate-pulse" : "bg-yellow-400"
+            "w-1.5 h-1.5 rounded-full",
+            wsConnected ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]" : "bg-amber-400"
           )}></div>
-          <span className="text-xs text-green-400 font-semibold">
-            {wsConnected ? "Live from Slab" : "Connecting..."}
+          <span className="text-[10px] text-zinc-500 font-medium uppercase tracking-wide">
+            {wsConnected ? "Live" : "Connecting"}
           </span>
         </div>
       </div>
       
       <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex-1 p-4 overflow-y-auto border-b border-[#181825] [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+        <div className="flex-1 p-0 overflow-y-auto border-b border-white/5 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
           {activeTab === 'orderbook' ? (
           <>
-            <div className="grid grid-cols-3 gap-1 sm:gap-2 text-[10px] sm:text-xs text-gray-400 mb-2">
+            <div className="grid grid-cols-3 px-3 py-2 text-[10px] font-medium text-zinc-500 border-b border-white/5 bg-zinc-950/30">
               <span className="truncate">Price (USDC)</span>
-              <span className="truncate">Qty</span>
+              <span className="truncate text-center">Size</span>
               <span className="truncate text-right">Total</span>
             </div>
             
-            <div className="space-y-1 mb-4">
-              {asks.length > 0 ? (
-                asks.reverse().map((ask, index) => {
-                  const total = (ask.price || 0) * (ask.quantity || 0);
-                  const maxTotal = Math.max(...asks.map(a => ((a.price || 0) * (a.quantity || 0))), 1);
-                  return (
-                    <div key={index} className="grid grid-cols-3 gap-1 sm:gap-2 text-xs sm:text-sm relative">
-                      <div 
-                        className="absolute inset-0 bg-red-500/5 origin-left" 
-                        style={{ width: `${(total / maxTotal) * 100}%` }}
-                      />
-                      <span className="text-red-400 relative z-10 truncate">{(ask.price || 0).toFixed(2)}</span>
-                      <span className="text-white relative z-10 truncate">{(ask.quantity || 0).toFixed(4)}</span>
-                      <span className="text-gray-400 relative z-10 text-right truncate">{total.toFixed(4)}</span>
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="text-gray-500 text-sm text-center py-4">No asks</div>
+            <div className="flex flex-col-reverse min-h-0">
+              {/* Asks (Sells) - Red - Top part */}
+              <div className="flex flex-col-reverse">
+                {asks.length > 0 ? (
+                  asks.slice(0, 15).map((ask, index) => {
+                    const total = (ask.price || 0) * (ask.quantity || 0);
+                    const maxTotal = Math.max(...asks.map(a => ((a.price || 0) * (a.quantity || 0))), 1);
+                    return (
+                      <div key={index} className="grid grid-cols-3 px-3 py-0.5 text-xs relative group hover:bg-white/5 transition-colors cursor-default">
+                        <div 
+                          className="absolute inset-y-0 right-0 bg-red-500/10 origin-right transition-all duration-300" 
+                          style={{ width: `${(total / maxTotal) * 100}%` }}
+                        />
+                        <span className="text-red-400 font-mono relative z-10 truncate group-hover:text-red-300">{(ask.price || 0).toFixed(2)}</span>
+                        <span className="text-zinc-300 font-mono relative z-10 truncate text-center">{(ask.quantity || 0).toFixed(4)}</span>
+                        <span className="text-zinc-500 font-mono relative z-10 text-right truncate group-hover:text-zinc-400">{total.toFixed(2)}</span>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="text-zinc-600 text-xs text-center py-8 italic">No asks available</div>
+                )}
+              </div>
+            </div>
+            
+            {/* Mid Price */}
+            <div className="flex items-center justify-between px-4 py-2 border-y border-white/5 bg-zinc-950/50 backdrop-blur-sm sticky top-0 bottom-0 z-20 my-1">
+              <div className="flex items-center gap-2">
+                <span className={`text-lg font-mono font-bold ${
+                  parseFloat(midPrice) > 0 ? 'text-white' : 'text-zinc-500'
+                }`}>
+                  {midPrice}
+                </span>
+                <span className="text-[10px] text-zinc-500 font-medium">USDC</span>
+              </div>
+              {parseFloat(midPrice) > 0 && (
+                <div className="flex items-center gap-1 text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded text-[10px] font-medium">
+                  <TrendingUp className="w-3 h-3" />
+                  <span>Spread: {asks.length && bids.length ? (asks[asks.length-1].price - bids[0].price).toFixed(2) : '0.00'}</span>
+                </div>
               )}
             </div>
             
-            <div className="flex items-center justify-center py-2 border-y border-[#181825] my-2">
-              <span className="text-white font-semibold">{midPrice}</span>
-              <TrendingUp className="w-3 h-3 text-green-400 ml-2" />
-            </div>
-            
-            <div className="space-y-1">
+            {/* Bids (Buys) - Green - Bottom part */}
+            <div className="flex flex-col">
               {bids.length > 0 ? (
-                bids.map((bid, index) => {
+                bids.slice(0, 15).map((bid, index) => {
                   const total = (bid.price || 0) * (bid.quantity || 0);
                   const maxTotal = Math.max(...bids.map(b => ((b.price || 0) * (b.quantity || 0))), 1);
                   return (
-                    <div key={index} className="grid grid-cols-3 gap-1 sm:gap-2 text-xs sm:text-sm relative">
+                    <div key={index} className="grid grid-cols-3 px-3 py-0.5 text-xs relative group hover:bg-white/5 transition-colors cursor-default">
                       <div 
-                        className="absolute inset-0 bg-green-500/5 origin-left" 
+                        className="absolute inset-y-0 right-0 bg-emerald-500/10 origin-right transition-all duration-300" 
                         style={{ width: `${(total / maxTotal) * 100}%` }}
                       />
-                      <span className="text-green-400 relative z-10 truncate">{(bid.price || 0).toFixed(2)}</span>
-                      <span className="text-white relative z-10 truncate">{(bid.quantity || 0).toFixed(4)}</span>
-                      <span className="text-gray-400 relative z-10 text-right truncate">{total.toFixed(4)}</span>
+                      <span className="text-emerald-400 font-mono relative z-10 truncate group-hover:text-emerald-300">{(bid.price || 0).toFixed(2)}</span>
+                      <span className="text-zinc-300 font-mono relative z-10 truncate text-center">{(bid.quantity || 0).toFixed(4)}</span>
+                      <span className="text-zinc-500 font-mono relative z-10 text-right truncate group-hover:text-zinc-400">{total.toFixed(2)}</span>
                     </div>
                   );
                 })
               ) : (
-                <div className="text-gray-500 text-sm text-center py-4">No bids</div>
+                <div className="text-zinc-600 text-xs text-center py-8 italic">No bids available</div>
               )}
             </div>
           </>
         ) : (
           <>
-            <div className="space-y-2 max-h-[600px] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            <div className="p-3 space-y-2">
+              <div className="flex items-center justify-between pb-2 border-b border-white/5">
+                <h4 className="text-xs font-medium text-zinc-400">Your Activity</h4>
+                {walletAddress && <span className="text-[10px] text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-full">Connected</span>}
+              </div>
+              
               {walletTransactions.length > 0 ? (
-                walletTransactions.slice(0, 10).map((tx, i) => {
-                  const isReserve = i % 2 === 0;
-                  const typeColor = isReserve ? 'blue' : 'green';
-                  const typeBg = isReserve ? 'bg-blue-900/10' : 'bg-green-900/10';
-                  const typeBorder = isReserve ? 'border-blue-700/20' : 'border-green-700/20';
-                  const typeLabel = isReserve ? 'RESERVE' : 'COMMIT';
-                  
-                  return (
-                    <a
-                      key={i}
-                      href={tx.solscanLink}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={`block p-2 ${typeBg} hover:bg-zinc-800/50 rounded border ${typeBorder} transition-all group`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
-                          {tx.err ? (
-                            <span className="text-red-400 text-[10px] font-semibold">UNSUCCESSFUL</span>
-                          ) : (
-                            <span className="text-green-400 text-[10px] font-semibold">SUCCESS</span>
-                          )}
-                          <span className={`text-${typeColor}-400 text-[9px] font-mono bg-${typeColor}-900/30 px-1.5 py-0.5 rounded border border-${typeColor}-700/50`}>
-                            {typeLabel}
-                          </span>
+                <div className="space-y-2">
+                  {walletTransactions.slice(0, 10).map((tx, i) => {
+                    const isReserve = i % 2 === 0; // This is a rough heuristic, ideally we'd know the type
+                    const typeColor = isReserve ? 'blue' : 'emerald';
+                    
+                    return (
+                      <a
+                        key={i}
+                        href={tx.solscanLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block p-2 bg-zinc-900/50 hover:bg-zinc-800 rounded-lg border border-white/5 transition-all group relative overflow-hidden"
+                      >
+                        <div className={`absolute left-0 top-0 bottom-0 w-0.5 bg-${typeColor}-500/50`} />
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            {tx.err ? (
+                              <span className="text-red-400 text-[10px] font-bold">FAILED</span>
+                            ) : (
+                              <span className="text-emerald-400 text-[10px] font-bold">CONFIRMED</span>
+                            )}
+                            <span className="text-zinc-500 text-[9px] font-mono">
+                              {tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleTimeString() : 'Pending'}
+                            </span>
+                          </div>
                         </div>
-                        <span className="text-zinc-500 text-[9px]">
-                          {tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleTimeString() : 'Pending'}
-                        </span>
-                      </div>
-                      <code className={`text-[9px] font-mono text-${typeColor}-300 group-hover:text-${typeColor}-200 block truncate`}>
-                        {tx.signature.substring(0, 24)}...
-                      </code>
-                    </a>
-                  );
-                })
+                        <code className="text-[10px] font-mono text-zinc-400 group-hover:text-zinc-300 block truncate">
+                          {tx.signature}
+                        </code>
+                      </a>
+                    );
+                  })}
+                </div>
               ) : (
-                <div className="text-gray-500 text-sm text-center py-8">
+                <div className="text-center py-12 border border-dashed border-white/10 rounded-lg bg-white/[0.02]">
                   {walletAddress ? (
                     <>
-                      <div className="text-zinc-500 mb-1">No trades from your wallet yet</div>
-                      <div className="text-zinc-700 text-xs">Make a trade to see it here!</div>
+                      <div className="text-zinc-500 text-sm font-medium mb-1">No trades found</div>
+                      <div className="text-zinc-700 text-xs">Your recent trading activity will appear here</div>
                     </>
                   ) : (
                     <>
-                      <div className="text-zinc-500 mb-1">Connect wallet to see your trades</div>
-                      <div className="text-zinc-700 text-xs">Your Reserve/Commit transactions will appear here</div>
+                      <div className="text-zinc-500 text-sm font-medium mb-1">Wallet not connected</div>
+                      <div className="text-zinc-700 text-xs">Connect your wallet to see your trades</div>
                     </>
                   )}
                 </div>
               )}
             </div>
+
+            <div className="p-3 border-t border-white/5">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-xs font-medium text-zinc-400">Recent Network Activity</h4>
+                <div className="text-[10px] text-zinc-500 bg-zinc-900 px-2 py-0.5 rounded border border-white/5">
+                  Live Feed
+                </div>
+              </div>
+              <div className="space-y-2">
+                {transactions.length === 0 ? (
+                  <div className="text-center py-4 text-zinc-600 text-xs italic">
+                    Waiting for transactions...
+                  </div>
+                ) : (
+                  transactions.slice(0, 5).map((tx, i) => (
+                    <a
+                      key={i}
+                      href={tx.solscanLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-between p-2 hover:bg-white/5 rounded-md transition-colors group"
+                    >
+                      <div className="flex items-center gap-2">
+                        <div className={`w-1.5 h-1.5 rounded-full ${tx.err ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                        <span className="text-[10px] font-mono text-zinc-500 group-hover:text-zinc-300 transition-colors">
+                          {tx.signature.substring(0, 8)}...
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-zinc-600">
+                        {tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleTimeString() : ''}
+                      </span>
+                    </a>
+                  ))
+                )}
+              </div>
+            </div>
           </>
         )}
         </div>
-
-        <div className="flex-1 p-4 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-xs font-semibold text-zinc-400">
-              Slab Transactions
-            </h4>
-            <div className="text-[9px] text-zinc-500 bg-zinc-900/20 px-2 py-0.5 rounded border border-zinc-700/30">
-              All Trades
-            </div>
-          </div>
-          <div className="space-y-2">
-            {transactions.length === 0 ? (
-              <div className="text-center py-4 text-zinc-600 text-xs">
-                No transactions yet
-              </div>
-            ) : (
-              transactions.map((tx, i) => {
-                const isReserve = i % 2 === 0;
-                const typeColor = isReserve ? 'blue' : 'green';
-                const typeBg = isReserve ? 'bg-blue-900/20' : 'bg-green-900/20';
-                const typeBorder = isReserve ? 'border-blue-700/30' : 'border-green-700/30';
-                const typeLabel = isReserve ? 'RESERVE' : 'COMMIT';
-                
-                return (
-                  <a
-                    key={i}
-                    href={tx.solscanLink}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`block p-2 ${typeBg} hover:bg-zinc-800/50 rounded border ${typeBorder} hover:border-${typeColor}-600/50 transition-all group`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="flex items-center gap-2">
-                        {tx.err ? (
-                          <span className="text-red-400 text-[10px] font-semibold">UNSUCCESSFUL</span>
-                        ) : (
-                          <span className="text-green-400 text-[10px] font-semibold">SUCCESS</span>
-                        )}
-                        <span className={`text-${typeColor}-400 text-[9px] font-mono bg-${typeColor}-900/30 px-1.5 py-0.5 rounded border border-${typeColor}-700/50`}>
-                          {typeLabel}
-                        </span>
-                      </div>
-                      <span className="text-zinc-500 text-[9px]">
-                        {tx.blockTime ? new Date(tx.blockTime * 1000).toLocaleTimeString() : 'Pending'}
-                      </span>
-                    </div>
-                    <code className={`text-[9px] font-mono text-${typeColor}-300 group-hover:text-${typeColor}-200 block truncate`}>
-                      {tx.signature.substring(0, 20)}...
-                    </code>
-                  </a>
-                );
-              })
-            )}
-          </div>
-        </div>
       </div>
 
-      <div className="px-4 py-2 bg-blue-900/10 border-t border-blue-700/30 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="text-[9px] text-blue-300 font-semibold">
-            Real Slab
-          </div>
+      <div className="px-3 py-2 bg-zinc-950/30 border-t border-white/5 flex-shrink-0">
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-zinc-500 font-medium">Slab Program</span>
           <button
             onClick={() => {
               navigator.clipboard.writeText('5Yd2fL7f1DhmNL3u82ptZ21CUpFJHYs1Fqfg2Qs9CLDB');
             }}
-            className="text-[9px] text-zinc-400 hover:text-blue-300 font-mono transition-colors cursor-pointer"
-            title="Click to copy Slab address"
+            className="text-blue-400/80 hover:text-blue-400 font-mono transition-colors cursor-pointer flex items-center gap-1 group"
+            title="Click to copy"
           >
             5Yd2...CLDB
+            <span className="opacity-0 group-hover:opacity-100 transition-opacity">📋</span>
           </button>
         </div>
       </div>
