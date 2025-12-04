@@ -19,10 +19,11 @@ pub struct NetworkConfig {
     pub slab_program_id: Pubkey,
     pub amm_program_id: Pubkey,
     pub oracle_program_id: Pubkey,
+    pub json_output: bool,
 }
 
 impl NetworkConfig {
-    pub fn new(network: &str, rpc_url: Option<String>, keypair_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(network: &str, rpc_url: Option<String>, keypair_path: Option<PathBuf>, json_output: bool) -> Result<Self> {
         let (default_rpc, ws_url) = match network {
             "localnet" | "local" => (
                 "http://127.0.0.1:8899".to_string(),
@@ -69,6 +70,7 @@ impl NetworkConfig {
             slab_program_id,
             amm_program_id,
             oracle_program_id,
+            json_output,
         })
     }
 

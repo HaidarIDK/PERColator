@@ -9,7 +9,7 @@ import { Buffer } from "buffer"
 import { PROGRAM_IDS, formatAddress } from "@/lib/program-config"
 
 interface AMMInterfaceProps {
-  selectedCoin: "ethereum" | "bitcoin" | "solana"
+  selectedCoin: "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat"
   mode: "swap" | "add" | "remove"
   showToast: (message: string, type: 'success' | 'error' | 'warning' | 'info') => void
   chartCurrentPrice: number
@@ -52,6 +52,9 @@ export const AMMInterface = ({
       case "ethereum": return "ETH";
       case "bitcoin": return "BTC";
       case "solana": return "SOL";
+      case "jupiter": return "JUP";
+      case "bonk": return "BONK";
+      case "dogwifhat": return "WIF";
       default: return "SOL";
     }
   };
@@ -64,6 +67,9 @@ export const AMMInterface = ({
       case "ethereum": return 4130;
       case "bitcoin": return 114300;
       case "solana": return 199;
+      case "jupiter": return 1.23;
+      case "bonk": return 0.00002345;
+      case "dogwifhat": return 3.45;
       default: return 199;
     }
   };
@@ -83,6 +89,25 @@ export const AMMInterface = ({
         setPoolLiquidity(Math.sqrt(10 * (10 * currentPrice)));
         break;
       case "solana":
+        setPoolReserve1(10000);
+        setPoolReserve2(10000 * currentPrice);
+        setPoolLiquidity(Math.sqrt(10000 * (10000 * currentPrice)));
+        break;
+      case "jupiter":
+        setPoolReserve1(1000000);
+        setPoolReserve2(1000000 * currentPrice);
+        setPoolLiquidity(Math.sqrt(1000000 * (1000000 * currentPrice)));
+        break;
+      case "bonk":
+        setPoolReserve1(10000000000);
+        setPoolReserve2(10000000000 * currentPrice);
+        setPoolLiquidity(Math.sqrt(10000000000 * (10000000000 * currentPrice)));
+        break;
+      case "dogwifhat":
+        setPoolReserve1(500000);
+        setPoolReserve2(500000 * currentPrice);
+        setPoolLiquidity(Math.sqrt(500000 * (500000 * currentPrice)));
+        break;
       default:
         setPoolReserve1(10000);
         setPoolReserve2(10000 * currentPrice);

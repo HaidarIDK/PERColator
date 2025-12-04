@@ -10,7 +10,7 @@ type OrderSide = 'buy' | 'sell';
 type OrderType = 'limit' | 'market';
 
 interface OrderFormProps {
-  coin: "ethereum" | "bitcoin" | "solana";
+  coin: "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat";
   currentPrice: number;
 }
 
@@ -24,11 +24,14 @@ interface ReservedOrder {
 }
 
 // Helper to convert coin string to v2 format
-const coinToV2 = (coin: "ethereum" | "bitcoin" | "solana"): 'SOL' | 'ETH' | 'BTC' => {
+const coinToV2 = (coin: "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat"): 'SOL' | 'ETH' | 'BTC' | 'JUP' | 'BONK' | 'WIF' => {
   switch(coin) {
     case 'ethereum': return 'ETH';
     case 'bitcoin': return 'BTC';
     case 'solana': return 'SOL';
+    case 'jupiter': return 'JUP';
+    case 'bonk': return 'BONK';
+    case 'dogwifhat': return 'WIF';
   }
 };
 

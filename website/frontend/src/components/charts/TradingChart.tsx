@@ -32,6 +32,9 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
     { value: 'SOL', label: 'SOL' },
     { value: 'ETH', label: 'ETH' },
     { value: 'BTC', label: 'BTC' },
+    { value: 'JUP', label: 'JUP' },
+    { value: 'BONK', label: 'BONK' },
+    { value: 'WIF', label: 'WIF' },
   ];
 
   useEffect(() => {
@@ -224,7 +227,10 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
           const expectedMaxPrice: Record<Coin, number> = {
             'SOL': 500,
             'ETH': 15000,
-            'BTC': 250000
+            'BTC': 250000,
+            'JUP': 10,
+            'BONK': 1,
+            'WIF': 100,
           };
           
           if (close > expectedMaxPrice[coin] * 100) {

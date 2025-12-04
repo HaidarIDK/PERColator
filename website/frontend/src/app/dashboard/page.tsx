@@ -12,8 +12,7 @@ import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { Home, Plus, Terminal, Wallet } from 'lucide-react';
 import Link from 'next/link';
-
-type Coin = 'SOL' | 'ETH' | 'BTC';
+import { type Coin } from '@/lib/hyperliquid-client';
 
 export default function DashboardPage() {
   const { publicKey } = useWallet();
@@ -72,11 +71,14 @@ export default function DashboardPage() {
 }
 
   // Map Coin type to string for OrderForm
-  const getCoinString = (coin: Coin): "ethereum" | "bitcoin" | "solana" => {
+  const getCoinString = (coin: Coin): "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat" => {
     switch(coin) {
       case 'ETH': return 'ethereum';
       case 'BTC': return 'bitcoin';
       case 'SOL': return 'solana';
+      case 'JUP': return 'jupiter';
+      case 'BONK': return 'bonk';
+      case 'WIF': return 'dogwifhat';
     }
   };
 
@@ -86,6 +88,9 @@ export default function DashboardPage() {
       case 'ETH': return 'ETH-USDC';
       case 'BTC': return 'BTC-USDC';
       case 'SOL': return 'SOL-USDC';
+      case 'JUP': return 'JUP-USDC';
+      case 'BONK': return 'BONK-USDC';
+      case 'WIF': return 'WIF-USDC';
     }
   };
 

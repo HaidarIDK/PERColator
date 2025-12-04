@@ -86,3 +86,7 @@ echo "To keep validator running after tests:"
 echo "  ./run_all_phases.sh --keep-validator"
 echo ""
 
+
+
+
+

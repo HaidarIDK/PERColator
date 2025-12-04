@@ -50,6 +50,10 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Output in JSON format
+    #[arg(long)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -715,6 +719,7 @@ async fn main() -> anyhow::Result<()> {
         &cli.network,
         cli.url.clone(),
         cli.keypair.clone(),
+        cli.json,
     )?;
 
     if cli.verbose {

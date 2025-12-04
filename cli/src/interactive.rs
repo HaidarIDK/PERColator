@@ -49,6 +49,9 @@ pub async fn run_interactive(config: &NetworkConfig) -> Result<()> {
             "8" => {
                 test_workflow(config).await?;
             }
+            "9" => {
+                about_workflow(config).await?;
+            }
             "0" | "q" | "quit" | "exit" => {
                 println!("\n{}", "Goodbye! 👋".bright_green());
                 break;
@@ -124,6 +127,7 @@ fn show_main_menu() {
     println!("  {}  Liquidity Operations", "6.".bright_cyan());
     println!("  {}  Status & Info", "7.".bright_cyan());
     println!("  {}  Run Tests", "8.".bright_cyan());
+    println!("  {}  About", "9.".bright_cyan());
     println!();
     println!("  {}  Quit", "0.".bright_cyan());
     println!();
@@ -691,6 +695,32 @@ async fn status_workflow(config: &NetworkConfig) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// About workflow
+async fn about_workflow(_config: &NetworkConfig) -> Result<()> {
+    clear_screen();
+    println!("{}", "=== About Percolator ===".bright_green().bold());
+    println!();
+    println!("Percolator is a high-performance decentralized exchange (DEX) protocol");
+    println!("built on Solana, featuring:");
+    println!();
+    println!("  • {}", "Hybrid Liquidity".bright_cyan());
+    println!("    Combines AMM and Orderbook liquidity in a single pool.");
+    println!();
+    println!("  • {}", "Cross-Slab Routing".bright_cyan());
+    println!("    Smart router splits orders across multiple liquidity sources.");
+    println!();
+    println!("  • {}", "Risk Management".bright_cyan());
+    println!("    Advanced margin system with real-time liquidation engine.");
+    println!();
+    println!("  • {}", "Developer Tools".bright_cyan());
+    println!("    Comprehensive CLI and testing suite for easy integration.");
+    println!();
+    println!("Version: {}", env!("CARGO_PKG_VERSION").bright_yellow());
+    println!();
+    pause();
     Ok(())
 }
 

@@ -14,7 +14,7 @@ export interface CandlestickData {
   volume: number;
 }
 
-export type Coin = 'SOL' | 'ETH' | 'BTC';
+export type Coin = 'SOL' | 'ETH' | 'BTC' | 'JUP' | 'BONK' | 'WIF';
 export type Timeframe = '1m' | '15m' | '1h' | '12h';
 
 class HyperliquidClient {
@@ -38,6 +38,9 @@ class HyperliquidClient {
         'SOL': 'SOLUSD',
         'ETH': 'ETHUSD',
         'BTC': 'BTCUSD',
+        'JUP': 'JUPUSD',
+        'BONK': 'BONKUSD',
+        'WIF': 'WIFUSD',
       };
       const symbol = symbolMap[coin];
 
@@ -105,6 +108,9 @@ class HyperliquidClient {
         'SOL': 'solana',
         'ETH': 'ethereum',
         'BTC': 'bitcoin',
+        'JUP': 'jupiter',
+        'BONK': 'bonk',
+        'WIF': 'dogwifhat',
       };
       const symbol = symbolMap[coin];
 

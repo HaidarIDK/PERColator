@@ -27,3 +27,5 @@ Thumbs.db
 
 # Test files
 test-*.js
+
+.vercel
