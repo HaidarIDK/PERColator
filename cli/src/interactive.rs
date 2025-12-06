@@ -2,8 +2,9 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use console::Term;
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use solana_sdk::pubkey::Pubkey;
-use std::io::{self, Write};
 use std::str::FromStr;
 
 use crate::config::NetworkConfig;
@@ -18,48 +19,45 @@ pub async fn run_interactive(config: &NetworkConfig) -> Result<()> {
     check_balance_and_prompt(config).await?;
 
     loop {
-        clear_screen();
+        let term = Term::stdout();
+        term.clear_screen()?;
+        
         show_header(config);
-        show_main_menu();
 
-        let choice = read_input("Enter your choice: ")?;
+        let choices = &[
+            "1. Setup & Deployment",
+            "2. Slab Operations (Create, Manage)",
+            "3. Trading (Place Orders, View Orderbook)",
+            "4. Margin & Portfolio",
+            "5. AMM Operations",
+            "6. Liquidity Operations",
+            "7. Status & Info",
+            "8. Run Tests",
+            "9. About",
+            "Exit",
+        ];
 
-        match choice.trim() {
-            "1" => {
-                setup_workflow(config).await?;
-            }
-            "2" => {
-                slab_workflow(config).await?;
-            }
-            "3" => {
-                trading_workflow(config).await?;
-            }
-            "4" => {
-                margin_workflow(config).await?;
-            }
-            "5" => {
-                amm_workflow(config).await?;
-            }
-            "6" => {
-                liquidity_workflow(config).await?;
-            }
-            "7" => {
-                status_workflow(config).await?;
-            }
-            "8" => {
-                test_workflow(config).await?;
-            }
-            "9" => {
-                about_workflow(config).await?;
-            }
-            "0" | "q" | "quit" | "exit" => {
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Main Menu")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
+
+        match selection {
+            0 => setup_workflow(config).await?,
+            1 => slab_workflow(config).await?,
+            2 => trading_workflow(config).await?,
+            3 => margin_workflow(config).await?,
+            4 => amm_workflow(config).await?,
+            5 => liquidity_workflow(config).await?,
+            6 => status_workflow(config).await?,
+            7 => test_workflow(config).await?,
+            8 => about_workflow(config).await?,
+            9 => {
                 println!("\n{}", "Goodbye! 👋".bright_green());
                 break;
             }
-            _ => {
-                println!("\n{} Invalid choice. Press Enter to continue...", "⚠".yellow());
-                let _ = read_input("");
-            }
+            _ => {}
         }
     }
 
@@ -81,24 +79,24 @@ async fn check_balance_and_prompt(config: &NetworkConfig) -> Result<()> {
     println!("{} {}", "Address:".bright_cyan(), pubkey);
     println!("{} {:.4} SOL", "Balance:".bright_cyan(), balance_sol);
 
-    if balance < MIN_BALANCE_LAMPORTS && config.network == "devnet" {
+    if balance < MIN_BALANCE_LAMPORTS && (config.network == "devnet" || config.network == "localnet") {
         println!("\n{}", "⚠️  Low balance detected!".bright_yellow().bold());
-        println!("{}", "You need at least 2 SOL for testing on devnet.".bright_yellow());
-        println!("\n{}", "To get devnet SOL:".bright_cyan());
-        println!("  {}", "solana airdrop 2".bright_green());
-        println!("  {}", format!("solana airdrop 2 {}", pubkey).bright_green());
-        println!("\n{}", "Press Enter after airdropping to continue...".dimmed());
-        let _ = read_input("");
-    } else if balance < MIN_BALANCE_LAMPORTS && config.network == "localnet" {
-        println!("\n{}", "⚠️  Low balance detected!".bright_yellow().bold());
-        println!("{}", "You need at least 2 SOL for testing on localnet.".bright_yellow());
-        println!("\n{}", "To get localnet SOL:".bright_cyan());
-        println!("  {}", "solana airdrop 2".bright_green());
-        println!("  {}", format!("solana airdrop 2 {}", pubkey).bright_green());
-        println!("\n{}", "Press Enter after airdropping to continue...".dimmed());
-        let _ = read_input("");
+        println!("{}", format!("You need at least 2 SOL for testing on {}.", config.network).bright_yellow());
+        
+        if Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Do you want to request an airdrop?")
+            .default(true)
+            .interact()?
+        {
+            println!("\n{}", "Run the following command in another terminal:".bright_cyan());
+            println!("  {}", format!("solana airdrop 2 {}", pubkey).bright_green());
+            
+            pause();
+        }
     } else {
         println!("\n{}", "✓ Balance sufficient".bright_green());
+        // Brief pause to see the balance
+        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
     Ok(())
@@ -115,48 +113,30 @@ fn show_header(config: &NetworkConfig) {
     println!();
 }
 
-/// Show main menu
-fn show_main_menu() {
-    println!("{}", "Main Menu:".bright_yellow().bold());
-    println!();
-    println!("  {}  Setup & Deployment", "1.".bright_cyan());
-    println!("  {}  Slab Operations (Create, Manage)", "2.".bright_cyan());
-    println!("  {}  Trading (Place Orders, View Orderbook)", "3.".bright_cyan());
-    println!("  {}  Margin & Portfolio", "4.".bright_cyan());
-    println!("  {}  AMM Operations", "5.".bright_cyan());
-    println!("  {}  Liquidity Operations", "6.".bright_cyan());
-    println!("  {}  Status & Info", "7.".bright_cyan());
-    println!("  {}  Run Tests", "8.".bright_cyan());
-    println!("  {}  About", "9.".bright_cyan());
-    println!();
-    println!("  {}  Quit", "0.".bright_cyan());
-    println!();
-}
-
 /// Setup and deployment workflow
 async fn setup_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Setup & Deployment ===".bright_green().bold());
         println!();
-        println!("  {}  Initialize Exchange (Router Registry)", "1.".bright_cyan());
-        println!("  {}  Initialize Portfolio (User Account)", "2.".bright_cyan());
-        println!("  {}  Deploy Programs", "3.".bright_cyan());
-        println!("  {}  Check Balance", "4.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Initialize Exchange (Router Registry)",
+            "Initialize Portfolio (User Account)",
+            "Deploy Programs",
+            "Check Balance",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Setup & Deployment")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                println!("\n{}", "Initializing Exchange...".bright_green());
-                let name = read_input("Exchange name (default: 'test'): ")?;
-                let name = if name.trim().is_empty() {
-                    "test".to_string()
-                } else {
-                    name.trim().to_string()
-                };
+        match selection {
+            0 => {
+                let name: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Exchange name")
+                    .default("test".into())
+                    .interact_text()?;
                 
                 exchange::initialize_exchange(
                     config,
@@ -169,26 +149,23 @@ async fn setup_workflow(config: &NetworkConfig) -> Result<()> {
                 
                 pause();
             }
-            "2" => {
+            1 => {
                 println!("\n{}", "Initializing Portfolio...".bright_green());
                 margin::initialize_portfolio(config).await?;
                 pause();
             }
-            "3" => {
+            2 => {
                 println!("\n{}", "Deploy Programs...".bright_green());
                 println!("{}", "Note: Deployment requires built programs.".yellow());
                 println!("{}", "Run 'cargo build-sbf' first.".yellow());
                 pause();
             }
-            "4" => {
+            3 => {
                 check_balance_and_prompt(config).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            4 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -197,78 +174,74 @@ async fn setup_workflow(config: &NetworkConfig) -> Result<()> {
 /// Slab operations workflow
 async fn slab_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Slab Operations ===".bright_green().bold());
         println!();
-        println!("  {}  Create New Slab", "1.".bright_cyan());
-        println!("  {}  Register Slab in Router", "2.".bright_cyan());
-        println!("  {}  View Slab Info", "3.".bright_cyan());
-        println!("  {}  View Orderbook", "4.".bright_cyan());
-        println!("  {}  Place Order on Slab", "5.".bright_cyan());
-        println!("  {}  Cancel Order", "6.".bright_cyan());
-        println!("  {}  Update Funding Rate", "7.".bright_cyan());
-        println!("  {}  Halt Trading", "8.".bright_cyan());
-        println!("  {}  Resume Trading", "9.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Create New Slab",
+            "Register Slab in Router",
+            "View Slab Info",
+            "View Orderbook",
+            "Place Order on Slab",
+            "Cancel Order",
+            "Update Funding Rate",
+            "Halt Trading",
+            "Resume Trading",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Slab Operations")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                println!("\n{}", "Create New Slab".bright_green());
-                let exchange = read_input("Exchange address (or 'default' for test): ")?;
-                let exchange = if exchange.trim() == "default" || exchange.trim().is_empty() {
-                    // Derive default registry
-                    let payer = config.pubkey();
-                    Pubkey::create_with_seed(
-                        &payer,
-                        "registry",
-                        &config.router_program_id,
-                    )?.to_string()
+        match selection {
+            0 => {
+                let exchange: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Exchange address (or 'default')")
+                    .default("default".into())
+                    .interact_text()?;
+
+                let exchange = if exchange == "default" {
+                     let payer = config.pubkey();
+                     Pubkey::create_with_seed(&payer, "registry", &config.router_program_id)?.to_string()
                 } else {
-                    exchange.trim().to_string()
+                    exchange
                 };
                 
-                let symbol = read_input("Symbol (e.g., BTC-USD): ")?;
-                let symbol = if symbol.trim().is_empty() {
-                    "BTC-USD".to_string()
-                } else {
-                    symbol.trim().to_string()
-                };
+                let symbol: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Symbol")
+                    .default("BTC-USD".into())
+                    .interact_text()?;
                 
-                let tick_size_str = read_input("Tick size (default: 1000000 = $1): ")?;
-                let tick_size = if tick_size_str.trim().is_empty() {
-                    1_000_000
-                } else {
-                    tick_size_str.trim().parse().context("Invalid tick size")?
-                };
+                let tick_size: u64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Tick size")
+                    .default(1_000_000)
+                    .interact_text()?;
                 
-                let lot_size_str = read_input("Lot size (default: 1000000 = 1.0): ")?;
-                let lot_size = if lot_size_str.trim().is_empty() {
-                    1_000_000
-                } else {
-                    lot_size_str.trim().parse().context("Invalid lot size")?
-                };
+                let lot_size: u64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Lot size")
+                    .default(1_000_000)
+                    .interact_text()?;
                 
                 matcher::create_matcher(config, exchange, symbol, tick_size, lot_size).await?;
                 pause();
             }
-            "2" => {
-                println!("\n{}", "Register Slab in Router".bright_green());
-                let registry = read_input("Registry address: ")?;
-                let slab_id = read_input("Slab ID: ")?;
-                let oracle_id = read_input("Oracle ID (or 'default'): ")?;
-                let oracle_id = if oracle_id.trim() == "default" || oracle_id.trim().is_empty() {
-                    config.oracle_program_id.to_string()
-                } else {
-                    oracle_id.trim().to_string()
-                };
+            1 => {
+                let registry: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Registry address")
+                    .interact_text()?;
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                let oracle_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Oracle ID")
+                    .default(config.oracle_program_id.to_string())
+                    .interact_text()?;
                 
                 matcher::register_slab(
                     config,
-                    registry.trim().to_string(),
-                    slab_id.trim().to_string(),
+                    registry,
+                    slab_id,
                     oracle_id,
                     500,  // 5% IMR
                     300,  // 3% MMR
@@ -279,37 +252,56 @@ async fn slab_workflow(config: &NetworkConfig) -> Result<()> {
                 ).await?;
                 pause();
             }
-            "3" => {
-                println!("\n{}", "View Slab Info".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                matcher::show_matcher_info(config, slab_id.trim().to_string()).await?;
+            2 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                matcher::show_matcher_info(config, slab_id).await?;
                 pause();
             }
-            "4" => {
-                println!("\n{}", "View Orderbook".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                matcher::get_orderbook(config, slab_id.trim().to_string()).await?;
+            3 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                matcher::get_orderbook(config, slab_id).await?;
                 pause();
             }
-            "5" => {
-                println!("\n{}", "Place Order on Slab".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                let side = read_input("Side (buy/sell): ")?;
-                let price_str = read_input("Price (e.g., 100.0): ")?;
-                let price = (price_str.trim().parse::<f64>().context("Invalid price")? * 1_000_000.0) as i64;
-                let qty_str = read_input("Quantity (e.g., 1.0): ")?;
-                let qty = (qty_str.trim().parse::<f64>().context("Invalid quantity")? * 1_000_000.0) as i64;
+            4 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
                 
-                let post_only = read_input("Post-only? (y/n): ")?;
-                let post_only = post_only.trim().to_lowercase() == "y";
+                let side_idx = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Side")
+                    .items(&["buy", "sell"])
+                    .default(0)
+                    .interact()?;
+                let side = if side_idx == 0 { "buy" } else { "sell" };
+
+                let price_float: f64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Price")
+                    .interact_text()?;
+                let price = (price_float * 1_000_000.0) as i64;
+
+                let qty_float: f64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Quantity")
+                    .interact_text()?;
+                let qty = (qty_float * 1_000_000.0) as i64;
                 
-                let reduce_only = read_input("Reduce-only? (y/n): ")?;
-                let reduce_only = reduce_only.trim().to_lowercase() == "y";
+                let post_only = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Post-only?")
+                    .default(false)
+                    .interact()?;
+                
+                let reduce_only = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Reduce-only?")
+                    .default(false)
+                    .interact()?;
                 
                 matcher::place_order(
                     config,
-                    slab_id.trim().to_string(),
-                    side.trim().to_string(),
+                    slab_id,
+                    side.to_string(),
                     price,
                     qty,
                     post_only,
@@ -317,39 +309,43 @@ async fn slab_workflow(config: &NetworkConfig) -> Result<()> {
                 ).await?;
                 pause();
             }
-            "6" => {
-                println!("\n{}", "Cancel Order".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                let order_id_str = read_input("Order ID: ")?;
-                let order_id = order_id_str.trim().parse().context("Invalid order ID")?;
-                matcher::cancel_order(config, slab_id.trim().to_string(), order_id).await?;
+            5 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                let order_id: u64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Order ID")
+                    .interact_text()?;
+                matcher::cancel_order(config, slab_id, order_id).await?;
                 pause();
             }
-            "7" => {
-                println!("\n{}", "Update Funding Rate".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                let price_str = read_input("Oracle price (e.g., 100.0): ")?;
-                let oracle_price = (price_str.trim().parse::<f64>().context("Invalid price")? * 1_000_000.0) as i64;
-                matcher::update_funding(config, slab_id.trim().to_string(), oracle_price, None).await?;
+            6 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                let price_float: f64 = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Oracle price")
+                    .interact_text()?;
+                let oracle_price = (price_float * 1_000_000.0) as i64;
+                matcher::update_funding(config, slab_id, oracle_price, None).await?;
                 pause();
             }
-            "8" => {
-                println!("\n{}", "Halt Trading".bright_red());
-                let slab_id = read_input("Slab ID: ")?;
-                matcher::halt_trading(config, slab_id.trim().to_string()).await?;
+            7 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                matcher::halt_trading(config, slab_id).await?;
                 pause();
             }
-            "9" => {
-                println!("\n{}", "Resume Trading".bright_green());
-                let slab_id = read_input("Slab ID: ")?;
-                matcher::resume_trading(config, slab_id.trim().to_string()).await?;
+            8 => {
+                let slab_id: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Slab ID")
+                    .interact_text()?;
+                matcher::resume_trading(config, slab_id).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            9 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -358,105 +354,90 @@ async fn slab_workflow(config: &NetworkConfig) -> Result<()> {
 /// Trading workflow
 async fn trading_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Trading Operations ===".bright_green().bold());
         println!();
-        println!("  {}  Place Limit Order (Router)", "1.".bright_cyan());
-        println!("  {}  Place Market Order (Router)", "2.".bright_cyan());
-        println!("  {}  Place Slab Order (Resting)", "3.".bright_cyan());
-        println!("  {}  Cancel Slab Order", "4.".bright_cyan());
-        println!("  {}  Modify Slab Order", "5.".bright_cyan());
-        println!("  {}  View Orderbook", "6.".bright_cyan());
-        println!("  {}  List Open Orders", "7.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Place Limit Order (Router)",
+            "Place Market Order (Router)",
+            "Place Slab Order (Resting)",
+            "Cancel Slab Order",
+            "Modify Slab Order",
+            "View Orderbook",
+            "List Open Orders",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Trading Operations")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                println!("\n{}", "Place Limit Order (Router)".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let side = read_input("Side (buy/sell): ")?;
-                let price_str = read_input("Price (e.g., 100.0): ")?;
-                let price = price_str.trim().parse().context("Invalid price")?;
-                let size_str = read_input("Size (e.g., 1.0): ")?;
-                let size = (size_str.trim().parse::<f64>().context("Invalid size")? * 1_000_000.0) as u64;
+        match selection {
+            0 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let side_idx = Select::with_theme(&ColorfulTheme::default()).with_prompt("Side").items(&["buy", "sell"]).default(0).interact()?;
+                let side = if side_idx == 0 { "buy" } else { "sell" };
+                let price_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Price").interact_text()?;
+                let size_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Size").interact_text()?;
+                let size = (size_f * 1_000_000.0) as u64;
                 
-                trading::place_limit_order(config, slab.trim().to_string(), side.trim().to_string(), price, size, false).await?;
+                trading::place_limit_order(config, slab, side.to_string(), price_f, size, false).await?;
                 pause();
             }
-            "2" => {
-                println!("\n{}", "Place Market Order (Router)".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let side = read_input("Side (buy/sell): ")?;
-                let size_str = read_input("Size (e.g., 1.0): ")?;
-                let size = (size_str.trim().parse::<f64>().context("Invalid size")? * 1_000_000.0) as u64;
+            1 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let side_idx = Select::with_theme(&ColorfulTheme::default()).with_prompt("Side").items(&["buy", "sell"]).default(0).interact()?;
+                let side = if side_idx == 0 { "buy" } else { "sell" };
+                let size_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Size").interact_text()?;
+                let size = (size_f * 1_000_000.0) as u64;
                 
-                trading::place_market_order(config, slab.trim().to_string(), side.trim().to_string(), size).await?;
+                trading::place_market_order(config, slab, side.to_string(), size).await?;
                 pause();
             }
-            "3" => {
-                println!("\n{}", "Place Slab Order (Resting)".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let side = read_input("Side (buy/sell): ")?;
-                let price_str = read_input("Price (e.g., 100.0): ")?;
-                let price = price_str.trim().parse().context("Invalid price")?;
-                let size_str = read_input("Size (e.g., 1.0): ")?;
-                let size = (size_str.trim().parse::<f64>().context("Invalid size")? * 1_000_000.0) as u64;
+            2 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let side_idx = Select::with_theme(&ColorfulTheme::default()).with_prompt("Side").items(&["buy", "sell"]).default(0).interact()?;
+                let side = if side_idx == 0 { "buy" } else { "sell" };
+                let price_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Price").interact_text()?;
+                let size_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Size").interact_text()?;
+                let size = (size_f * 1_000_000.0) as u64;
                 
-                trading::place_slab_order(config, slab.trim().to_string(), side.trim().to_string(), price, size).await?;
+                trading::place_slab_order(config, slab, side.to_string(), price_f, size).await?;
                 pause();
             }
-            "4" => {
-                println!("\n{}", "Cancel Slab Order".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let order_id_str = read_input("Order ID: ")?;
-                let order_id = order_id_str.trim().parse().context("Invalid order ID")?;
-                trading::cancel_slab_order(config, slab.trim().to_string(), order_id).await?;
+            3 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let order_id: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Order ID").interact_text()?;
+                trading::cancel_slab_order(config, slab, order_id).await?;
                 pause();
             }
-            "5" => {
-                println!("\n{}", "Modify Slab Order".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let order_id_str = read_input("Order ID: ")?;
-                let order_id = order_id_str.trim().parse().context("Invalid order ID")?;
-                let price_str = read_input("New price (e.g., 100.0): ")?;
-                let price = price_str.trim().parse().context("Invalid price")?;
-                let size_str = read_input("New size (e.g., 1.0): ")?;
-                let size = (size_str.trim().parse::<f64>().context("Invalid size")? * 1_000_000.0) as u64;
-                
-                trading::modify_slab_order(config, slab.trim().to_string(), order_id, price, size).await?;
+            4 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let order_id: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Order ID").interact_text()?;
+                let price_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("New Price").interact_text()?;
+                let size_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("New Size").interact_text()?;
+                let size = (size_f * 1_000_000.0) as u64;
+
+                trading::modify_slab_order(config, slab, order_id, price_f, size).await?;
                 pause();
             }
-            "6" => {
-                println!("\n{}", "View Orderbook".bright_green());
-                let slab = read_input("Slab ID: ")?;
-                let depth_str = read_input("Depth (default: 10): ")?;
-                let depth = if depth_str.trim().is_empty() {
-                    10
-                } else {
-                    depth_str.trim().parse().context("Invalid depth")?
-                };
-                trading::show_order_book(config, slab.trim().to_string(), depth).await?;
+            5 => {
+                let slab: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Slab ID").interact_text()?;
+                let depth: usize = Input::with_theme(&ColorfulTheme::default()).with_prompt("Depth").default(10).interact_text()?;
+                trading::show_order_book(config, slab, depth).await?;
                 pause();
             }
-            "7" => {
-                println!("\n{}", "List Open Orders".bright_green());
-                let user = read_input("User address (or press Enter for self): ")?;
-                let user = if user.trim().is_empty() {
-                    None
-                } else {
-                    Some(user.trim().to_string())
-                };
-                trading::list_orders(config, user).await?;
+            6 => {
+                let user: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("User address (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let user_opt = if user.is_empty() { None } else { Some(user) };
+                trading::list_orders(config, user_opt).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            7 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -465,63 +446,59 @@ async fn trading_workflow(config: &NetworkConfig) -> Result<()> {
 /// Margin workflow
 async fn margin_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Margin & Portfolio ===".bright_green().bold());
         println!();
-        println!("  {}  Initialize Portfolio", "1.".bright_cyan());
-        println!("  {}  Deposit Collateral", "2.".bright_cyan());
-        println!("  {}  Withdraw Collateral", "3.".bright_cyan());
-        println!("  {}  View Portfolio", "4.".bright_cyan());
-        println!("  {}  View Margin Requirements", "5.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Initialize Portfolio",
+            "Deposit Collateral",
+            "Withdraw Collateral",
+            "View Portfolio",
+            "View Margin Requirements",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Margin & Portfolio")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
+        match selection {
+            0 => {
                 margin::initialize_portfolio(config).await?;
                 pause();
             }
-            "2" => {
-                println!("\n{}", "Deposit Collateral".bright_green());
-                let amount_str = read_input("Amount in SOL (e.g., 1.0): ")?;
-                let amount = (amount_str.trim().parse::<f64>().context("Invalid amount")? * 1_000_000_000.0) as u64;
+            1 => {
+                let amount_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount in SOL").interact_text()?;
+                let amount = (amount_f * 1_000_000_000.0) as u64;
                 margin::deposit_collateral(config, amount, None).await?;
                 pause();
             }
-            "3" => {
-                println!("\n{}", "Withdraw Collateral".bright_green());
-                let amount_str = read_input("Amount in SOL (e.g., 0.5): ")?;
-                let amount = (amount_str.trim().parse::<f64>().context("Invalid amount")? * 1_000_000_000.0) as u64;
+            2 => {
+                let amount_f: f64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount in SOL").interact_text()?;
+                let amount = (amount_f * 1_000_000_000.0) as u64;
                 margin::withdraw_collateral(config, amount, None).await?;
                 pause();
             }
-            "4" => {
-                let user = read_input("User address (or press Enter for self): ")?;
-                let user = if user.trim().is_empty() {
-                    None
-                } else {
-                    Some(user.trim().to_string())
-                };
-                margin::show_margin_account(config, user).await?;
+            3 => {
+                let user: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("User address (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let user_opt = if user.is_empty() { None } else { Some(user) };
+                margin::show_margin_account(config, user_opt).await?;
                 pause();
             }
-            "5" => {
-                let user = read_input("User address (or press Enter for self): ")?;
-                let user = if user.trim().is_empty() {
-                    config.pubkey().to_string()
-                } else {
-                    user.trim().to_string()
-                };
+            4 => {
+                let user: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("User address (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let user = if user.is_empty() { config.pubkey().to_string() } else { user };
                 margin::show_margin_requirements(config, user).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            5 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -530,46 +507,35 @@ async fn margin_workflow(config: &NetworkConfig) -> Result<()> {
 /// AMM workflow
 async fn amm_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== AMM Operations ===".bright_green().bold());
         println!();
-        println!("  {}  Create AMM Pool", "1.".bright_cyan());
-        println!("  {}  List AMM Pools", "2.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Create AMM Pool",
+            "List AMM Pools",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("AMM Operations")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                println!("\n{}", "Create AMM Pool".bright_green());
-                let registry = read_input("Registry address: ")?;
-                let symbol = read_input("Symbol (e.g., BTC-USD): ")?;
-                let x_reserve_str = read_input("X reserve (default: 1000000): ")?;
-                let x_reserve = if x_reserve_str.trim().is_empty() {
-                    1_000_000
-                } else {
-                    x_reserve_str.trim().parse().context("Invalid reserve")?
-                };
-                let y_reserve_str = read_input("Y reserve (default: 1000000): ")?;
-                let y_reserve = if y_reserve_str.trim().is_empty() {
-                    1_000_000
-                } else {
-                    y_reserve_str.trim().parse().context("Invalid reserve")?
-                };
+        match selection {
+            0 => {
+                let registry: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Registry address").interact_text()?;
+                let symbol: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Symbol").interact_text()?;
+                let x_reserve: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("X reserve").default(1_000_000).interact_text()?;
+                let y_reserve: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Y reserve").default(1_000_000).interact_text()?;
                 
-                amm::create_amm(config, registry.trim().to_string(), symbol.trim().to_string(), x_reserve, y_reserve).await?;
+                amm::create_amm(config, registry, symbol, x_reserve, y_reserve).await?;
                 pause();
             }
-            "2" => {
+            1 => {
                 amm::list_amms(config).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            2 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -578,33 +544,35 @@ async fn amm_workflow(config: &NetworkConfig) -> Result<()> {
 /// Liquidity workflow
 async fn liquidity_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Liquidity Operations ===".bright_green().bold());
         println!();
-        println!("  {}  Add Liquidity", "1.".bright_cyan());
-        println!("  {}  Remove Liquidity", "2.".bright_cyan());
-        println!("  {}  Show Positions", "3.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "Add Liquidity",
+            "Remove Liquidity",
+            "Show Positions",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Liquidity Operations")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                println!("\n{}", "Add Liquidity".bright_green());
-                let matcher = read_input("Matcher address: ")?;
-                let amount_str = read_input("Amount: ")?;
-                let amount = amount_str.trim().parse().context("Invalid amount")?;
-                let mode = read_input("Mode (amm/orderbook, default: amm): ")?;
-                let mode = if mode.trim().is_empty() {
-                    "amm".to_string()
-                } else {
-                    mode.trim().to_string()
-                };
+        match selection {
+            0 => {
+                let matcher: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Matcher address").interact_text()?;
+                let amount: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount").interact_text()?;
+                
+                let mode_idx = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Mode")
+                    .items(&["amm", "orderbook"])
+                    .default(0)
+                    .interact()?;
+                let mode = if mode_idx == 0 { "amm".to_string() } else { "orderbook".to_string() };
                 
                 liquidity::add_liquidity(
                     config,
-                    matcher.trim().to_string(),
+                    matcher,
                     amount,
                     None,
                     mode,
@@ -616,29 +584,23 @@ async fn liquidity_workflow(config: &NetworkConfig) -> Result<()> {
                 ).await?;
                 pause();
             }
-            "2" => {
-                println!("\n{}", "Remove Liquidity".bright_green());
-                let matcher = read_input("Matcher address: ")?;
-                let amount_str = read_input("Amount: ")?;
-                let amount = amount_str.trim().parse().context("Invalid amount")?;
-                liquidity::remove_liquidity(config, matcher.trim().to_string(), amount).await?;
+            1 => {
+                let matcher: String = Input::with_theme(&ColorfulTheme::default()).with_prompt("Matcher address").interact_text()?;
+                let amount: u64 = Input::with_theme(&ColorfulTheme::default()).with_prompt("Amount").interact_text()?;
+                liquidity::remove_liquidity(config, matcher, amount).await?;
                 pause();
             }
-            "3" => {
-                let user = read_input("User address (or press Enter for self): ")?;
-                let user = if user.trim().is_empty() {
-                    None
-                } else {
-                    Some(user.trim().to_string())
-                };
-                liquidity::show_positions(config, user).await?;
+            2 => {
+                let user: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("User address (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let user_opt = if user.is_empty() { None } else { Some(user) };
+                liquidity::show_positions(config, user_opt).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            3 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -647,52 +609,51 @@ async fn liquidity_workflow(config: &NetworkConfig) -> Result<()> {
 /// Status workflow
 async fn status_workflow(config: &NetworkConfig) -> Result<()> {
     loop {
-        clear_screen();
-        println!("{}", "=== Status & Info ===".bright_green().bold());
         println!();
-        println!("  {}  View Registry Status", "1.".bright_cyan());
-        println!("  {}  View Portfolio", "2.".bright_cyan());
-        println!("  {}  Check Balance", "3.".bright_cyan());
-        println!("  {}  Back to Main Menu", "0.".bright_cyan());
-        println!();
+        let choices = &[
+            "View Registry Status",
+            "View Portfolio",
+            "Check Balance",
+            "Back to Main Menu",
+        ];
 
-        let choice = read_input("Enter your choice: ")?;
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Status & Info")
+            .default(0)
+            .items(&choices[..])
+            .interact()?;
 
-        match choice.trim() {
-            "1" => {
-                let registry = read_input("Registry address (or 'default'): ")?;
-                let registry = if registry.trim() == "default" || registry.trim().is_empty() {
-                    let payer = config.pubkey();
-                    Pubkey::create_with_seed(
-                        &payer,
-                        "registry",
-                        &config.router_program_id,
-                    )?.to_string()
+        match selection {
+            0 => {
+                let registry: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Registry address (or 'default')")
+                    .default("default".into())
+                    .interact_text()?;
+
+                let registry = if registry == "default" {
+                     let payer = config.pubkey();
+                     Pubkey::create_with_seed(&payer, "registry", &config.router_program_id)?.to_string()
                 } else {
-                    registry.trim().to_string()
+                    registry
                 };
                 exchange::query_registry_status(config, registry, true).await?;
                 pause();
             }
-            "2" => {
-                let user = read_input("User address (or press Enter for self): ")?;
-                let user = if user.trim().is_empty() {
-                    None
-                } else {
-                    Some(user.trim().to_string())
-                };
-                margin::show_margin_account(config, user).await?;
+            1 => {
+                let user: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("User address (optional)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let user_opt = if user.is_empty() { None } else { Some(user) };
+                margin::show_margin_account(config, user_opt).await?;
                 pause();
             }
-            "3" => {
+            2 => {
                 check_balance_and_prompt(config).await?;
                 pause();
             }
-            "0" => break,
-            _ => {
-                println!("\n{} Invalid choice.", "⚠".yellow());
-                pause();
-            }
+            3 => break,
+            _ => {}
         }
     }
     Ok(())
@@ -700,7 +661,8 @@ async fn status_workflow(config: &NetworkConfig) -> Result<()> {
 
 /// About workflow
 async fn about_workflow(_config: &NetworkConfig) -> Result<()> {
-    clear_screen();
+    let term = Term::stdout();
+    term.clear_screen()?;
     println!("{}", "=== About Percolator ===".bright_green().bold());
     println!();
     println!("Percolator is a high-performance decentralized exchange (DEX) protocol");
@@ -725,7 +687,7 @@ async fn about_workflow(_config: &NetworkConfig) -> Result<()> {
 }
 
 /// Test workflow
-async fn test_workflow(config: &NetworkConfig) -> Result<()> {
+async fn test_workflow(_config: &NetworkConfig) -> Result<()> {
     println!("\n{}", "=== Run Tests ===".bright_green().bold());
     println!();
     println!("{}", "Note: Tests are run via the 'test' command.".yellow());
@@ -735,31 +697,7 @@ async fn test_workflow(config: &NetworkConfig) -> Result<()> {
     Ok(())
 }
 
-/// Utility functions
-
-fn clear_screen() {
-    // Try ANSI escape codes first (works on modern Windows terminals)
-    print!("\x1B[2J\x1B[1;1H");
-    io::stdout().flush().ok();
-    
-    // On Windows, also try cls command as fallback
-    #[cfg(windows)]
-    {
-        use std::process::Command;
-        let _ = Command::new("cmd").args(["/C", "cls"]).status();
-    }
-}
-
-fn read_input(prompt: &str) -> Result<String> {
-    print!("{}", prompt.bright_cyan());
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input)
-}
-
 fn pause() {
     println!("\n{}", "Press Enter to continue...".dimmed());
-    let _ = read_input("");
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
-

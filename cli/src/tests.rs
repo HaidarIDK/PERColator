@@ -2396,6 +2396,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
             slab_program_id: config.slab_program_id,
             amm_program_id: config.amm_program_id,
             oracle_program_id: config.oracle_program_id,
+            json_output: false,
         };
         margin::initialize_portfolio(&actor_config).await?;
         println!("{}", format!("  ✓ {} portfolio initialized", name).green());
@@ -2425,6 +2426,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
             slab_program_id: config.slab_program_id,
             amm_program_id: config.amm_program_id,
             oracle_program_id: config.oracle_program_id,
+            json_output: false,
         };
         margin::deposit_collateral(&actor_config, amount, None).await?;
         println!("{}", format!("  ✓ {} deposited {} lamports ({} SOL)", name, amount, amount as f64 / 1e9).green());

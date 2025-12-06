@@ -10,18 +10,20 @@ import { StatusFooter } from '@/components/StatusFooter';
 import { AMMInterface } from '@/components/trading/AMMInterface';
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { Home, Plus, Terminal, Wallet } from 'lucide-react';
+import { Home, Terminal, Wallet, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { type Coin } from '@/lib/hyperliquid-client';
+import { cn } from '@/lib/utils';
+import { GridPattern } from '@/components/ui/grid-pattern';
 
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const [selectedCoin, setSelectedCoin] = useState<Coin>('SOL');
   const [currentPrice, setCurrentPrice] = useState<number>(0);
-  const [rightPanelWidth, setRightPanelWidth] = useState(420); // Narrower default width for more chart space
+  const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [isResizing, setIsResizing] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
-  const [tradingMode, setTradingMode] = useState<'orderbook' | 'amm' | 'lp'>('orderbook');
+  const [tradingMode, setTradingMode] = useState<'orderbook' | 'amm'>('orderbook');
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Handle client-side mounting
@@ -37,7 +39,6 @@ export default function DashboardPage() {
       const containerRect = containerRef.current.getBoundingClientRect();
       const newWidth = containerRect.right - e.clientX;
       
-      // Clamp between 280px and 700px (narrower range for more compact panel)
       const clampedWidth = Math.max(280, Math.min(700, newWidth));
       setRightPanelWidth(clampedWidth);
     };
@@ -61,16 +62,17 @@ export default function DashboardPage() {
     };
   }, [isResizing]);
 
-  // Don't render until mounted (prevents hydration mismatch)
   if (!isMounted) {
-  return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center">
-        <div className="text-gray-400">Loading...</div>
-    </div>
-  );
-}
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-zinc-400 text-sm font-medium">Initializing Dashboard...</span>
+        </div>
+      </div>
+    );
+  }
 
-  // Map Coin type to string for OrderForm
   const getCoinString = (coin: Coin): "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat" => {
     switch(coin) {
       case 'ETH': return 'ethereum';
@@ -82,7 +84,6 @@ export default function DashboardPage() {
     }
   };
 
-  // Map Coin type for symbol
   const getSymbol = (coin: Coin): string => {
     switch(coin) {
       case 'ETH': return 'ETH-USDC';
@@ -95,59 +96,72 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden">
+    <div className="h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden relative">
+      {/* Background Patterns */}
+      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+        <GridPattern 
+            width={40} 
+            height={40} 
+            x={-1} 
+            y={-1} 
+            className={cn("[mask-image:linear-gradient(to_bottom_right,white,transparent,transparent)] opacity-20")} 
+        />
+        <div className="absolute inset-0 bg-gradient-to-b from-blue-500/5 via-transparent to-purple-500/5" />
+      </div>
+
       {/* Testnet Warning Banner */}
-      <TestnetBanner />
+      <div className="relative z-50">
+        <TestnetBanner />
+      </div>
 
       {/* Header */}
-      <header className="border-b border-white/5 bg-zinc-950/80 backdrop-blur-md shrink-0 z-50">
+      <header className="border-b border-white/5 bg-zinc-950/60 backdrop-blur-xl shrink-0 z-50 relative">
         <div className="px-4 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <Link href="/" className="group">
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-zinc-800 transition-all">
-                  <Home className="w-4 h-4 text-zinc-400 group-hover:text-white" />
-                  <span className="text-sm font-medium text-zinc-400 group-hover:text-white hidden sm:inline">Home</span>
+            <div className="flex items-center gap-6">
+              <Link href="/" className="group flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                  <Zap className="w-5 h-5 text-white fill-white" />
+                </div>
+                <div className="flex flex-col">
+                  <h1 className="text-lg font-bold tracking-tight leading-none">
+                    <span className="bg-gradient-to-r from-blue-400 to-violet-400 bg-clip-text text-transparent">Percolator</span>
+                  </h1>
+                  <span className="text-[10px] font-medium text-zinc-500 tracking-widest uppercase">Pro Terminal</span>
                 </div>
               </Link>
+
+              <div className="h-6 w-[1px] bg-white/10 hidden sm:block" />
               
-              <div className="flex items-center gap-2">
-                <div className="h-8 w-[1px] bg-white/5 mx-2 hidden sm:block" />
-                <h1 className="text-lg font-bold tracking-tight">
-                  <span className="bg-gradient-to-r from-blue-400 to-violet-500 bg-clip-text text-transparent">Percolator</span>
-                </h1>
-                <span className="px-2 py-0.5 text-[10px] font-bold tracking-wide bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-full uppercase">
-                  Devnet
-                </span>
+              <div className="hidden sm:flex items-center gap-1">
+                 <Link href="/" className="px-3 py-1.5 text-sm font-medium text-zinc-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                    Home
+                 </Link>
+                 <Link href="/portfolio" className="px-3 py-1.5 text-sm font-medium text-zinc-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                    Portfolio
+                 </Link>
+                 <Link href="/cli" className="px-3 py-1.5 text-sm font-medium text-zinc-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
+                    CLI
+                 </Link>
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              <Link href="/cli" className="group">
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-emerald-500/10 hover:border-emerald-500/20 transition-all">
-                  <Terminal className="w-4 h-4 text-zinc-400 group-hover:text-emerald-400" />
-                  <span className="text-sm font-medium text-zinc-400 group-hover:text-emerald-400 hidden sm:inline">CLI</span>
-                </div>
-              </Link>
+            <div className="flex items-center gap-4">
+               <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-full">
+                  <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+                  <span className="text-xs font-medium text-blue-300">Devnet Live</span>
+               </div>
               
-              <Link href="/portfolio" className="group">
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/50 border border-white/5 hover:bg-violet-500/10 hover:border-violet-500/20 transition-all">
-                  <Wallet className="w-4 h-4 text-zinc-400 group-hover:text-violet-400" />
-                  <span className="text-sm font-medium text-zinc-400 group-hover:text-violet-400 hidden sm:inline">Portfolio</span>
-                </div>
-              </Link>
-              
-              <div className="h-8 w-[1px] bg-white/5 mx-1" />
-              <WalletMultiButton className="!bg-zinc-900 !border !border-white/10 !rounded-full !h-9 !px-4 !text-sm !font-medium hover:!bg-zinc-800 !transition-all" />
+              <WalletMultiButton className="!bg-zinc-900 !border !border-white/10 !rounded-xl !h-10 !px-4 !text-sm !font-medium hover:!bg-zinc-800 !transition-all shadow-lg shadow-black/20" />
             </div>
           </div>
         </div>
       </header>
 
-      {/* Main Content - Responsive Layout */}
+      {/* Main Content */}
       <div 
         ref={containerRef} 
-        className="flex-1 flex flex-col lg:flex-row overflow-hidden relative"
+        className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10"
         style={{ 
           height: 'calc(100vh - 130px)',
           minHeight: 0
@@ -155,7 +169,7 @@ export default function DashboardPage() {
       >
         {/* Chart Area */}
         <div 
-          className="w-full lg:flex-1 flex flex-col shrink-0 bg-zinc-950"
+          className="w-full lg:flex-1 flex flex-col shrink-0 p-1"
           style={isMounted && typeof window !== 'undefined' && window.innerWidth >= 1024 
             ? { 
                 width: `calc(100% - ${rightPanelWidth}px)`, 
@@ -170,28 +184,26 @@ export default function DashboardPage() {
               }
           }
         >
-          <div className="w-full h-full p-1">
-            <div className="w-full h-full rounded-xl border border-white/5 overflow-hidden bg-zinc-900/50">
-              <TradingChart 
-                coin={selectedCoin} 
-                onPriceUpdate={setCurrentPrice}
-                onCoinChange={setSelectedCoin}
-              />
-            </div>
+          <div className="w-full h-full rounded-2xl border border-white/5 overflow-hidden bg-zinc-900/40 backdrop-blur-sm shadow-2xl ring-1 ring-white/5">
+            <TradingChart 
+              coin={selectedCoin} 
+              onPriceUpdate={setCurrentPrice}
+              onCoinChange={setSelectedCoin}
+            />
           </div>
         </div>
 
         {/* Resizer Handle - Desktop Only */}
         <div
           onMouseDown={() => setIsResizing(true)}
-          className="hidden lg:flex w-1 items-center justify-center cursor-col-resize group z-10 hover:w-1.5 transition-all duration-300 -ml-[2px]"
+          className="hidden lg:flex w-2 items-center justify-center cursor-col-resize group z-20 -ml-1 hover:w-3 transition-all duration-200"
         >
-          <div className="w-[1px] h-full bg-white/5 group-hover:bg-blue-500/50 transition-colors" />
+          <div className="w-[1px] h-12 bg-white/10 group-hover:bg-blue-500/50 group-hover:h-24 transition-all rounded-full" />
         </div>
 
         {/* Trading Panel */}
         <div 
-          className="w-full lg:w-auto bg-zinc-950 border-t lg:border-t-0 border-white/5 p-2 overflow-y-auto shrink-0"
+          className="w-full lg:w-auto p-1 overflow-y-auto shrink-0"
           style={isMounted && typeof window !== 'undefined' && window.innerWidth >= 1024 
             ? { 
                 width: `${rightPanelWidth}px`,
@@ -205,33 +217,39 @@ export default function DashboardPage() {
               }
           }
         >
-          <div className="flex flex-col h-full gap-3">
+          <div className="w-full h-full rounded-2xl border border-white/5 bg-zinc-900/40 backdrop-blur-sm shadow-2xl ring-1 ring-white/5 flex flex-col overflow-hidden">
             {/* Trading Panel Header */}
-            <div className="flex items-center justify-between px-2 pt-1">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-white/[0.02]">
               <div>
-                <h2 className="text-sm font-medium text-zinc-100">Trade {selectedCoin}/USDC</h2>
-                <p className="text-xs text-zinc-500 font-mono mt-0.5">${currentPrice.toFixed(2)}</p>
+                <div className="flex items-baseline gap-2">
+                   <h2 className="text-sm font-semibold text-zinc-100">{selectedCoin}/USDC</h2>
+                   <span className={cn("text-xs font-mono", currentPrice > 0 ? "text-emerald-400" : "text-zinc-500")}>
+                      ${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                   </span>
+                </div>
               </div>
               
               {/* Trading Mode Toggle */}
-              <div className="flex items-center bg-zinc-900 border border-white/5 p-1 rounded-lg">
+              <div className="flex items-center bg-black/20 p-1 rounded-lg border border-white/5">
                 <button
                   onClick={() => setTradingMode('orderbook')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  className={cn(
+                    "px-3 py-1 rounded-md text-xs font-medium transition-all",
                     tradingMode === 'orderbook'
-                      ? 'bg-zinc-800 text-white shadow-sm'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}
+                      ? "bg-zinc-800 text-white shadow-sm ring-1 ring-white/10"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  )}
                 >
                   Order Book
                 </button>
                 <button
                   onClick={() => setTradingMode('amm')}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  className={cn(
+                    "px-3 py-1 rounded-md text-xs font-medium transition-all",
                     tradingMode === 'amm'
-                      ? 'bg-zinc-800 text-white shadow-sm'
-                      : 'text-zinc-500 hover:text-zinc-300'
-                  }`}
+                      ? "bg-zinc-800 text-white shadow-sm ring-1 ring-white/10"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  )}
                 >
                   AMM
                 </button>
@@ -239,34 +257,38 @@ export default function DashboardPage() {
             </div>
 
             {/* Trading Interface */}
-            <div className="flex-1 flex flex-col min-h-0 gap-3">
-              {tradingMode === 'orderbook' ? (
-                <>
-                  <OrderForm 
-                    coin={getCoinString(selectedCoin)} 
-                    currentPrice={currentPrice} 
-                  />
-                  <div className="flex-1 min-h-0">
-                    <OrderBook symbol={getSymbol(selectedCoin)} walletAddress={publicKey?.toBase58()} />
-                  </div>
-                </>
-              ) : (
-                <div className="flex-1">
-                  <AMMInterface 
-                    selectedCoin={getCoinString(selectedCoin)} 
-                    mode="swap"
-                    showToast={() => {}}
-                    chartCurrentPrice={currentPrice}
-                  />
-                </div>
-              )}
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+               <div className="absolute inset-0 overflow-y-auto p-3 space-y-3 custom-scrollbar">
+                  {tradingMode === 'orderbook' ? (
+                    <>
+                      <div className="p-1">
+                        <OrderForm 
+                          coin={getCoinString(selectedCoin)} 
+                          currentPrice={currentPrice} 
+                        />
+                      </div>
+                      <div className="rounded-xl border border-white/5 bg-black/20 overflow-hidden">
+                        <OrderBook symbol={getSymbol(selectedCoin)} walletAddress={publicKey?.toBase58()} />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="h-full">
+                      <AMMInterface 
+                        selectedCoin={getCoinString(selectedCoin)} 
+                        mode="swap"
+                        showToast={() => {}}
+                        chartCurrentPrice={currentPrice}
+                      />
+                    </div>
+                  )}
+              </div>
             </div>
           </div>
         </div>
       </div>
       
       {/* Status Footer */}
-      <div className="hidden lg:block shrink-0 border-t border-white/5 bg-zinc-950">
+      <div className="hidden lg:block shrink-0 border-t border-white/5 bg-zinc-950/80 backdrop-blur z-20">
         <StatusFooter />
       </div>
     </div>
