@@ -42,25 +42,6 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
       return;
     }
 
-    // Use ResizeObserver to get accurate dimensions
-    const updateChartSize = () => {
-      if (!chartContainerRef.current || !chartRef.current) return;
-      
-      const containerWidth = chartContainerRef.current.clientWidth || chartContainerRef.current.offsetWidth;
-      const containerHeight = chartContainerRef.current.clientHeight || chartContainerRef.current.offsetHeight;
-      
-      if (containerWidth > 0 && containerHeight > 0) {
-        chartRef.current.applyOptions({
-          width: containerWidth,
-          height: containerHeight,
-          timeScale: {
-            visible: true,
-            timeVisible: true,
-          },
-        });
-      }
-    };
-
     // Initial size calculation - use actual container dimensions
     // Use requestAnimationFrame to ensure layout is complete
     const getInitialSize = () => {
@@ -330,37 +311,15 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
 
     loadHistoricalData();
 
-    // Handle resize with debounce for better performance
-    let resizeTimeout: NodeJS.Timeout;
-    const handleResize = () => {
-      clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(() => {
-        if (chartContainerRef.current && chart && isMounted) {
-          const rect = chartContainerRef.current.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            chart.applyOptions({
-              width: Math.max(rect.width, 300),
-              height: Math.max(rect.height, 300),
-              timeScale: {
-                visible: true,
-                timeVisible: true,
-              },
-            });
-          }
-        }
-      }, 100);
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    // Use ResizeObserver to detect container size changes (for panel resizing and viewport changes)
+    // Use ResizeObserver to detect container size changes (handles both panel resizing and window resize)
+    // This is more efficient than multiple window resize listeners
     const resizeObserver = new ResizeObserver((entries) => {
       if (!isMounted || !chart) return;
-      
+
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          chart.applyOptions({ 
+          chart.applyOptions({
             width: Math.max(width, 300),
             height: Math.max(height, 300),
             timeScale: {
@@ -376,18 +335,8 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
       resizeObserver.observe(chartContainerRef.current);
     }
 
-    // Also listen to window resize for better responsiveness
-    const handleWindowResize = () => {
-      updateChartSize();
-    };
-    
-    window.addEventListener('resize', handleWindowResize);
-
     return () => {
       isMounted = false;
-      clearTimeout(resizeTimeout);
-      window.removeEventListener('resize', handleResize);
-      window.removeEventListener('resize', handleWindowResize);
       resizeObserver.disconnect();
       if (wsCleanupRef.current) {
         wsCleanupRef.current();
