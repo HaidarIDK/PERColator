@@ -2,15 +2,6 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
-
-# Solana BPF builds
-*.so
-*.rlib
-/target-bpf/
-/target/bpfel-unknown-none/
-/target/sbf-solana-solana/
-/target/deploy/
 
 # Build artifacts
 *.o
@@ -18,6 +9,8 @@ Cargo.lock
 *.dylib
 *.dll
 *.exe
+*.so
+*.rlib
 
 # IDE
 .vscode/
@@ -27,21 +20,11 @@ Cargo.lock
 *~
 .DS_Store
 
-# Node/NPM (if used for tooling)
-node_modules/
-package-lock.json
-*.log
-npm-debug.log*
-
 # Temporary files
 *.tmp
 *.bak
-*.swp
-*~
 .#*
 \#*\#
-.*.swp
-.*.swo
 
 # OS files
 .DS_Store
@@ -52,17 +35,7 @@ desktop.ini
 *.profraw
 *.profdata
 
-# Solana keys (security)
-*.json
-!Cargo.json
-!**/test-fixtures/**/*.json
-!sbf-solana-solana.json
-!Surfpool.toml
-
 # Local configuration
 .env
 .env.local
-.percolator/
-tests/e2e/test-ledger/
 test-ledger/
-target/
