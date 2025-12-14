@@ -2,15 +2,6 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
-
-# Solana BPF builds
-*.so
-*.rlib
-/target-bpf/
-/target/bpfel-unknown-none/
-/target/sbf-solana-solana/
-/target/deploy/
 
 # Build artifacts
 *.o
@@ -18,6 +9,8 @@ Cargo.lock
 *.dylib
 *.dll
 *.exe
+*.so
+*.rlib
 
 # IDE
 .vscode/
@@ -27,29 +20,11 @@ Cargo.lock
 *~
 .DS_Store
 
-# Node/NPM
-node_modules/
-package-lock.json
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# TypeScript/JavaScript build outputs
-dist/
-build/
-*.tsbuildinfo
-
 # Temporary files
 *.tmp
 *.bak
-*.swp
-*~
 .#*
 \#*\#
-.*.swp
-.*.swo
 
 # OS files
 .DS_Store
@@ -60,25 +35,7 @@ desktop.ini
 *.profraw
 *.profdata
 
-# Solana keys (security)
-*.json
-!Cargo.json
-!**/test-fixtures/**/*.json
-!sbf-solana-solana.json
-!Surfpool.toml
-!vercel.json
-!**/vercel.json
-
 # Local configuration
 .env
 .env.local
-.env.*.local
-.percolator/
-tests/e2e/test-ledger/
 test-ledger/
-target/
-
-# Next.js (covered by root .gitignore patterns)
-.next/
-out/
-.vercel/
