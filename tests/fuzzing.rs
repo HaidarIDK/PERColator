@@ -5,6 +5,9 @@
 
 #![cfg(feature = "fuzz")]
 
+use percolator::*;
+use proptest::prelude::*;
+
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
@@ -16,11 +19,6 @@ fn default_params() -> RiskParams {
         max_users: 1000,
         max_lps: 100,
         account_fee_bps: 10000,
-    }
-}
-        trading_fee_bps: 10,
-        liquidation_fee_bps: 50,
-        insurance_fee_share_bps: 5000,
     }
 }
 
@@ -76,7 +74,7 @@ proptest! {
         let vault_before = engine.vault;
         let principal_before = engine.users[user_idx].principal;
 
-        let result = engine.withdraw_principal(user_idx, withdraw_amount);
+        let result = engine.withdraw(user_idx, withdraw_amount);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= vault_before);
@@ -104,7 +102,7 @@ proptest! {
 
         // Apply withdrawals
         for amount in withdrawals {
-            let _ = engine.withdraw_principal(user_idx, amount);
+            let _ = engine.withdraw(user_idx, amount);
         }
 
         prop_assert!(engine.check_conservation());
@@ -234,7 +232,7 @@ proptest! {
         let user2_pnl_before = engine.users[user2].pnl_ledger;
 
         // Operate on user1
-        let _ = engine.withdraw_principal(user1, withdraw);
+        let _ = engine.withdraw(user1, withdraw);
 
         // User2 should be unchanged
         prop_assert_eq!(engine.users[user2].principal, user2_principal_before);

@@ -18,7 +18,7 @@ fn default_params() -> RiskParams {
 }
 
 #[test]
-fn test_deposit_and_withdraw_principal() {
+fn test_deposit_and_withdraw() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
@@ -28,25 +28,25 @@ fn test_deposit_and_withdraw_principal() {
     assert_eq!(engine.vault, 1000);
 
     // Withdraw partial
-    engine.withdraw_principal(user_idx, 400).unwrap();
+    engine.withdraw(user_idx, 400).unwrap();
     assert_eq!(engine.users[user_idx].principal, 600);
     assert_eq!(engine.vault, 600);
 
     // Withdraw rest
-    engine.withdraw_principal(user_idx, 600).unwrap();
+    engine.withdraw(user_idx, 600).unwrap();
     assert_eq!(engine.users[user_idx].principal, 0);
     assert_eq!(engine.vault, 0);
 }
 
 #[test]
-fn test_withdraw_principal_insufficient_balance() {
+fn test_withdraw_insufficient_balance() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
 
     // Try to withdraw more than deposited
-    let result = engine.withdraw_principal(user_idx, 1500);
+    let result = engine.withdraw(user_idx, 1500);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
@@ -65,10 +65,8 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
 
     // Trying to withdraw all principal would leave collateral = 0 + max(0, -800) = 0
     // This should fail because user has an open position
-    let result = engine.withdraw_principal(user_idx, 1000);
+    let result = engine.withdraw(user_idx, 1000);
 
-    // BUG: This currently succeeds but should fail!
-    // User would have 0 principal, -800 PNL, and a 10k position = undercollateralized
     assert!(result.is_err(), "Should not allow withdrawal that leaves account undercollateralized with open position");
 }
 
@@ -119,15 +117,15 @@ fn test_withdraw_pnl_not_warmed_up() {
 
     engine.deposit(user_idx, 1000).unwrap();
     engine.users[user_idx].pnl_ledger = 500;
-    engine.insurance_fund.balance = 1000;
 
-    // Try to withdraw PNL before it's warmed up
-    let result = engine.withdraw_pnl(user_idx, 100);
-    assert_eq!(result, Err(RiskError::PnlNotWarmedUp));
+    // Try to withdraw more than principal + warmed up PNL
+    // Since PNL hasn't warmed up, can only withdraw the 1000 principal
+    let result = engine.withdraw(user_idx, 1100);
+    assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
 #[test]
-fn test_withdraw_pnl_after_warmup() {
+fn test_withdraw_with_warmed_up_pnl() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
@@ -138,10 +136,12 @@ fn test_withdraw_pnl_after_warmup() {
     // Advance enough slots to warm up 200 PNL
     engine.advance_slot(20);
 
-    // Should be able to withdraw 200
-    engine.withdraw_pnl(user_idx, 200).unwrap();
-    assert_eq!(engine.users[user_idx].pnl_ledger, 300);
-    assert_eq!(engine.users[user_idx].principal, 1200); // 1000 + 200
+    // Should be able to withdraw 1200 (1000 principal + 200 warmed PNL)
+    // The function will automatically convert the 200 PNL to principal before withdrawal
+    engine.withdraw(user_idx, 1200).unwrap();
+    assert_eq!(engine.users[user_idx].pnl_ledger, 300); // 500 - 200 converted
+    assert_eq!(engine.users[user_idx].principal, 0); // 1000 + 200 - 1200
+    assert_eq!(engine.vault, 0);
 }
 #[test]
 fn test_conservation_simple() {
@@ -165,8 +165,8 @@ fn test_conservation_simple() {
     engine.vault += 500;
     assert!(engine.check_conservation());
 
-    // Withdraw principal
-    engine.withdraw_principal(user1, 500).unwrap();
+    // Withdraw
+    engine.withdraw(user1, 500).unwrap();
     assert!(engine.check_conservation());
 }
 
@@ -360,7 +360,7 @@ fn test_user_isolation() {
     let user2_pnl_before = engine.users[user2].pnl_ledger;
 
     // Operate on user1
-    engine.withdraw_principal(user1, 500).unwrap();
+    engine.withdraw(user1, 500).unwrap();
     engine.users[user1].pnl_ledger = 300;
 
     // User2 should be unchanged

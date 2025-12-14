@@ -376,31 +376,44 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Withdraw principal
+    /// Withdraw funds from user account
     ///
-    /// Users can withdraw principal, but if they have an open position, they must
-    /// maintain sufficient collateral to meet initial margin requirements.
-    pub fn withdraw_principal(&mut self, user_index: usize, amount: u128) -> Result<()> {
+    /// This function:
+    /// 1. Converts any warmed-up realized PNL to principal
+    /// 2. Withdraws the requested amount from principal
+    /// 3. Ensures margin requirements are maintained if user has open position
+    ///
+    /// The user can withdraw up to (principal + warmed_up_pnl - margin_required)
+    pub fn withdraw(&mut self, user_index: usize, amount: u128) -> Result<()> {
+        // Calculate withdrawable PNL before borrowing mutably
+        let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
+        let warmed_up_pnl = self.withdrawable_pnl(user);
+
+        // Get mutable reference
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
 
+        // Step 1: Convert warmed-up PNL to principal
+        if warmed_up_pnl > 0 {
+            user.pnl_ledger = user.pnl_ledger.saturating_sub(warmed_up_pnl as i128);
+            user.principal = add_u128(user.principal, warmed_up_pnl);
+        }
+
+        // Step 2: Check we have enough principal
         if user.principal < amount {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Check that withdrawal doesn't violate margin requirements
+        // Step 3: Calculate what state would be after withdrawal
         let new_principal = sub_u128(user.principal, amount);
         let new_collateral = add_u128(new_principal, clamp_pos_i128(user.pnl_ledger));
 
-        // If user has position, must maintain initial margin
+        // Step 4: If user has position, must maintain initial margin
         if user.position_size != 0 {
-            // Calculate position notional value (using last known entry price as approximation)
-            // In production, this should use current oracle price
             let position_notional = mul_u128(
                 user.position_size.abs() as u128,
                 user.entry_price as u128
             ) / 1_000_000;
 
-            // Check initial margin requirement (more conservative than maintenance)
             let initial_margin_required = mul_u128(
                 position_notional,
                 self.params.initial_margin_bps as u128
@@ -411,26 +424,9 @@ impl RiskEngine {
             }
         }
 
+        // Step 5: Commit the withdrawal
         user.principal = new_principal;
         self.vault = sub_u128(self.vault, amount);
-
-        Ok(())
-    }
-    /// Withdraw PNL (only warmed up portion)
-    /// Converts warmed-up realized PNL to principal
-    pub fn withdraw_pnl(&mut self, user_index: usize, amount: u128) -> Result<()> {
-        // Calculate withdrawable before borrowing mutably
-        let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
-        let withdrawable = self.withdrawable_pnl(user);
-
-        if withdrawable < amount {
-            return Err(RiskError::PnlNotWarmedUp);
-        }
-
-        // Now mutate: convert PNL to principal
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
-        user.pnl_ledger = user.pnl_ledger.saturating_sub(amount as i128);
-        user.principal = add_u128(user.principal, amount);
 
         Ok(())
     }
