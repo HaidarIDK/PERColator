@@ -11,13 +11,15 @@ fn default_params() -> RiskParams {
         trading_fee_bps: 10,          // 0.1%
         liquidation_fee_bps: 50,      // 0.5%
         insurance_fee_share_bps: 5000, // 50% to insurance
+        max_users: 1000,
+        max_lps: 100,
+        account_fee_bps: 10000, // 1%
     }
-}
 
 #[test]
 fn test_deposit_and_withdraw_principal() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     // Deposit
     engine.deposit(user_idx, 1000).unwrap();
@@ -38,7 +40,7 @@ fn test_deposit_and_withdraw_principal() {
 #[test]
 fn test_withdraw_principal_insufficient_balance() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
 
@@ -50,7 +52,7 @@ fn test_withdraw_principal_insufficient_balance() {
 #[test]
 fn test_withdraw_principal_with_negative_pnl_should_fail() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     // User deposits 1000
     engine.deposit(user_idx, 1000).unwrap();
@@ -72,7 +74,7 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
 #[test]
 fn test_pnl_warmup() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     // Give user some positive PNL
     engine.users[user_idx].pnl_ledger = 1000;
@@ -93,7 +95,7 @@ fn test_pnl_warmup() {
 #[test]
 fn test_pnl_warmup_with_reserved() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].pnl_ledger = 1000;
     engine.users[user_idx].reserved_pnl = 300; // 300 reserved for pending withdrawal
@@ -112,7 +114,7 @@ fn test_pnl_warmup_with_reserved() {
 #[test]
 fn test_withdraw_pnl_not_warmed_up() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
     engine.users[user_idx].pnl_ledger = 500;
@@ -126,13 +128,11 @@ fn test_withdraw_pnl_not_warmed_up() {
 #[test]
 fn test_withdraw_pnl_after_warmup() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
     engine.users[user_idx].pnl_ledger = 500;
     engine.users[user_idx].warmup_state.slope_per_step = 10;
-    engine.insurance_fund.balance = 1000;
-    engine.vault = 2000; // principal + insurance
 
     // Advance enough slots to warm up 200 PNL
     engine.advance_slot(20);
@@ -140,14 +140,13 @@ fn test_withdraw_pnl_after_warmup() {
     // Should be able to withdraw 200
     engine.withdraw_pnl(user_idx, 200).unwrap();
     assert_eq!(engine.users[user_idx].pnl_ledger, 300);
-    assert_eq!(engine.insurance_fund.balance, 800);
+    assert_eq!(engine.users[user_idx].principal, 1200); // 1000 + 200
 }
-
 #[test]
 fn test_conservation_simple() {
     let mut engine = RiskEngine::new(default_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
 
     // Initial state should conserve
     assert!(engine.check_conservation());
@@ -173,7 +172,7 @@ fn test_conservation_simple() {
 #[test]
 fn test_adl_haircut_unwrapped_pnl() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].principal = 1000;
     engine.users[user_idx].pnl_ledger = 500; // All unwrapped (warmup not started)
@@ -191,7 +190,7 @@ fn test_adl_haircut_unwrapped_pnl() {
 #[test]
 fn test_adl_overflow_to_insurance() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].principal = 1000;
     engine.users[user_idx].pnl_ledger = 300; // Only 300 unwrapped PNL
@@ -213,7 +212,7 @@ fn test_adl_overflow_to_insurance() {
 #[test]
 fn test_adl_insurance_depleted() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].principal = 1000;
     engine.users[user_idx].pnl_ledger = 100;
@@ -235,7 +234,7 @@ fn test_adl_insurance_depleted() {
 #[test]
 fn test_collateral_calculation() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].principal = 1000;
     engine.users[user_idx].pnl_ledger = 500;
@@ -250,7 +249,7 @@ fn test_collateral_calculation() {
 #[test]
 fn test_maintenance_margin_check() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].principal = 1000;
     engine.users[user_idx].position_size = 10_000; // 10k units
@@ -270,8 +269,8 @@ fn test_maintenance_margin_check() {
 #[test]
 fn test_trading_opens_position() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32]);
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     // Setup user with capital
     engine.deposit(user_idx, 10_000).unwrap();
@@ -281,7 +280,7 @@ fn test_trading_opens_position() {
     let oracle_price = 1_000_000;
     let size = 1000i128;
 
-    engine.execute_trade(lp_idx, user_idx, oracle_price, size, &[]).unwrap();
+    engine.execute_trade(lp_idx, user_idx, oracle_price, size).unwrap();
 
     // Check position opened
     assert_eq!(engine.users[user_idx].position_size, 1000);
@@ -297,18 +296,18 @@ fn test_trading_opens_position() {
 #[test]
 fn test_trading_realizes_pnl() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32]);
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     engine.deposit(user_idx, 10_000).unwrap();
     engine.lps[lp_idx].lp_capital = 100_000;
     engine.vault = 110_000;
 
     // Open long position at $1
-    engine.execute_trade(lp_idx, user_idx, 1_000_000, 1000, &[]).unwrap();
+    engine.execute_trade(lp_idx, user_idx, 1_000_000, 1000).unwrap();
 
     // Close position at $1.50 (50% profit)
-    engine.execute_trade(lp_idx, user_idx, 1_500_000, -1000, &[]).unwrap();
+    engine.execute_trade(lp_idx, user_idx, 1_500_000, -1000).unwrap();
 
     // Check PNL realized (approximately)
     // Price went from $1 to $1.50, so 500 profit on 1000 units
@@ -319,8 +318,8 @@ fn test_trading_realizes_pnl() {
 #[test]
 fn test_liquidation() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
-    let keeper_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
+    let keeper_idx = engine.add_user(1).unwrap();
 
     // User with small capital and large position
     engine.deposit(user_idx, 1000).unwrap();
@@ -350,8 +349,8 @@ fn test_liquidation() {
 #[test]
 fn test_user_isolation() {
     let mut engine = RiskEngine::new(default_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
 
     engine.deposit(user1, 1000).unwrap();
     engine.deposit(user2, 2000).unwrap();
@@ -371,7 +370,7 @@ fn test_user_isolation() {
 #[test]
 fn test_principal_never_reduced_by_adl() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let initial_principal = 5000u128;
     engine.users[user_idx].principal = initial_principal;
@@ -387,9 +386,9 @@ fn test_principal_never_reduced_by_adl() {
 #[test]
 fn test_multiple_users_adl() {
     let mut engine = RiskEngine::new(default_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
-    let user3 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+    let user3 = engine.add_user(1).unwrap();
 
     // User1: has unwrapped PNL
     engine.users[user1].principal = 1000;
@@ -423,7 +422,7 @@ fn test_multiple_users_adl() {
 #[test]
 fn test_warmup_monotonicity() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].pnl_ledger = 1000;
     engine.users[user_idx].warmup_state.slope_per_step = 10;
@@ -445,8 +444,8 @@ fn test_warmup_monotonicity() {
 #[test]
 fn test_fee_accumulation() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32]);
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     engine.deposit(user_idx, 100_000).unwrap();
     engine.lps[lp_idx].lp_capital = 1_000_000;
@@ -456,8 +455,8 @@ fn test_fee_accumulation() {
 
     // Execute multiple trades
     for _ in 0..10 {
-        let result1 = engine.execute_trade(lp_idx, user_idx, 1_000_000, 100, &[]);
-        let result2 = engine.execute_trade(lp_idx, user_idx, 1_000_000, -100, &[]);
+        let result1 = engine.execute_trade(lp_idx, user_idx, 1_000_000, 100);
+        let result2 = engine.execute_trade(lp_idx, user_idx, 1_000_000, -100);
         // Trades might fail due to margin, that's ok
         let _ = result1;
         let _ = result2;

@@ -124,6 +124,15 @@ pub struct RiskParams {
 
     /// Insurance fund share of liquidation fee (rest goes to keeper)
     pub insurance_fee_share_bps: u64,
+
+    /// Maximum number of users
+    pub max_users: u64,
+
+    /// Maximum number of LPs
+    pub max_lps: u64,
+
+    /// Base fee for adding accounts (in basis points of notional? Wait, absolute?)
+    pub account_fee_bps: u64,
 }
 
 /// Main risk engine state - all in one contiguous memory chunk
@@ -237,6 +246,24 @@ fn clamp_neg_i128(val: i128) -> u128 {
 impl RiskEngine {
     /// Calculate withdrawable PNL for a user (after warmup)
     /// This is the core PNL warmup mechanism (Invariant I5)
+    /// Calculate account creation fee multiplier
+    fn account_fee_multiplier(max: u64, used: u64) -> u128 {
+        if used >= max {
+            return 0; // Cannot add
+        }
+        let remaining = max - used;
+        if remaining == 0 {
+            0
+        } else {
+            // 2^(floor(log2(max / remaining)))
+            let ratio = max / remaining;
+            if ratio == 0 {
+                1
+            } else {
+                1 << (64 - ratio.leading_zeros() - 1)
+            }
+        }
+    }
     pub fn withdrawable_pnl(&self, user: &UserAccount) -> u128 {
         // Only positive PNL can be withdrawn
         let positive_pnl = clamp_pos_i128(user.pnl_ledger);
@@ -362,8 +389,8 @@ impl RiskEngine {
 
         Ok(())
     }
-
     /// Withdraw PNL (only warmed up portion)
+    /// Converts warmed-up realized PNL to principal
     pub fn withdraw_pnl(&mut self, user_index: usize, amount: u128) -> Result<()> {
         // Calculate withdrawable before borrowing mutably
         let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
@@ -373,32 +400,30 @@ impl RiskEngine {
             return Err(RiskError::PnlNotWarmedUp);
         }
 
-        // Check insurance fund can cover it
-        if self.insurance_fund.balance < amount {
-            return Err(RiskError::InsufficientBalance);
-        }
-
-        // Now mutate
+        // Now mutate: convert PNL to principal
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
         user.pnl_ledger = user.pnl_ledger.saturating_sub(amount as i128);
-        self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, amount);
-        self.vault = sub_u128(self.vault, amount);
+        user.principal = add_u128(user.principal, amount);
 
         Ok(())
     }
 }
+impl RiskEngine {
 
 // ============================================================================
 // Trading Operations
 // ============================================================================
 
-impl RiskEngine {
     /// Execute trade via matching engine (with CPI)
     ///
-    /// This function:
-    /// 1. Validates user signature authorized the trade
-    /// 2. CPI into matching engine to execute trade
-    /// 3. Applies trading fee to insurance fund
+    /// This function assumes the caller has verified user authorization
+    /// (e.g., via Account.is_signed in Solana programs).
+    ///
+    /// Process:
+    /// 1. CPI into matching engine to execute trade
+    /// 2. Applies trading fee to insurance fund
+    /// 3. Updates LP and user positions
+    /// 4. Aborts if either account becomes negative
     /// 4. Updates LP and user positions
     /// 5. Aborts if either account becomes negative
     pub fn execute_trade(
@@ -407,13 +432,12 @@ impl RiskEngine {
         user_index: usize,
         oracle_price: u64,
         size: i128, // Positive = long, negative = short
-        _user_signature: &[u8], // In production, verify signature
+        
     ) -> Result<()> {
         // Get accounts
         let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
 
-        // TODO: In production, verify user signature authorized this trade
         // TODO: In production, CPI into matching engine program
 
         // Calculate fee
@@ -498,8 +522,8 @@ impl RiskEngine {
         lp.lp_position_size = new_lp_position;
 
         Ok(())
-    }
 }
+    }
 
 // ============================================================================
 // ADL (Auto-Deleveraging)
@@ -656,7 +680,20 @@ impl RiskEngine {
     }
 
     /// Add a new user account
-    pub fn add_user(&mut self) -> usize {
+    /// Add a new user account
+    pub fn add_user(&mut self, fee_payment: u128) -> Result<usize> {
+        if self.users.len() >= self.params.max_users as usize {
+            return Err(RiskError::Overflow); // Or new error
+        }
+        let multiplier = Self::account_fee_multiplier(self.params.max_users, self.users.len() as u64);
+        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        if fee_payment < required_fee {
+            return Err(RiskError::InsufficientBalance);
+        }
+        // Pay fee to insurance
+        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
+        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
+
         let index = self.users.len();
         self.users.push(UserAccount {
             principal: 0,
@@ -672,25 +709,8 @@ impl RiskEngine {
             fee_accrued: 0,
             vested_pos_snapshot: 0,
         });
-        index
+        Ok(index)
     }
-
-    /// Add a new LP account
-    pub fn add_lp(&mut self, matching_engine_program: [u8; 32], matching_engine_context: [u8; 32]) -> usize {
-        let index = self.lps.len();
-        self.lps.push(LPAccount {
-            matching_engine_program,
-            matching_engine_context,
-            lp_capital: 0,
-            lp_pnl: 0,
-            lp_position_size: 0,
-            lp_entry_price: 0,
-        });
-        index
-    }
-
-    /// Advance to next slot (for testing warmup)
-    pub fn advance_slot(&mut self, slots: u64) {
-        self.current_slot = self.current_slot.saturating_add(slots);
-    }
+    pub fn add_lp(&mut self, matching_engine_program: [u8; 32], matching_engine_context: [u8; 32], fee_payment: u128) -> Result<usize> {
+        Ok(index)
 }

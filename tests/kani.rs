@@ -26,6 +26,9 @@ fn test_params() -> RiskParams {
         trading_fee_bps: 10,
         liquidation_fee_bps: 50,
         insurance_fee_share_bps: 5000,
+        max_users: 1000,
+        max_lps: 100,
+        account_fee_bps: 10000,
     }
 }
 
@@ -37,7 +40,7 @@ fn test_params() -> RiskParams {
 #[kani::unwind(4)]
 fn i1_adl_never_reduces_principal() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     // Set arbitrary but bounded values
     let principal: u128 = kani::any();
@@ -68,7 +71,7 @@ fn i1_adl_never_reduces_principal() {
 #[kani::unwind(2)]
 fn i2_deposit_preserves_conservation() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let amount: u128 = kani::any();
     kani::assume(amount < 10_000);
@@ -86,7 +89,7 @@ fn i2_deposit_preserves_conservation() {
 #[kani::unwind(2)]
 fn i2_withdraw_preserves_conservation() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let deposit: u128 = kani::any();
     let withdraw: u128 = kani::any();
@@ -113,7 +116,7 @@ fn i2_withdraw_preserves_conservation() {
 #[kani::unwind(4)]
 fn i5_warmup_determinism() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     let reserved: u128 = kani::any();
@@ -142,7 +145,7 @@ fn i5_warmup_determinism() {
 #[kani::unwind(4)]
 fn i5_warmup_monotonicity() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     let slope: u128 = kani::any();
@@ -172,7 +175,7 @@ fn i5_warmup_monotonicity() {
 #[kani::unwind(4)]
 fn i5_warmup_bounded_by_pnl() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     let reserved: u128 = kani::any();
@@ -205,8 +208,8 @@ fn i5_warmup_bounded_by_pnl() {
 #[kani::unwind(3)]
 fn i7_user_isolation_deposit() {
     let mut engine = RiskEngine::new(test_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
 
     let amount1: u128 = kani::any();
     let amount2: u128 = kani::any();
@@ -234,8 +237,8 @@ fn i7_user_isolation_deposit() {
 #[kani::unwind(3)]
 fn i7_user_isolation_withdrawal() {
     let mut engine = RiskEngine::new(test_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
 
     let amount1: u128 = kani::any();
     let amount2: u128 = kani::any();
@@ -267,7 +270,7 @@ fn i7_user_isolation_withdrawal() {
 #[kani::unwind(2)]
 fn i8_collateral_with_positive_pnl() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
     let pnl: i128 = kani::any();
@@ -289,7 +292,7 @@ fn i8_collateral_with_positive_pnl() {
 #[kani::unwind(2)]
 fn i8_collateral_with_negative_pnl() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
     let pnl: i128 = kani::any();
@@ -314,7 +317,7 @@ fn i8_collateral_with_negative_pnl() {
 #[kani::unwind(4)]
 fn i4_adl_haircuts_unwrapped_first() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
     let pnl: i128 = kani::any();
@@ -354,7 +357,7 @@ fn i4_adl_haircuts_unwrapped_first() {
 #[kani::unwind(3)]
 fn withdrawal_requires_sufficient_balance() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
     let withdraw: u128 = kani::any();
@@ -376,7 +379,7 @@ fn withdrawal_requires_sufficient_balance() {
 #[kani::unwind(3)]
 fn pnl_withdrawal_requires_warmup() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     let withdraw: u128 = kani::any();
@@ -406,8 +409,8 @@ fn pnl_withdrawal_requires_warmup() {
 #[kani::unwind(4)]
 fn multiple_users_adl_preserves_all_principals() {
     let mut engine = RiskEngine::new(test_params());
-    let user1 = engine.add_user();
-    let user2 = engine.add_user();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
 
     let p1: u128 = kani::any();
     let p2: u128 = kani::any();
@@ -464,8 +467,8 @@ fn saturating_arithmetic_prevents_overflow() {
 #[kani::unwind(3)]
 fn liquidation_closes_position() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
-    let keeper_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
+    let keeper_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
     let position: i128 = kani::any();
@@ -493,7 +496,7 @@ fn liquidation_closes_position() {
 #[kani::unwind(2)]
 fn zero_pnl_withdrawable_is_zero() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     engine.users[user_idx].pnl_ledger = 0;
     engine.current_slot = 1000; // Far in future
@@ -508,7 +511,7 @@ fn zero_pnl_withdrawable_is_zero() {
 #[kani::unwind(2)]
 fn negative_pnl_withdrawable_is_zero() {
     let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user();
+    let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     kani::assume(pnl < 0 && pnl > -10_000);

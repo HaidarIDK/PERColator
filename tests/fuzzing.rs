@@ -5,14 +5,19 @@
 
 #![cfg(feature = "fuzz")]
 
-use percolator::*;
-use proptest::prelude::*;
-
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        liquidation_fee_bps: 50,
+        insurance_fee_share_bps: 5000,
+        max_users: 1000,
+        max_lps: 100,
+        account_fee_bps: 10000,
+    }
+}
         trading_fee_bps: 10,
         liquidation_fee_bps: 50,
         insurance_fee_share_bps: 5000,
@@ -44,7 +49,7 @@ proptest! {
     #[test]
     fn fuzz_deposit_increases_balance(amount in amount_strategy()) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         let vault_before = engine.vault;
         let principal_before = engine.users[user_idx].principal;
@@ -64,7 +69,7 @@ proptest! {
         withdraw_amount in amount_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.deposit(user_idx, deposit_amount).unwrap();
 
@@ -88,7 +93,7 @@ proptest! {
         withdrawals in prop::collection::vec(amount_strategy(), 1..10)
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         // Apply deposits
         for amount in deposits {
@@ -116,7 +121,7 @@ proptest! {
         slots2 in 0u64..200
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].pnl_ledger = pnl;
         engine.users[user_idx].warmup_state.slope_per_step = slope;
@@ -144,7 +149,7 @@ proptest! {
         loss in amount_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].principal = principal;
         engine.users[user_idx].pnl_ledger = pnl;
@@ -167,7 +172,7 @@ proptest! {
         slots in 0u64..500
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].pnl_ledger = pnl;
         engine.users[user_idx].reserved_pnl = reserved;
@@ -192,7 +197,7 @@ proptest! {
         pnl in pnl_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].principal = principal;
         engine.users[user_idx].pnl_ledger = pnl;
@@ -219,8 +224,8 @@ proptest! {
         withdraw in amount_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user1 = engine.add_user();
-        let user2 = engine.add_user();
+        let user1 = engine.add_user(1).unwrap();
+        let user2 = engine.add_user(1).unwrap();
 
         engine.deposit(user1, amount1).unwrap();
         engine.deposit(user2, amount2).unwrap();
@@ -246,7 +251,7 @@ proptest! {
         losses in prop::collection::vec(amount_strategy(), 1..10)
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].principal = principal;
         engine.users[user_idx].pnl_ledger = initial_pnl;
@@ -271,8 +276,8 @@ proptest! {
         size in 100i128..10_000
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
-        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32]);
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
         engine.deposit(user_idx, user_capital).unwrap();
         engine.lps[lp_idx].lp_capital = lp_capital;
@@ -280,7 +285,7 @@ proptest! {
 
         let insurance_before = engine.insurance_fund.fee_revenue;
 
-        let _ = engine.execute_trade(lp_idx, user_idx, price, size, &[]);
+        let _ = engine.execute_trade(lp_idx, user_idx, price, size);
 
         // Insurance fund should have received fees (if trade succeeded)
         if engine.insurance_fund.fee_revenue > insurance_before {
@@ -299,8 +304,8 @@ proptest! {
         oracle_price in price_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
-        let keeper_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
+        let keeper_idx = engine.add_user(1).unwrap();
 
         engine.deposit(user_idx, principal).unwrap();
         engine.users[user_idx].position_size = position;
@@ -328,7 +333,7 @@ proptest! {
         slots in 0u64..200
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].pnl_ledger = pnl;
         engine.users[user_idx].reserved_pnl = reserved;
@@ -353,7 +358,7 @@ proptest! {
 
         // Create 3 users
         for _ in 0..3 {
-            engine.add_user();
+            engine.add_user(1).unwrap();
         }
 
         // Apply random deposits
@@ -377,7 +382,7 @@ proptest! {
         loss in 5_000u128..20_000
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
+        let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].pnl_ledger = user_pnl;
         engine.insurance_fund.balance = insurance_balance;
@@ -400,8 +405,8 @@ proptest! {
         trade_size in position_strategy()
     ) {
         let mut engine = RiskEngine::new(default_params());
-        let user_idx = engine.add_user();
-        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32]);
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
         engine.deposit(user_idx, 1_000_000).unwrap();
         engine.lps[lp_idx].lp_capital = 10_000_000;
@@ -413,7 +418,7 @@ proptest! {
         let expected_user_pos = initial_size.saturating_add(trade_size);
         let expected_lp_pos = (-initial_size).saturating_sub(trade_size);
 
-        let _ = engine.execute_trade(lp_idx, user_idx, 1_000_000, trade_size, &[]);
+        let _ = engine.execute_trade(lp_idx, user_idx, 1_000_000, trade_size);
 
         // If trade succeeded, positions should net to zero
         if engine.users[user_idx].position_size == expected_user_pos {
