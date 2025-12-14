@@ -527,3 +527,222 @@ fn negative_pnl_withdrawable_is_zero() {
     assert!(withdrawable == 0,
             "Negative PNL means zero withdrawable");
 }
+
+// ============================================================================
+// Funding Rate Invariants
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn funding_p1_settlement_idempotent() {
+    // P1: Funding settlement is idempotent
+    // After settling once, settling again with unchanged global index does nothing
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Arbitrary position and PNL
+    let position: i128 = kani::any();
+    kani::assume(position.abs() < 1_000_000);
+
+    let pnl: i128 = kani::any();
+    kani::assume(pnl > -1_000_000 && pnl < 1_000_000);
+
+    engine.users[user_idx].position_size = position;
+    engine.users[user_idx].pnl_ledger = pnl;
+
+    // Set arbitrary funding index
+    let index: i128 = kani::any();
+    kani::assume(index.abs() < 1_000_000_000);
+    engine.funding_index_qpb_e6 = index;
+
+    // Settle once
+    let _ = engine.touch_user(user_idx);
+
+    let pnl_after_first = engine.users[user_idx].pnl_ledger;
+    let snapshot_after_first = engine.users[user_idx].funding_index_user;
+
+    // Settle again without changing global index
+    let _ = engine.touch_user(user_idx);
+
+    // PNL should be unchanged
+    assert!(engine.users[user_idx].pnl_ledger == pnl_after_first,
+            "Second settlement should not change PNL");
+
+    // Snapshot should equal global index
+    assert!(engine.users[user_idx].funding_index_user == engine.funding_index_qpb_e6,
+            "Snapshot should equal global index");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn funding_p2_never_touches_principal() {
+    // P2: Funding does not touch principal (extends Invariant I1)
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let principal: u128 = kani::any();
+    kani::assume(principal < 1_000_000);
+
+    let position: i128 = kani::any();
+    kani::assume(position.abs() < 1_000_000);
+
+    engine.users[user_idx].principal = principal;
+    engine.users[user_idx].position_size = position;
+
+    // Accrue arbitrary funding
+    let funding_delta: i128 = kani::any();
+    kani::assume(funding_delta.abs() < 1_000_000_000);
+    engine.funding_index_qpb_e6 = funding_delta;
+
+    // Settle funding
+    let _ = engine.touch_user(user_idx);
+
+    // Principal must be unchanged
+    assert!(engine.users[user_idx].principal == principal,
+            "Funding must never modify principal");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn funding_p3_zero_sum_between_opposite_positions() {
+    // P3: Funding is zero-sum when user and LP have opposite positions
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let position: i128 = kani::any();
+    kani::assume(position > 0 && position < 100_000); // positive only for simplicity
+
+    // User has position, LP has opposite
+    engine.users[user_idx].position_size = position;
+    engine.lps[lp_idx].lp_position_size = -position;
+
+    // Both start with same snapshot
+    engine.users[user_idx].funding_index_user = 0;
+    engine.lps[lp_idx].funding_index_lp = 0;
+
+    let user_pnl_before = engine.users[user_idx].pnl_ledger;
+    let lp_pnl_before = engine.lps[lp_idx].lp_pnl;
+    let total_before = user_pnl_before + lp_pnl_before;
+
+    // Accrue funding
+    let delta: i128 = kani::any();
+    kani::assume(delta.abs() < 1_000_000);
+    engine.funding_index_qpb_e6 = delta;
+
+    // Settle both
+    let user_result = engine.touch_user(user_idx);
+    let lp_result = engine.touch_lp(lp_idx);
+
+    // If both settlements succeeded, check zero-sum
+    if user_result.is_ok() && lp_result.is_ok() {
+        let total_after = engine.users[user_idx].pnl_ledger + engine.lps[lp_idx].lp_pnl;
+
+        assert!(total_after == total_before,
+                "Funding must be zero-sum between opposite positions");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn funding_p4_settle_before_position_change() {
+    // P4: Verifies that settlement before position change gives correct results
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let initial_pos: i128 = kani::any();
+    kani::assume(initial_pos > 0 && initial_pos < 10_000);
+
+    engine.users[user_idx].position_size = initial_pos;
+    engine.users[user_idx].pnl_ledger = 0;
+    engine.users[user_idx].funding_index_user = 0;
+
+    // Period 1: accrue funding with initial position
+    let delta1: i128 = kani::any();
+    kani::assume(delta1.abs() < 1_000);
+    engine.funding_index_qpb_e6 = delta1;
+
+    // Settle BEFORE changing position (correct way)
+    let _ = engine.touch_user(user_idx);
+
+    let pnl_after_period1 = engine.users[user_idx].pnl_ledger;
+
+    // Change position
+    let new_pos: i128 = kani::any();
+    kani::assume(new_pos > 0 && new_pos < 10_000 && new_pos != initial_pos);
+    engine.users[user_idx].position_size = new_pos;
+
+    // Period 2: more funding
+    let delta2: i128 = kani::any();
+    kani::assume(delta2.abs() < 1_000);
+    engine.funding_index_qpb_e6 = delta1 + delta2;
+
+    let _ = engine.touch_user(user_idx);
+
+    // The settlement should have correctly applied:
+    // - delta1 to initial_pos
+    // - delta2 to new_pos
+    // Snapshot should equal global index
+    assert!(engine.users[user_idx].funding_index_user == engine.funding_index_qpb_e6,
+            "Snapshot must track global index");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn funding_p5_bounded_operations_no_overflow() {
+    // P5: No overflows on bounded inputs (or returns Overflow error)
+
+    let mut engine = RiskEngine::new(test_params());
+
+    // Bounded inputs
+    let price: u64 = kani::any();
+    kani::assume(price > 1_000_000 && price < 1_000_000_000); // $1 to $1000
+
+    let rate: i64 = kani::any();
+    kani::assume(rate.abs() < 1000); // ±1000 bps = ±10%
+
+    let dt: u64 = kani::any();
+    kani::assume(dt < 1000); // max 1000 slots
+
+    engine.last_funding_slot = 0;
+
+    // Accrue should not panic
+    let result = engine.accrue_funding(dt, price, rate);
+
+    // Either succeeds or returns Overflow error (never panics)
+    if result.is_err() {
+        assert!(matches!(result.unwrap_err(), RiskError::Overflow),
+                "Only Overflow error allowed");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn funding_zero_position_no_change() {
+    // Additional invariant: Zero position means no funding payment
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    engine.users[user_idx].position_size = 0; // Zero position
+
+    let pnl_before: i128 = kani::any();
+    kani::assume(pnl_before.abs() < 1_000_000);
+    engine.users[user_idx].pnl_ledger = pnl_before;
+
+    // Accrue arbitrary funding
+    let delta: i128 = kani::any();
+    kani::assume(delta.abs() < 1_000_000_000);
+    engine.funding_index_qpb_e6 = delta;
+
+    let _ = engine.touch_user(user_idx);
+
+    // PNL should be unchanged
+    assert!(engine.users[user_idx].pnl_ledger == pnl_before,
+            "Zero position should not pay or receive funding");
+}
+

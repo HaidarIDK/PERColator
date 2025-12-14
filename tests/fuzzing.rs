@@ -435,3 +435,240 @@ proptest! {
         }
     }
 }
+
+// ============================================================================
+// Funding Rate Fuzzing Tests
+// ============================================================================
+
+// Strategy for funding rates (signed bps per slot)
+fn funding_rate_strategy() -> impl Strategy<Value = i64> {
+    -1000i64..1000 // ±10% per slot (extreme but tests bounds)
+}
+
+// Test funding idempotence with random inputs
+proptest! {
+    #[test]
+    fn fuzz_funding_idempotence(
+        position in position_strategy(),
+        index_delta in -1_000_000i128..1_000_000
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.users[user_idx].position_size = position;
+        engine.funding_index_qpb_e6 = index_delta;
+
+        // Settle once
+        let _ = engine.touch_user(user_idx);
+        let pnl_first = engine.users[user_idx].pnl_ledger;
+
+        // Settle again without accrual
+        let _ = engine.touch_user(user_idx);
+        let pnl_second = engine.users[user_idx].pnl_ledger;
+
+        prop_assert_eq!(pnl_first, pnl_second,
+                       "Funding settlement should be idempotent");
+    }
+}
+
+// Test funding never touches principal
+proptest! {
+    #[test]
+    fn fuzz_funding_preserves_principal(
+        principal in amount_strategy(),
+        position in position_strategy(),
+        funding_delta in -10_000_000i128..10_000_000
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.users[user_idx].principal = principal;
+        engine.users[user_idx].position_size = position;
+        engine.funding_index_qpb_e6 = funding_delta;
+
+        let _ = engine.touch_user(user_idx);
+
+        prop_assert_eq!(engine.users[user_idx].principal, principal,
+                       "Funding must never modify principal");
+    }
+}
+
+// Test zero-sum property with random positions
+proptest! {
+    #[test]
+    fn fuzz_funding_zero_sum(
+        position in 1i128..100_000,
+        funding_delta in -1_000_000i128..1_000_000
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+        // Opposite positions
+        engine.users[user_idx].position_size = position;
+        engine.lps[lp_idx].lp_position_size = -position;
+
+        let total_pnl_before = engine.users[user_idx].pnl_ledger +
+                              engine.lps[lp_idx].lp_pnl;
+
+        engine.funding_index_qpb_e6 = funding_delta;
+
+        let user_result = engine.touch_user(user_idx);
+        let lp_result = engine.touch_lp(lp_idx);
+
+        if user_result.is_ok() && lp_result.is_ok() {
+            let total_pnl_after = engine.users[user_idx].pnl_ledger +
+                                 engine.lps[lp_idx].lp_pnl;
+
+            prop_assert_eq!(total_pnl_after, total_pnl_before,
+                           "Funding should be zero-sum");
+        }
+    }
+}
+
+// Test funding with random accrual sequences
+proptest! {
+    #[test]
+    fn fuzz_funding_accrual_sequence(
+        sequences in prop::collection::vec((funding_rate_strategy(), 1u64..100), 1..10)
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+
+        let mut current_slot = 0u64;
+        for (rate, dt) in sequences.iter() {
+            current_slot = current_slot.saturating_add(*dt);
+            let result = engine.accrue_funding(current_slot, 100_000_000, *rate);
+
+            // Should either succeed or return Overflow (never panic)
+            if result.is_err() {
+                prop_assert!(matches!(result.unwrap_err(), RiskError::Overflow));
+            }
+        }
+    }
+}
+
+// Differential fuzzing: compare against slow reference model
+proptest! {
+    #[test]
+    fn fuzz_differential_funding_calculation(
+        position in 1_000i128..100_000,
+        price in price_strategy(),
+        rate in funding_rate_strategy(),
+        dt in 1u64..100
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.users[user_idx].position_size = position;
+        engine.users[user_idx].pnl_ledger = 0;
+
+        // Real implementation
+        let accrue_result = engine.accrue_funding(dt, price, rate);
+        if accrue_result.is_err() {
+            return Ok(()); // Skip if overflow
+        }
+
+        let touch_result = engine.touch_user(user_idx);
+        if touch_result.is_err() {
+            return Ok(()); // Skip if overflow
+        }
+
+        let actual_pnl = engine.users[user_idx].pnl_ledger;
+
+        // Reference implementation (slow but simple)
+        let price_i128 = price as i128;
+        let rate_i128 = rate as i128;
+        let dt_i128 = dt as i128;
+
+        // delta_F = price * rate * dt / 10,000
+        let delta_f_opt = price_i128
+            .checked_mul(rate_i128)
+            .and_then(|x| x.checked_mul(dt_i128))
+            .and_then(|x| x.checked_div(10_000));
+
+        if let Some(delta_f) = delta_f_opt {
+            // payment = position * delta_F / 1e6
+            let payment_opt = position
+                .checked_mul(delta_f)
+                .and_then(|x| x.checked_div(1_000_000));
+
+            if let Some(payment) = payment_opt {
+                let expected_pnl = 0i128.checked_sub(payment);
+
+                if let Some(expected) = expected_pnl {
+                    prop_assert_eq!(actual_pnl, expected,
+                                   "Funding calculation should match reference");
+                }
+            }
+        }
+    }
+}
+
+// Test funding with position changes (partial close scenario)
+proptest! {
+    #[test]
+    fn fuzz_funding_with_position_changes(
+        initial_pos in 10_000i128..100_000,
+        reduction in 1_000i128..50_000,
+        rate1 in funding_rate_strategy(),
+        rate2 in funding_rate_strategy()
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+        engine.deposit(user_idx, 10_000_000).unwrap();
+        engine.lps[lp_idx].lp_capital = 100_000_000;
+        engine.vault = 110_000_000;
+
+        // Manually set positions
+        engine.users[user_idx].position_size = initial_pos;
+        engine.lps[lp_idx].lp_position_size = -initial_pos;
+
+        // Period 1: accrue funding
+        let accrue1 = engine.accrue_funding(1, 100_000_000, rate1);
+        if accrue1.is_err() {
+            return Ok(());
+        }
+
+        // Trade to reduce position (execute_trade will touch accounts first)
+        let new_pos = initial_pos.saturating_sub(reduction);
+        if new_pos > 0 {
+            let trade_size = -reduction;
+            let _ = engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, trade_size);
+
+            // Period 2: more funding
+            let accrue2 = engine.accrue_funding(2, 100_000_000, rate2);
+            if accrue2.is_ok() {
+                let _ = engine.touch_user(user_idx);
+
+                // Verify snapshot is current
+                prop_assert_eq!(engine.users[user_idx].funding_index_user,
+                               engine.funding_index_qpb_e6,
+                               "Snapshot should equal global index");
+            }
+        }
+    }
+}
+
+// Test that zero position pays no funding
+proptest! {
+    #[test]
+    fn fuzz_zero_position_no_funding(
+        pnl in pnl_strategy(),
+        funding_delta in -10_000_000i128..10_000_000
+    ) {
+        let mut engine = RiskEngine::new(default_params());
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.users[user_idx].position_size = 0; // Zero position
+        engine.users[user_idx].pnl_ledger = pnl;
+
+        engine.funding_index_qpb_e6 = funding_delta;
+
+        let _ = engine.touch_user(user_idx);
+
+        prop_assert_eq!(engine.users[user_idx].pnl_ledger, pnl,
+                       "Zero position should not pay funding");
+    }
+}

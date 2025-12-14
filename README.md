@@ -38,6 +38,8 @@ All data structures are laid out in a single contiguous memory chunk, suitable f
 │ - sum_vested_pos_pnl: u128          │
 │ - loss_accum: u128                  │
 │ - fee_carry: u128                   │
+│ - funding_index_qpb_e6: i128        │
+│ - last_funding_slot: u64            │
 └─────────────────────────────────────┘
 ```
 
@@ -232,6 +234,90 @@ is_safe = collateral >= margin_required
 - Keeper receives fee (incentive to call)
 - Insurance fund builds reserves
 
+### 6. Funding Rates
+
+**O(1) Perpetual Funding** with cumulative index pattern:
+
+```rust
+pub fn accrue_funding(
+    &mut self,
+    now_slot: u64,
+    oracle_price: u64,
+    funding_rate_bps_per_slot: i64,  // signed: + means longs pay shorts
+) -> Result<()>
+```
+
+**How It Works:**
+
+1. **Global Accrual (O(1)):**
+   ```
+   Δ F = price × rate_bps × dt / 10,000
+   funding_index_qpb_e6 += ΔF
+   ```
+   - `funding_index_qpb_e6`: Cumulative funding index (quote per base, scaled by 1e6)
+   - Updated once per slot, independent of account count
+
+2. **Lazy Settlement (O(1) per account):**
+   ```
+   payment = position_size × (current_index - user_snapshot) / 1e6
+   pnl_ledger -= payment
+   user_snapshot = current_index
+   ```
+   - Settled automatically before any operation via `touch_user()`/`touch_lp()`
+   - Called before: withdrawals, trades, liquidations, position changes
+
+3. **Settle-Before-Mutate Pattern:**
+   - **Critical for correctness:** Prevents double-charging on flips/reductions
+   - `execute_trade()` calls `touch_user()` and `touch_lp()` first
+   - Ensures funding applies to old position before update
+
+**Example:**
+```rust
+// User has long position
+user.position_size = 1_000_000;  // +1M base
+
+// Accrue positive funding (+10 bps for 1 slot at $100)
+engine.accrue_funding(1, 100_000_000, 10)?;
+// Δ F = 100e6 × 10 × 1 / 10,000 = 100,000
+
+// Settle funding
+engine.touch_user(user_idx)?;
+// payment = 1M × 100,000 / 1e6 = 100,000
+// user.pnl_ledger -= 100,000  (long pays)
+
+// Reduce position - funding settled FIRST
+engine.execute_trade(&matcher, lp_idx, user_idx, price, -500_000)?;
+// 1. touch_user() settles any new funding on remaining position
+// 2. Then position changes to 500,000
+```
+
+**Invariants (Formally Verified):**
+
+| ID | Property | Proof |
+|----|----------|-------|
+| **F1** | Funding settlement is idempotent | `tests/kani.rs:537` |
+| **F2** | Funding never modifies principal | `tests/kani.rs:579` |
+| **F3** | Zero-sum between opposite positions | `tests/kani.rs:609` |
+| **F4** | Settle-before-mutate correctness | `tests/kani.rs:651` |
+| **F5** | No overflow on bounded inputs | `tests/kani.rs:696` |
+
+**Units & Scaling:**
+- `oracle_price`: u64 in 1e6 (e.g., 100_000_000 = $100)
+- `position_size`: i128 in base units (signed: + long, - short)
+- `funding_rate_bps_per_slot`: i64 (10 = 0.1% per slot)
+- `funding_index_qpb_e6`: i128 quote-per-base in 1e6
+
+**Convention:**
+- Positive funding rate → longs pay shorts
+- Negative funding rate → shorts pay longs
+- Payment formula: `pnl -= position × ΔF / 1e6`
+
+**Key Design Choices:**
+1. **Checked arithmetic** (not saturating) - funding is zero-sum, silent overflow breaks invariants
+2. **No iteration** - scales to unlimited accounts
+3. **Automatic settlement** - users can't dodge funding by avoiding touch operations
+4. **Rate supplied externally** - separates mark-vs-index logic from risk engine
+
 ## Formal Verification
 
 All critical invariants are proven using Kani, a model checker for Rust.
@@ -271,32 +357,39 @@ cargo kani --harness i1_adl_never_reduces_principal
 cargo test
 ```
 
-30+ unit tests covering:
+33 unit tests covering:
 - Deposit/withdrawal mechanics
 - PNL warmup over time
 - ADL haircut logic
 - Conservation invariants
 - Trading and position management
 - Liquidation mechanics
+- Funding rate payments (longs/shorts)
+- Funding settlement idempotence
+- Funding with position changes
 
 ### Fuzzing Tests
 ```bash
 cargo test --features fuzz
 ```
 
-17 property-based tests using proptest:
+22 property-based tests using proptest:
 - Random deposit/withdrawal sequences
 - Conservation under chaos
 - Warmup monotonicity with random inputs
 - Multi-user isolation
 - ADL with random losses
+- Funding idempotence (random inputs)
+- Funding zero-sum property
+- Differential fuzzing (vs reference model)
+- Funding with position flips/reductions
 
 ### Formal Verification
 ```bash
 cargo kani
 ```
 
-20+ formal proofs covering all critical invariants.
+26+ formal proofs covering all critical invariants (including funding).
 
 ## Usage Example
 

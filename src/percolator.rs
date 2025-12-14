@@ -67,6 +67,9 @@ pub struct UserAccount {
 
     /// Cached vested positive PNL for fee distribution
     pub vested_pos_snapshot: u128,
+
+    /// Funding index snapshot (quote per 1 base, scaled by 1e6)
+    pub funding_index_user: i128,
 }
 
 /// LP account - one per matching engine
@@ -95,6 +98,9 @@ pub struct LPAccount {
 
     /// LP's entry price
     pub lp_entry_price: u64,
+
+    /// Funding index snapshot for LP (quote per 1 base, scaled by 1e6)
+    pub funding_index_lp: i128,
 }
 
 /// Insurance fund state
@@ -237,6 +243,12 @@ where
 
     /// Fee carry for rounding
     pub fee_carry: u128,
+
+    /// Global funding index (quote per 1 base, scaled by 1e6)
+    pub funding_index_qpb_e6: i128,
+
+    /// Last slot when funding was accrued
+    pub last_funding_slot: u64,
 }
 
 /// Type alias for the default Vec-based RiskEngine
@@ -484,6 +496,231 @@ where
 }
 
 // ============================================================================
+// Funding Rate (O(1) per account)
+// ============================================================================
+
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
+    /// Accrue funding globally in O(1)
+    ///
+    /// Updates the global funding index based on:
+    /// - Time elapsed since last accrual
+    /// - Current oracle price
+    /// - Signed funding rate (positive = longs pay shorts)
+    ///
+    /// Formula: ΔF = price × rate_bps × dt / 10,000
+    /// Where F is in quote-per-base scaled by 1e6
+    ///
+    /// # Arguments
+    /// * `now_slot` - Current slot number
+    /// * `oracle_price` - Oracle price (scaled by 1e6)
+    /// * `funding_rate_bps_per_slot` - Signed funding rate in bps per slot
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err(RiskError::Overflow)` if calculation overflows
+    ///
+    /// # Invariants
+    /// * Does not modify any account state (only global index)
+    /// * Idempotent if called multiple times with same slot
+    pub fn accrue_funding(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_bps_per_slot: i64,
+    ) -> Result<()> {
+        let dt = now_slot.saturating_sub(self.last_funding_slot);
+        if dt == 0 {
+            return Ok(());
+        }
+
+        // Use checked math to prevent silent overflow
+        let price = oracle_price as i128;
+        let rate = funding_rate_bps_per_slot as i128;
+        let dt_i = dt as i128;
+
+        // ΔF = price × rate × dt / 10,000
+        let delta = price
+            .checked_mul(rate)
+            .ok_or(RiskError::Overflow)?
+            .checked_mul(dt_i)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(10_000)
+            .ok_or(RiskError::Overflow)?;
+
+        self.funding_index_qpb_e6 = self
+            .funding_index_qpb_e6
+            .checked_add(delta)
+            .ok_or(RiskError::Overflow)?;
+
+        self.last_funding_slot = now_slot;
+        Ok(())
+    }
+
+    /// Settle funding for a user (lazy update)
+    ///
+    /// Applies accumulated funding payments/receipts to user's PNL.
+    /// Convention: positive funding rate → longs pay shorts
+    ///
+    /// Formula: payment = position_size × ΔF / 1e6
+    /// Then: pnl_ledger -= payment
+    ///
+    /// # Arguments
+    /// * `user` - Mutable reference to user account
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err(RiskError::Overflow)` if calculation overflows
+    ///
+    /// # Invariants
+    /// * Does not modify principal (Invariant I1 extended)
+    /// * Idempotent if global index unchanged
+    /// * Zero-sum with LP when positions are opposite
+    fn settle_user_funding(&mut self, user: &mut UserAccount) -> Result<()> {
+        let delta_f = self
+            .funding_index_qpb_e6
+            .checked_sub(user.funding_index_user)
+            .ok_or(RiskError::Overflow)?;
+
+        if delta_f != 0 && user.position_size != 0 {
+            // payment = position × ΔF / 1e6
+            let payment = user
+                .position_size
+                .checked_mul(delta_f)
+                .ok_or(RiskError::Overflow)?
+                .checked_div(1_000_000)
+                .ok_or(RiskError::Overflow)?;
+
+            // Longs pay when funding positive: pnl -= payment
+            user.pnl_ledger = user
+                .pnl_ledger
+                .checked_sub(payment)
+                .ok_or(RiskError::Overflow)?;
+        }
+
+        user.funding_index_user = self.funding_index_qpb_e6;
+        Ok(())
+    }
+
+    /// Settle funding for an LP (lazy update)
+    ///
+    /// Same logic as user funding but for LP position.
+    ///
+    /// # Arguments
+    /// * `lp` - Mutable reference to LP account
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err(RiskError::Overflow)` if calculation overflows
+    fn settle_lp_funding(&mut self, lp: &mut LPAccount) -> Result<()> {
+        let delta_f = self
+            .funding_index_qpb_e6
+            .checked_sub(lp.funding_index_lp)
+            .ok_or(RiskError::Overflow)?;
+
+        if delta_f != 0 && lp.lp_position_size != 0 {
+            let payment = lp
+                .lp_position_size
+                .checked_mul(delta_f)
+                .ok_or(RiskError::Overflow)?
+                .checked_div(1_000_000)
+                .ok_or(RiskError::Overflow)?;
+
+            lp.lp_pnl = lp
+                .lp_pnl
+                .checked_sub(payment)
+                .ok_or(RiskError::Overflow)?;
+        }
+
+        lp.funding_index_lp = self.funding_index_qpb_e6;
+        Ok(())
+    }
+
+    /// Touch a user account (settle funding before operations)
+    ///
+    /// This should be called before any operation that:
+    /// - Reads pnl_ledger for withdrawal/warmup
+    /// - Changes position_size or entry_price
+    /// - Checks collateral or margin
+    /// - Liquidates the account
+    ///
+    /// # Arguments
+    /// * `user_index` - Index of user to touch
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err` if settlement fails or index invalid
+    pub fn touch_user(&mut self, user_index: usize) -> Result<()> {
+        let user = self
+            .users
+            .get_mut(user_index)
+            .ok_or(RiskError::UserNotFound)?;
+
+        let delta_f = self
+            .funding_index_qpb_e6
+            .checked_sub(user.funding_index_user)
+            .ok_or(RiskError::Overflow)?;
+
+        if delta_f != 0 && user.position_size != 0 {
+            let payment = user
+                .position_size
+                .checked_mul(delta_f)
+                .ok_or(RiskError::Overflow)?
+                .checked_div(1_000_000)
+                .ok_or(RiskError::Overflow)?;
+
+            user.pnl_ledger = user
+                .pnl_ledger
+                .checked_sub(payment)
+                .ok_or(RiskError::Overflow)?;
+        }
+
+        user.funding_index_user = self.funding_index_qpb_e6;
+        Ok(())
+    }
+
+    /// Touch an LP account (settle funding before operations)
+    ///
+    /// # Arguments
+    /// * `lp_index` - Index of LP to touch
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err` if settlement fails or index invalid
+    pub fn touch_lp(&mut self, lp_index: usize) -> Result<()> {
+        let lp = self
+            .lps
+            .get_mut(lp_index)
+            .ok_or(RiskError::LPNotFound)?;
+
+        let delta_f = self
+            .funding_index_qpb_e6
+            .checked_sub(lp.funding_index_lp)
+            .ok_or(RiskError::Overflow)?;
+
+        if delta_f != 0 && lp.lp_position_size != 0 {
+            let payment = lp
+                .lp_position_size
+                .checked_mul(delta_f)
+                .ok_or(RiskError::Overflow)?
+                .checked_div(1_000_000)
+                .ok_or(RiskError::Overflow)?;
+
+            lp.lp_pnl = lp
+                .lp_pnl
+                .checked_sub(payment)
+                .ok_or(RiskError::Overflow)?;
+        }
+
+        lp.funding_index_lp = self.funding_index_qpb_e6;
+        Ok(())
+    }
+}
+
+// ============================================================================
 // User Operations
 // ============================================================================
 
@@ -511,6 +748,9 @@ where
     ///
     /// The user can withdraw up to (principal + warmed_up_pnl - margin_required)
     pub fn withdraw(&mut self, user_index: usize, amount: u128) -> Result<()> {
+        // Settle funding before any PNL calculations
+        self.touch_user(user_index)?;
+
         // Calculate withdrawable PNL before borrowing mutably
         let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
         let warmed_up_pnl = self.withdrawable_pnl(user);
@@ -593,6 +833,10 @@ where
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
+        // Settle funding for both accounts before position changes
+        self.touch_user(user_index)?;
+        self.touch_lp(lp_index)?;
+
         // Get accounts (immutable first for matching engine call)
         let lp = self.lps.get(lp_index).ok_or(RiskError::LPNotFound)?;
 
@@ -777,6 +1021,9 @@ where
         keeper_account: usize,
         oracle_price: u64,
     ) -> Result<()> {
+        // Settle funding before checking margin and realizing PNL
+        self.touch_user(user_index)?;
+
         let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
 
         // Check if liquidation is needed
@@ -856,6 +1103,8 @@ where
             sum_vested_pos_pnl: 0,
             loss_accum: 0,
             fee_carry: 0,
+            funding_index_qpb_e6: 0,
+            last_funding_slot: 0,
         }
     }
 
@@ -888,6 +1137,7 @@ where
             fee_index_user: 0,
             fee_accrued: 0,
             vested_pos_snapshot: 0,
+            funding_index_user: self.funding_index_qpb_e6,
         });
         Ok(index)
     }
@@ -921,6 +1171,7 @@ where
             },
             lp_position_size: 0,
             lp_entry_price: 0,
+            funding_index_lp: self.funding_index_qpb_e6,
         });
         Ok(index)
     }
