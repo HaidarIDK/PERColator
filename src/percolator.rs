@@ -246,6 +246,56 @@ fn clamp_neg_i128(val: i128) -> u128 {
 }
 
 // ============================================================================
+// Matching Engine Trait
+// ============================================================================
+
+/// Trait for pluggable matching engines
+///
+/// Implementers can provide custom order matching logic via CPI.
+/// The matching engine is responsible for validating and executing trades
+/// according to its own rules (CLOB, AMM, RFQ, etc).
+pub trait MatchingEngine {
+    /// Execute a trade between LP and user
+    ///
+    /// # Arguments
+    /// * `lp_program` - The LP's matching engine program ID
+    /// * `lp_context` - The LP's matching engine context account
+    /// * `oracle_price` - Current oracle price for reference
+    /// * `size` - Requested position size (positive = long, negative = short)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the matching engine approves the trade
+    /// * `Err(RiskError)` if the trade is rejected
+    ///
+    /// # Safety
+    /// The matching engine MUST verify user authorization before approving trades.
+    /// The risk engine will check solvency after the trade executes.
+    fn execute_match(
+        &self,
+        lp_program: &[u8; 32],
+        lp_context: &[u8; 32],
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<()>;
+}
+
+/// No-op matching engine (for testing)
+pub struct NoOpMatcher;
+
+impl MatchingEngine for NoOpMatcher {
+    fn execute_match(
+        &self,
+        _lp_program: &[u8; 32],
+        _lp_context: &[u8; 32],
+        _oracle_price: u64,
+        _size: i128,
+    ) -> Result<()> {
+        // Always approve trades (no actual matching logic)
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Core Invariants and Helpers
 // ============================================================================
 
@@ -437,31 +487,46 @@ impl RiskEngine {
 // Trading Operations
 // ============================================================================
 
-    /// Execute trade via matching engine (with CPI)
+    /// Execute trade via matching engine
     ///
-    /// This function assumes the caller has verified user authorization
-    /// (e.g., via Account.is_signed in Solana programs).
+    /// The matching engine is responsible for order matching logic and user authorization.
+    /// The risk engine handles position updates, fees, and solvency checks.
     ///
-    /// Process:
-    /// 1. CPI into matching engine to execute trade
-    /// 2. Applies trading fee to insurance fund
-    /// 3. Updates LP and user positions
-    /// 4. Aborts if either account becomes negative
-    /// 4. Updates LP and user positions
-    /// 5. Aborts if either account becomes negative
-    pub fn execute_trade(
+    /// # Arguments
+    /// * `matcher` - Implementation of MatchingEngine trait (can perform CPI)
+    /// * `lp_index` - Index of LP providing liquidity
+    /// * `user_index` - Index of user trading
+    /// * `oracle_price` - Current oracle price
+    /// * `size` - Position size (positive = long, negative = short)
+    ///
+    /// # Process
+    /// 1. Call matching engine to validate/execute trade
+    /// 2. Apply trading fee to insurance fund
+    /// 3. Update LP and user positions
+    /// 4. Realize PNL if reducing position
+    /// 5. Check solvency of both accounts
+    pub fn execute_trade<M: MatchingEngine>(
         &mut self,
+        matcher: &M,
         lp_index: usize,
         user_index: usize,
         oracle_price: u64,
-        size: i128, // Positive = long, negative = short
-        
+        size: i128,
     ) -> Result<()> {
-        // Get accounts
+        // Get accounts (immutable first for matching engine call)
+        let lp = self.lps.get(lp_index).ok_or(RiskError::LPNotFound)?;
+
+        // Call matching engine (can perform CPI in production)
+        matcher.execute_match(
+            &lp.matching_engine_program,
+            &lp.matching_engine_context,
+            oracle_price,
+            size,
+        )?;
+
+        // Now get mutable references for position updates
         let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
-
-        // TODO: In production, CPI into matching engine program
 
         // Calculate fee
         let notional = mul_u128(size.abs() as u128, oracle_price as u128) / 1_000_000;

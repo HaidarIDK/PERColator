@@ -3,6 +3,9 @@
 
 use percolator::*;
 
+// Use the no-op matcher for tests
+const MATCHER: NoOpMatcher = NoOpMatcher;
+
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
@@ -281,7 +284,7 @@ fn test_trading_opens_position() {
     let oracle_price = 1_000_000;
     let size = 1000i128;
 
-    engine.execute_trade(lp_idx, user_idx, oracle_price, size).unwrap();
+    engine.execute_trade(&MATCHER, lp_idx, user_idx, oracle_price, size).unwrap();
 
     // Check position opened
     assert_eq!(engine.users[user_idx].position_size, 1000);
@@ -305,10 +308,10 @@ fn test_trading_realizes_pnl() {
     engine.vault = 110_000;
 
     // Open long position at $1
-    engine.execute_trade(lp_idx, user_idx, 1_000_000, 1000).unwrap();
+    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000).unwrap();
 
     // Close position at $1.50 (50% profit)
-    engine.execute_trade(lp_idx, user_idx, 1_500_000, -1000).unwrap();
+    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_500_000, -1000).unwrap();
 
     // Check PNL realized (approximately)
     // Price went from $1 to $1.50, so 500 profit on 1000 units
@@ -457,8 +460,8 @@ fn test_fee_accumulation() {
 
     // Execute multiple trades
     for _ in 0..10 {
-        let result1 = engine.execute_trade(lp_idx, user_idx, 1_000_000, 100);
-        let result2 = engine.execute_trade(lp_idx, user_idx, 1_000_000, -100);
+        let result1 = engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 100);
+        let result2 = engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, -100);
         // Trades might fail due to margin, that's ok
         let _ = result1;
         let _ = result2;

@@ -8,6 +8,9 @@
 use percolator::*;
 use proptest::prelude::*;
 
+// Use the no-op matcher for tests
+const MATCHER: NoOpMatcher = NoOpMatcher;
+
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
@@ -283,7 +286,7 @@ proptest! {
 
         let insurance_before = engine.insurance_fund.fee_revenue;
 
-        let _ = engine.execute_trade(lp_idx, user_idx, price, size);
+        let _ = engine.execute_trade(&MATCHER, lp_idx, user_idx, price, size);
 
         // Insurance fund should have received fees (if trade succeeded)
         if engine.insurance_fund.fee_revenue > insurance_before {
@@ -416,7 +419,7 @@ proptest! {
         let expected_user_pos = initial_size.saturating_add(trade_size);
         let expected_lp_pos = (-initial_size).saturating_sub(trade_size);
 
-        let _ = engine.execute_trade(lp_idx, user_idx, 1_000_000, trade_size);
+        let _ = engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, trade_size);
 
         // If trade succeeded, positions should net to zero
         if engine.users[user_idx].position_size == expected_user_pos {
