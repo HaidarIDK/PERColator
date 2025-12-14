@@ -48,6 +48,28 @@ fn test_withdraw_principal_insufficient_balance() {
 }
 
 #[test]
+fn test_withdraw_principal_with_negative_pnl_should_fail() {
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user();
+
+    // User deposits 1000
+    engine.deposit(user_idx, 1000).unwrap();
+
+    // User has a position and negative PNL of -800
+    engine.users[user_idx].position_size = 10_000;
+    engine.users[user_idx].entry_price = 1_000_000; // $1 entry price
+    engine.users[user_idx].pnl_ledger = -800;
+
+    // Trying to withdraw all principal would leave collateral = 0 + max(0, -800) = 0
+    // This should fail because user has an open position
+    let result = engine.withdraw_principal(user_idx, 1000);
+
+    // BUG: This currently succeeds but should fail!
+    // User would have 0 principal, -800 PNL, and a 10k position = undercollateralized
+    assert!(result.is_err(), "Should not allow withdrawal that leaves account undercollateralized with open position");
+}
+
+#[test]
 fn test_pnl_warmup() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user();

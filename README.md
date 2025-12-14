@@ -16,7 +16,7 @@ A reusable, formally verified risk engine for perpetual futures decentralized ex
 
 > **If an attacker can manipulate the oracle for at most time T, and PNL requires time T to become withdrawable, then user principal is always safe.**
 
-This allows us to formally verify that users can always withdraw `(principal - realized_losses)` from the system.
+This allows us to formally verify that users can always withdraw their principal from the system (subject to margin requirements if they have an open position).
 
 ## Architecture
 
@@ -353,9 +353,11 @@ PNL warmup solves this by:
 ### Why Principal is Sacred?
 
 By guaranteeing that `principal` is never touched by socialization:
-1. Users can **always** withdraw their deposits (minus realized losses)
-2. The worst case is losing unrealized PNL, not deposits
-3. Creates clear mental model: "deposits are safe, profits take time"
+1. Users can withdraw their deposits (subject to margin requirements if they have open positions)
+2. The worst case is losing unrealized PNL, not principal deposits
+3. Creates clear mental model: "principal is protected from ADL, profits take time to vest"
+
+**Important:** Users with open positions must maintain margin requirements. If you have a position and negative PNL, you may not be able to withdraw all principal until you close the position.
 
 ### Why Pluggable Matching Engines?
 
@@ -375,7 +377,7 @@ By separating matching from risk:
 
 ### What This Guarantees
 
-✅ **User principal is always withdrawable** (minus realized losses)
+✅ **User principal is protected from ADL** and withdrawable (subject to margin requirements)
 ✅ **PNL requires time T to become withdrawable**
 ✅ **ADL haircuts young PNL first, protecting principal**
 ✅ **Conservation of funds across all operations**

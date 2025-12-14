@@ -322,7 +322,10 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Withdraw principal (always allowed up to principal balance)
+    /// Withdraw principal
+    ///
+    /// Users can withdraw principal, but if they have an open position, they must
+    /// maintain sufficient collateral to meet initial margin requirements.
     pub fn withdraw_principal(&mut self, user_index: usize, amount: u128) -> Result<()> {
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
 
@@ -332,12 +335,26 @@ impl RiskEngine {
 
         // Check that withdrawal doesn't violate margin requirements
         let new_principal = sub_u128(user.principal, amount);
-        let _new_collateral = add_u128(new_principal, clamp_pos_i128(user.pnl_ledger));
+        let new_collateral = add_u128(new_principal, clamp_pos_i128(user.pnl_ledger));
 
-        // If user has position, check margin
+        // If user has position, must maintain initial margin
         if user.position_size != 0 {
-            // Use a conservative oracle price check (should be passed in)
-            // For now, we'll skip this check - in production this would use oracle
+            // Calculate position notional value (using last known entry price as approximation)
+            // In production, this should use current oracle price
+            let position_notional = mul_u128(
+                user.position_size.abs() as u128,
+                user.entry_price as u128
+            ) / 1_000_000;
+
+            // Check initial margin requirement (more conservative than maintenance)
+            let initial_margin_required = mul_u128(
+                position_notional,
+                self.params.initial_margin_bps as u128
+            ) / 10_000;
+
+            if new_collateral < initial_margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
         }
 
         user.principal = new_principal;
