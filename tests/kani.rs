@@ -17,6 +17,9 @@
 
 use percolator::*;
 
+// Use the Vec-based implementation for tests
+type RiskEngine = VecRiskEngine;
+
 // Helper to create test params
 fn test_params() -> RiskParams {
     RiskParams {

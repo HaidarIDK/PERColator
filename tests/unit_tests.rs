@@ -6,6 +6,9 @@ use percolator::*;
 // Use the no-op matcher for tests
 const MATCHER: NoOpMatcher = NoOpMatcher;
 
+// Use the Vec-based implementation for tests
+type RiskEngine = VecRiskEngine;
+
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,

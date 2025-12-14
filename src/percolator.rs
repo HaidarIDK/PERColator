@@ -141,9 +141,73 @@ pub struct RiskParams {
     pub account_fee_bps: u64,
 }
 
-/// Main risk engine state - all in one contiguous memory chunk
+// ============================================================================
+// Account Storage Trait
+// ============================================================================
+
+/// Trait for pluggable account storage
+///
+/// Allows users to provide their own storage implementation:
+/// - Vec for heap allocation (default)
+/// - Fixed-size arrays for stack allocation
+/// - Slabs for custom memory management
+/// - Memory-mapped regions for Solana accounts
+pub trait AccountStorage<T> {
+    /// Get an account by index (immutable)
+    fn get(&self, index: usize) -> Option<&T>;
+
+    /// Get an account by index (mutable)
+    fn get_mut(&mut self, index: usize) -> Option<&mut T>;
+
+    /// Get the number of accounts
+    fn len(&self) -> usize;
+
+    /// Add a new account, returns its index
+    fn push(&mut self, account: T) -> usize;
+
+    /// Iterate over all accounts
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a T> where T: 'a;
+
+    /// Iterate over all accounts (mutable)
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut T> where T: 'a;
+}
+
+/// Vec-based storage (default, uses heap allocation)
+impl<T> AccountStorage<T> for Vec<T> {
+    fn get(&self, index: usize) -> Option<&T> {
+        <[T]>::get(self, index)
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        <[T]>::get_mut(self, index)
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn push(&mut self, account: T) -> usize {
+        let index = Vec::len(self);
+        Vec::push(self, account);
+        index
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = &'a T> where T: 'a {
+        <[T]>::iter(self)
+    }
+
+    fn iter_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut T> where T: 'a {
+        <[T]>::iter_mut(self)
+    }
+}
+
+/// Main risk engine state - generic over storage type
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RiskEngine {
+pub struct RiskEngine<U = Vec<UserAccount>, L = Vec<LPAccount>>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
     /// Total vault balance (all deposited funds)
     pub vault: u128,
 
@@ -151,10 +215,10 @@ pub struct RiskEngine {
     pub insurance_fund: InsuranceFund,
 
     /// All user accounts
-    pub users: Vec<UserAccount>,
+    pub users: U,
 
     /// All LP accounts (one per matching engine)
-    pub lps: Vec<LPAccount>,
+    pub lps: L,
 
     /// Risk parameters
     pub params: RiskParams,
@@ -174,6 +238,10 @@ pub struct RiskEngine {
     /// Fee carry for rounding
     pub fee_carry: u128,
 }
+
+/// Type alias for the default Vec-based RiskEngine
+/// This is what you should use in most cases unless you need custom storage
+pub type VecRiskEngine = RiskEngine<Vec<UserAccount>, Vec<LPAccount>>;
 
 // ============================================================================
 // Error Types
@@ -299,7 +367,11 @@ impl MatchingEngine for NoOpMatcher {
 // Core Invariants and Helpers
 // ============================================================================
 
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
     /// Calculate withdrawable PNL for a user (after warmup)
     /// This is the core PNL warmup mechanism (Invariant I5)
     /// Calculate account creation fee multiplier
@@ -391,12 +463,12 @@ impl RiskEngine {
         let mut total_principal = 0u128;
         let mut total_positive_pnl = 0u128;
 
-        for user in &self.users {
+        for user in self.users.iter() {
             total_principal = add_u128(total_principal, user.principal);
             total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(user.pnl_ledger));
         }
 
-        for lp in &self.lps {
+        for lp in self.lps.iter() {
             total_principal = add_u128(total_principal, lp.lp_capital);
             total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(lp.lp_pnl));
         }
@@ -415,7 +487,11 @@ impl RiskEngine {
 // User Operations
 // ============================================================================
 
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
     /// Deposit funds to user account
     pub fn deposit(&mut self, user_index: usize, amount: u128) -> Result<()> {
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
@@ -481,7 +557,11 @@ impl RiskEngine {
         Ok(())
     }
 }
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
 
 // ============================================================================
 // Trading Operations
@@ -617,7 +697,11 @@ impl RiskEngine {
 // ADL (Auto-Deleveraging)
 // ============================================================================
 
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
     /// Apply ADL haircut to unwrapped PNL
     ///
     /// Invariants:
@@ -676,7 +760,11 @@ impl RiskEngine {
 // Liquidations
 // ============================================================================
 
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount>,
+    L: AccountStorage<LPAccount>,
+{
     /// Liquidate undercollateralized account
     ///
     /// Process:
@@ -746,7 +834,11 @@ impl RiskEngine {
 // Initialization
 // ============================================================================
 
-impl RiskEngine {
+impl<U, L> RiskEngine<U, L>
+where
+    U: AccountStorage<UserAccount> + Default,
+    L: AccountStorage<LPAccount> + Default,
+{
     /// Create a new risk engine
     pub fn new(params: RiskParams) -> Self {
         Self {
@@ -756,8 +848,8 @@ impl RiskEngine {
                 fee_revenue: 0,
                 liquidation_revenue: 0,
             },
-            users: Vec::new(),
-            lps: Vec::new(),
+            users: U::default(),
+            lps: L::default(),
             params,
             current_slot: 0,
             fee_index: 0,
