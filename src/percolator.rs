@@ -1,5 +1,10 @@
 //! Formally Verified Risk Engine for Perpetual DEX
 //!
+//! ⚠️ EDUCATIONAL USE ONLY - NOT PRODUCTION READY ⚠️
+//!
+//! This is an experimental research project for educational purposes only.
+//! DO NOT use with real funds. Not independently audited. Not production ready.
+//!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. User funds are safe against oracle manipulation attacks (within time window T)
 //! 2. PNL warmup prevents instant withdrawal of manipulated profits

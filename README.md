@@ -1,5 +1,9 @@
 # Percolator: Formally Verified Risk Engine for Perpetual DEXs
 
+> **⚠️ EDUCATIONAL USE ONLY - NOT PRODUCTION READY**
+>
+> This code is an experimental research project provided for educational purposes only. It is **NOT production ready** and should **NOT be used with real funds**. While the code includes formal verification proofs and comprehensive testing, it has not been independently audited for production use. Use at your own risk.
+
 A reusable, formally verified risk engine for perpetual futures decentralized exchanges (perp DEXs) built on Solana. This module provides mathematical guarantees about fund safety even under oracle manipulation attacks.
 
 ## Core Innovation: PNL Warmup Protection
@@ -456,9 +460,18 @@ Apache-2.0
 
 ## Security
 
-This code has been formally verified but **NOT audited**. Use at your own risk.
+**⚠️ IMPORTANT DISCLAIMER ⚠️**
 
-For security issues, please open a GitHub issue.
+This code is an **experimental research project** and is **NOT production ready**:
+
+- ❌ **NOT independently audited** - No professional security audit has been performed
+- ❌ **NOT battle-tested** - Has not been used in production environments
+- ❌ **NOT complete** - Missing critical production features (proper oracle integration, signature verification, etc.)
+- ❌ **NOT safe for real funds** - Should only be used for educational and research purposes
+
+**Do NOT use this code with real money.** This is a proof-of-concept demonstrating formally verified risk engine design patterns for educational purposes only.
+
+For security issues or questions, please open a GitHub issue.
 
 ## Acknowledgments
 
