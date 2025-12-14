@@ -84,6 +84,12 @@ pub struct LPAccount {
     /// LP's PNL from providing liquidity
     pub lp_pnl: i128,
 
+    /// Reserved PNL for pending LP withdrawals
+    pub lp_reserved_pnl: u128,
+
+    /// PNL warmup state for LP
+    pub lp_warmup_state: Warmup,
+
     /// LP position (opposite of user positions)
     pub lp_position_size: i128,
 
@@ -277,6 +283,27 @@ impl RiskEngine {
         // Calculate warmed up cap: slope * elapsed_slots
         let warmed_up_cap = mul_u128(
             user.warmup_state.slope_per_step,
+            elapsed_slots as u128
+        );
+
+        // Return minimum of available and warmed up
+        core::cmp::min(available_pnl, warmed_up_cap)
+    }
+
+    /// Calculate withdrawable PNL for an LP (after warmup)
+    pub fn lp_withdrawable_pnl(&self, lp: &LPAccount) -> u128 {
+        // Only positive PNL can be withdrawn
+        let positive_pnl = clamp_pos_i128(lp.lp_pnl);
+
+        // Available = positive PNL - reserved
+        let available_pnl = sub_u128(positive_pnl, lp.lp_reserved_pnl);
+
+        // Calculate elapsed slots
+        let elapsed_slots = self.current_slot.saturating_sub(lp.lp_warmup_state.started_at_slot);
+
+        // Calculate warmed up cap: slope * elapsed_slots
+        let warmed_up_cap = mul_u128(
+            lp.lp_warmup_state.slope_per_step,
             elapsed_slots as u128
         );
 
@@ -522,8 +549,8 @@ impl RiskEngine {
         lp.lp_position_size = new_lp_position;
 
         Ok(())
-}
     }
+}
 
 // ============================================================================
 // ADL (Auto-Deleveraging)
@@ -712,5 +739,41 @@ impl RiskEngine {
         Ok(index)
     }
     pub fn add_lp(&mut self, matching_engine_program: [u8; 32], matching_engine_context: [u8; 32], fee_payment: u128) -> Result<usize> {
+        if self.lps.len() >= self.params.max_lps as usize {
+            return Err(RiskError::Overflow);
+        }
+        let multiplier = Self::account_fee_multiplier(self.params.max_lps, self.lps.len() as u64);
+        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        if fee_payment < required_fee {
+            return Err(RiskError::InsufficientBalance);
+        }
+        // Pay fee to insurance
+        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
+        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
+
+        let index = self.lps.len();
+        self.lps.push(LPAccount {
+            matching_engine_program,
+            matching_engine_context,
+            lp_capital: 0,
+            lp_pnl: 0,
+            lp_reserved_pnl: 0,
+            lp_warmup_state: Warmup {
+                started_at_slot: self.current_slot,
+                slope_per_step: if self.params.warmup_period_slots > 0 {
+                    u128::MAX / (self.params.warmup_period_slots as u128)
+                } else {
+                    u128::MAX
+                },
+            },
+            lp_position_size: 0,
+            lp_entry_price: 0,
+        });
         Ok(index)
+    }
+
+    /// Advance to next slot (for testing warmup)
+    pub fn advance_slot(&mut self, slots: u64) {
+        self.current_slot = self.current_slot.saturating_add(slots);
+    }
 }

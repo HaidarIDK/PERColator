@@ -15,6 +15,7 @@ fn default_params() -> RiskParams {
         max_lps: 100,
         account_fee_bps: 10000, // 1%
     }
+}
 
 #[test]
 fn test_deposit_and_withdraw_principal() {
@@ -444,13 +445,14 @@ fn test_warmup_monotonicity() {
 #[test]
 fn test_fee_accumulation() {
     let mut engine = RiskEngine::new(default_params());
-    let user_idx = engine.add_user(1).unwrap();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(10000).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 100_000).unwrap();
     engine.lps[lp_idx].lp_capital = 1_000_000;
     engine.vault = 1_100_000;
 
+    // Track balance after account creation fees
     let initial_insurance_balance = engine.insurance_fund.balance;
 
     // Execute multiple trades
@@ -462,9 +464,78 @@ fn test_fee_accumulation() {
         let _ = result2;
     }
 
-    // Insurance fund should have accumulated fees (if any trades succeeded)
-    // Note: this test might not accumulate fees if all trades fail
-    if engine.insurance_fund.fee_revenue > 0 {
-        assert!(engine.insurance_fund.balance > initial_insurance_balance);
+    // Insurance fund should have accumulated trading fees (if any trades succeeded)
+    // Note: trading fees go to both balance and fee_revenue
+    if engine.insurance_fund.fee_revenue > initial_insurance_balance {
+        assert!(engine.insurance_fund.balance > initial_insurance_balance,
+                "Balance should increase if trades succeeded");
     }
+}
+
+#[test]
+fn test_lp_warmup_initial_state() {
+    let mut engine = RiskEngine::new(default_params());
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+
+    // LP should start with warmup state initialized
+    assert_eq!(engine.lps[lp_idx].lp_reserved_pnl, 0);
+    assert_eq!(engine.lps[lp_idx].lp_warmup_state.started_at_slot, 0);
+}
+
+#[test]
+fn test_lp_warmup_monotonic() {
+    let mut engine = RiskEngine::new(default_params());
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+
+    // Give LP some positive PNL
+    engine.lps[lp_idx].lp_pnl = 10_000;
+
+    // At slot 0
+    let w0 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+
+    // Advance 50 slots
+    engine.advance_slot(50);
+    let w50 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+
+    // Advance another 50 slots (total 100)
+    engine.advance_slot(50);
+    let w100 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+
+    // Withdrawable should be monotonically increasing
+    assert!(w50 >= w0, "LP warmup should be monotonic: w0={}, w50={}", w0, w50);
+    assert!(w100 >= w50, "LP warmup should be monotonic: w50={}, w100={}", w50, w100);
+}
+
+#[test]
+fn test_lp_warmup_bounded() {
+    let mut engine = RiskEngine::new(default_params());
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+
+    // Give LP some positive PNL
+    engine.lps[lp_idx].lp_pnl = 5_000;
+
+    // Reserve some PNL
+    engine.lps[lp_idx].lp_reserved_pnl = 1_000;
+
+    // Even after long time, withdrawable should not exceed available (positive_pnl - reserved)
+    engine.advance_slot(1000);
+    let withdrawable = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+
+    assert!(withdrawable <= 4_000, "Withdrawable {} should not exceed available {}", withdrawable, 4_000);
+}
+
+#[test]
+fn test_lp_warmup_with_negative_pnl() {
+    let mut engine = RiskEngine::new(default_params());
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+
+    // LP has negative PNL
+    engine.lps[lp_idx].lp_pnl = -3_000;
+
+    // Advance time
+    engine.advance_slot(100);
+
+    // With negative PNL, withdrawable should be 0
+    let withdrawable = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    assert_eq!(withdrawable, 0, "Withdrawable should be 0 with negative PNL");
 }
