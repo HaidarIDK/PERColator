@@ -413,23 +413,48 @@ For testing:
 - `proptest`: Property-based testing (fuzzing)
 - `kani`: Formal verification
 
-## Building for Solana
+## Building and Testing
+
+This is a library module designed to be used as a dependency in Solana programs.
 
 ```bash
-# Build for Solana BPF
-cargo build-sbf
-
-# Build for native (testing)
+# Build the library
 cargo build
 
-# Run all tests
-cargo test
+# Run unit tests
+cargo test --test unit_tests
 
-# Run fuzzing
-cargo test --features fuzz
+# Run fuzzing tests (property-based testing)
+cargo test --features fuzz --test fuzzing
 
-# Run formal verification
-cargo kani
+# Run formal verification (requires Kani)
+cargo kani --tests --harness i1_adl_never_reduces_principal
+cargo kani --tests --harness i5_warmup_monotonicity
+# ... see tests/kani.rs for all proofs
+```
+
+### Using as a Dependency
+
+Add to your Solana program's `Cargo.toml`:
+
+```toml
+[dependencies]
+percolator = { git = "https://github.com/aeyakovenko/percolator", branch = "clean" }
+```
+
+Then import and use the risk engine:
+
+```rust
+use percolator::{RiskEngine, RiskParams, UserAccount};
+
+// Initialize risk engine with your parameters
+let params = RiskParams {
+    warmup_period_slots: 100,
+    maintenance_margin_bps: 500,
+    // ... other params
+};
+
+let mut engine = RiskEngine::new(params);
 ```
 
 ## Project Structure
