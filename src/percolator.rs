@@ -431,8 +431,6 @@ where
     U: AccountStorage<Account>,
     L: AccountStorage<Account>,
 {
-    /// Calculate withdrawable PNL for a user (after warmup)
-    /// This is the core PNL warmup mechanism (Invariant I5)
     /// Calculate account creation fee multiplier
     fn account_fee_multiplier(max: u64, used: u64) -> u128 {
         if used >= max {
