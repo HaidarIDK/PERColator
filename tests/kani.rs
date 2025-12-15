@@ -19,9 +19,6 @@
 
 use percolator::*;
 
-// Use the Vec-based implementation for tests
-type RiskEngine = VecRiskEngine;
-
 // Helper to create test params
 fn test_params() -> RiskParams {
     RiskParams {
@@ -31,10 +28,8 @@ fn test_params() -> RiskParams {
         trading_fee_bps: 10,
         liquidation_fee_bps: 50,
         insurance_fee_share_bps: 5000,
-        max_users: 1000,
-        max_lps: 100,
+        max_accounts: 1000,
         account_fee_bps: 10000,
-        max_warmup_rate_fraction_bps: 5000, // 50% of insurance fund in T/2
     }
 }
 
@@ -45,7 +40,7 @@ fn test_params() -> RiskParams {
 #[kani::proof]
 #[kani::unwind(4)]
 fn i1_adl_never_reduces_principal() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     // Set arbitrary but bounded values
@@ -57,15 +52,15 @@ fn i1_adl_never_reduces_principal() {
     kani::assume(pnl > -100_000 && pnl < 100_000);
     kani::assume(loss < 100_000);
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].pnl = pnl;
     engine.insurance_fund.balance = 1_000_000; // Large insurance
 
-    let principal_before = engine.users[user_idx].capital;
+    let principal_before = engine.accounts[user_idx as usize].capital;
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.users[user_idx].capital == principal_before,
+    assert!(engine.accounts[user_idx as usize].capital == principal_before,
             "I1: ADL must NEVER reduce user principal");
 }
 
@@ -76,7 +71,7 @@ fn i1_adl_never_reduces_principal() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn i2_deposit_preserves_conservation() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let amount: u128 = kani::any();
@@ -94,7 +89,7 @@ fn i2_deposit_preserves_conservation() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn i2_withdraw_preserves_conservation() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let deposit: u128 = kani::any();
@@ -121,7 +116,7 @@ fn i2_withdraw_preserves_conservation() {
 #[kani::proof]
 #[kani::unwind(4)]
 fn i5_warmup_determinism() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -134,14 +129,14 @@ fn i5_warmup_determinism() {
     kani::assume(slope > 0 && slope < 100);
     kani::assume(slots < 200);
 
-    engine.users[user_idx].pnl = pnl;
-    engine.users[user_idx].reserved_pnl = reserved;
-    engine.users[user_idx].warmup_state.slope_per_step = slope;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].reserved_pnl = reserved;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
     engine.current_slot = slots;
 
     // Calculate twice with same inputs
-    let w1 = engine.withdrawable_pnl(&engine.users[user_idx]);
-    let w2 = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+    let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     assert!(w1 == w2,
             "I5: Withdrawable PNL must be deterministic");
@@ -150,7 +145,7 @@ fn i5_warmup_determinism() {
 #[kani::proof]
 #[kani::unwind(4)]
 fn i5_warmup_monotonicity() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -164,14 +159,14 @@ fn i5_warmup_monotonicity() {
     kani::assume(slots2 < 200);
     kani::assume(slots2 > slots1);
 
-    engine.users[user_idx].pnl = pnl;
-    engine.users[user_idx].warmup_state.slope_per_step = slope;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
 
     engine.current_slot = slots1;
-    let w1 = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     engine.current_slot = slots2;
-    let w2 = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     assert!(w2 >= w1,
             "I5: Warmup must be monotonically increasing over time");
@@ -180,7 +175,7 @@ fn i5_warmup_monotonicity() {
 #[kani::proof]
 #[kani::unwind(4)]
 fn i5_warmup_bounded_by_pnl() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -193,12 +188,12 @@ fn i5_warmup_bounded_by_pnl() {
     kani::assume(slope > 0 && slope < 100);
     kani::assume(slots < 200);
 
-    engine.users[user_idx].pnl = pnl;
-    engine.users[user_idx].reserved_pnl = reserved;
-    engine.users[user_idx].warmup_state.slope_per_step = slope;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].reserved_pnl = reserved;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
     engine.current_slot = slots;
 
-    let withdrawable = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
     let positive_pnl = pnl as u128;
     let available = positive_pnl.saturating_sub(reserved);
 
@@ -213,7 +208,7 @@ fn i5_warmup_bounded_by_pnl() {
 #[kani::proof]
 #[kani::unwind(3)]
 fn i7_user_isolation_deposit() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -226,23 +221,23 @@ fn i7_user_isolation_deposit() {
     let _ = engine.deposit(user1, amount1);
     let _ = engine.deposit(user2, amount2);
 
-    let user2_principal = engine.users[user2].capital;
-    let user2_pnl = engine.users[user2].pnl;
+    let user2_principal = engine.accounts[user2 as usize].capital;
+    let user2_pnl = engine.accounts[user2 as usize].pnl;
 
     // Operate on user1
     let _ = engine.deposit(user1, 100);
 
     // User2 should be unchanged
-    assert!(engine.users[user2].capital == user2_principal,
+    assert!(engine.accounts[user2 as usize].capital == user2_principal,
             "I7: User2 principal unchanged by user1 deposit");
-    assert!(engine.users[user2].pnl == user2_pnl,
+    assert!(engine.accounts[user2 as usize].pnl == user2_pnl,
             "I7: User2 PNL unchanged by user1 deposit");
 }
 
 #[kani::proof]
 #[kani::unwind(3)]
 fn i7_user_isolation_withdrawal() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -255,16 +250,16 @@ fn i7_user_isolation_withdrawal() {
     let _ = engine.deposit(user1, amount1);
     let _ = engine.deposit(user2, amount2);
 
-    let user2_principal = engine.users[user2].capital;
-    let user2_pnl = engine.users[user2].pnl;
+    let user2_principal = engine.accounts[user2 as usize].capital;
+    let user2_pnl = engine.accounts[user2 as usize].pnl;
 
     // Operate on user1
     let _ = engine.withdraw(user1, 50);
 
     // User2 should be unchanged
-    assert!(engine.users[user2].capital == user2_principal,
+    assert!(engine.accounts[user2 as usize].capital == user2_principal,
             "I7: User2 principal unchanged by user1 withdrawal");
-    assert!(engine.users[user2].pnl == user2_pnl,
+    assert!(engine.accounts[user2 as usize].pnl == user2_pnl,
             "I7: User2 PNL unchanged by user1 withdrawal");
 }
 
@@ -275,7 +270,7 @@ fn i7_user_isolation_withdrawal() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn i8_collateral_with_positive_pnl() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -284,10 +279,10 @@ fn i8_collateral_with_positive_pnl() {
     kani::assume(principal < 10_000);
     kani::assume(pnl > 0 && pnl < 10_000);
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].pnl = pnl;
 
-    let collateral = engine.user_collateral(&engine.users[user_idx]);
+    let collateral = engine.account_collateral(&engine.accounts[user_idx as usize]);
     let expected = principal.saturating_add(pnl as u128);
 
     assert!(collateral == expected,
@@ -297,7 +292,7 @@ fn i8_collateral_with_positive_pnl() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn i8_collateral_with_negative_pnl() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -306,10 +301,10 @@ fn i8_collateral_with_negative_pnl() {
     kani::assume(principal < 10_000);
     kani::assume(pnl < 0 && pnl > -10_000);
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].pnl = pnl;
 
-    let collateral = engine.user_collateral(&engine.users[user_idx]);
+    let collateral = engine.account_collateral(&engine.accounts[user_idx as usize]);
 
     assert!(collateral == principal,
             "I8: Collateral = principal when PNL is negative");
@@ -322,7 +317,7 @@ fn i8_collateral_with_negative_pnl() {
 #[kani::proof]
 #[kani::unwind(4)]
 fn i4_adl_haircuts_unwrapped_first() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -334,12 +329,12 @@ fn i4_adl_haircuts_unwrapped_first() {
     kani::assume(loss < 5_000);
     kani::assume(loss < pnl as u128); // Loss less than PNL
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].pnl = pnl;
-    engine.users[user_idx].warmup_state.slope_per_step = 10;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     engine.insurance_fund.balance = 100_000;
 
-    let pnl_before = engine.users[user_idx].pnl;
+    let pnl_before = engine.accounts[user_idx as usize].pnl;
     let insurance_before = engine.insurance_fund.balance;
 
     let _ = engine.apply_adl(loss);
@@ -350,7 +345,7 @@ fn i4_adl_haircuts_unwrapped_first() {
     if loss <= unwrapped_pnl {
         assert!(engine.insurance_fund.balance == insurance_before,
                 "I4: ADL should haircut PNL before touching insurance");
-        assert!(engine.users[user_idx].pnl == pnl_before - (loss as i128),
+        assert!(engine.accounts[user_idx as usize].pnl == pnl_before - (loss as i128),
                 "I4: PNL should be reduced by loss amount");
     }
 }
@@ -362,7 +357,7 @@ fn i4_adl_haircuts_unwrapped_first() {
 #[kani::proof]
 #[kani::unwind(3)]
 fn withdrawal_requires_sufficient_balance() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -372,7 +367,7 @@ fn withdrawal_requires_sufficient_balance() {
     kani::assume(withdraw < 20_000);
     kani::assume(withdraw > principal); // Try to withdraw more than available
 
-    engine.users[user_idx].capital = principal;
+    engine.accounts[user_idx as usize].capital = principal;
     engine.vault = principal;
 
     let result = engine.withdraw(user_idx, withdraw);
@@ -384,7 +379,7 @@ fn withdrawal_requires_sufficient_balance() {
 #[kani::proof]
 #[kani::unwind(3)]
 fn pnl_withdrawal_requires_warmup() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -393,15 +388,15 @@ fn pnl_withdrawal_requires_warmup() {
     kani::assume(pnl > 0 && pnl < 10_000);
     kani::assume(withdraw > 0 && withdraw < 10_000);
 
-    engine.users[user_idx].pnl = pnl;
-    engine.users[user_idx].warmup_state.slope_per_step = 10;
-    engine.users[user_idx].capital = 0; // No principal
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+    engine.accounts[user_idx as usize].capital = 0; // No principal
     engine.insurance_fund.balance = 100_000;
     engine.vault = pnl as u128;
     engine.current_slot = 0; // At slot 0, nothing warmed up
 
     // withdrawable_pnl should be 0 at slot 0
-    let withdrawable = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
     assert!(withdrawable == 0, "No PNL warmed up at slot 0");
 
     // Trying to withdraw should fail (no principal, no warmed PNL)
@@ -419,7 +414,7 @@ fn pnl_withdrawal_requires_warmup() {
 #[kani::proof]
 #[kani::unwind(4)]
 fn multiple_users_adl_preserves_all_principals() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -435,17 +430,17 @@ fn multiple_users_adl_preserves_all_principals() {
     kani::assume(pnl2 > -5_000 && pnl2 < 5_000);
     kani::assume(loss < 10_000);
 
-    engine.users[user1].capital = p1;
-    engine.users[user1].pnl = pnl1;
-    engine.users[user2].capital = p2;
-    engine.users[user2].pnl = pnl2;
+    engine.accounts[user1 as usize].capital = p1;
+    engine.accounts[user1 as usize].pnl = pnl1;
+    engine.accounts[user2 as usize].capital = p2;
+    engine.accounts[user2 as usize].pnl = pnl2;
     engine.insurance_fund.balance = 100_000;
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.users[user1].capital == p1,
+    assert!(engine.accounts[user1 as usize].capital == p1,
             "Multi-user ADL: User1 principal preserved");
-    assert!(engine.users[user2].capital == p2,
+    assert!(engine.accounts[user2 as usize].capital == p2,
             "Multi-user ADL: User2 principal preserved");
 }
 
@@ -477,7 +472,7 @@ fn saturating_arithmetic_prevents_overflow() {
 #[kani::proof]
 #[kani::unwind(3)]
 fn liquidation_closes_position() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let keeper_idx = engine.add_user(1).unwrap();
 
@@ -487,15 +482,15 @@ fn liquidation_closes_position() {
     kani::assume(principal > 0 && principal < 1_000);
     kani::assume(position != 0 && position > -10_000 && position < 10_000);
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].position_size = position;
-    engine.users[user_idx].entry_price = 1_000_000;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = 1_000_000;
     engine.vault = principal;
 
-    let _ = engine.liquidate_user(user_idx, keeper_idx, 1_000_000);
+    let _ = engine.liquidate_account(user_idx, keeper_idx, 1_000_000);
 
     // After liquidation, position should be closed (or at least reduced)
-    assert!(engine.users[user_idx].position_size.abs() <= position.abs(),
+    assert!(engine.accounts[user_idx as usize].position_size.abs() <= position.abs(),
             "Liquidation should reduce or close position");
 }
 
@@ -506,13 +501,13 @@ fn liquidation_closes_position() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn zero_pnl_withdrawable_is_zero() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].pnl = 0;
+    engine.accounts[user_idx as usize].pnl = 0;
     engine.current_slot = 1000; // Far in future
 
-    let withdrawable = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     assert!(withdrawable == 0,
             "Zero PNL means zero withdrawable");
@@ -521,16 +516,16 @@ fn zero_pnl_withdrawable_is_zero() {
 #[kani::proof]
 #[kani::unwind(2)]
 fn negative_pnl_withdrawable_is_zero() {
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     kani::assume(pnl < 0 && pnl > -10_000);
 
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].pnl = pnl;
     engine.current_slot = 1000;
 
-    let withdrawable = engine.withdrawable_pnl(&engine.users[user_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     assert!(withdrawable == 0,
             "Negative PNL means zero withdrawable");
@@ -546,7 +541,7 @@ fn funding_p1_settlement_idempotent() {
     // P1: Funding settlement is idempotent
     // After settling once, settling again with unchanged global index does nothing
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     // Arbitrary position and PNL
@@ -556,8 +551,8 @@ fn funding_p1_settlement_idempotent() {
     let pnl: i128 = kani::any();
     kani::assume(pnl > -1_000_000 && pnl < 1_000_000);
 
-    engine.users[user_idx].position_size = position;
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].pnl = pnl;
 
     // Set arbitrary funding index
     let index: i128 = kani::any();
@@ -565,20 +560,20 @@ fn funding_p1_settlement_idempotent() {
     engine.funding_index_qpb_e6 = index;
 
     // Settle once
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
-    let pnl_after_first = engine.users[user_idx].pnl;
-    let snapshot_after_first = engine.users[user_idx].funding_index_user;
+    let pnl_after_first = engine.accounts[user_idx as usize].pnl;
+    let snapshot_after_first = engine.accounts[user_idx as usize].funding_index;
 
     // Settle again without changing global index
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
     // PNL should be unchanged
-    assert!(engine.users[user_idx].pnl == pnl_after_first,
+    assert!(engine.accounts[user_idx as usize].pnl == pnl_after_first,
             "Second settlement should not change PNL");
 
     // Snapshot should equal global index
-    assert!(engine.users[user_idx].funding_index_user == engine.funding_index_qpb_e6,
+    assert!(engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
             "Snapshot should equal global index");
 }
 
@@ -587,7 +582,7 @@ fn funding_p1_settlement_idempotent() {
 fn funding_p2_never_touches_principal() {
     // P2: Funding does not touch principal (extends Invariant I1)
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -596,8 +591,8 @@ fn funding_p2_never_touches_principal() {
     let position: i128 = kani::any();
     kani::assume(position.abs() < 1_000_000);
 
-    engine.users[user_idx].capital = principal;
-    engine.users[user_idx].position_size = position;
+    engine.accounts[user_idx as usize].capital = principal;
+    engine.accounts[user_idx as usize].position_size = position;
 
     // Accrue arbitrary funding
     let funding_delta: i128 = kani::any();
@@ -605,10 +600,10 @@ fn funding_p2_never_touches_principal() {
     engine.funding_index_qpb_e6 = funding_delta;
 
     // Settle funding
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
     // Principal must be unchanged
-    assert!(engine.users[user_idx].capital == principal,
+    assert!(engine.accounts[user_idx as usize].capital == principal,
             "Funding must never modify principal");
 }
 
@@ -617,7 +612,7 @@ fn funding_p2_never_touches_principal() {
 fn funding_p3_zero_sum_between_opposite_positions() {
     // P3: Funding is zero-sum when user and LP have opposite positions
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -625,15 +620,15 @@ fn funding_p3_zero_sum_between_opposite_positions() {
     kani::assume(position > 0 && position < 100_000); // positive only for simplicity
 
     // User has position, LP has opposite
-    engine.users[user_idx].position_size = position;
-    engine.lps[lp_idx].lp_position_size = -position;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[lp_idx as usize].position_size = -position;
 
     // Both start with same snapshot
-    engine.users[user_idx].funding_index_user = 0;
-    engine.lps[lp_idx].funding_index_lp = 0;
+    engine.accounts[user_idx as usize].funding_index = 0;
+    engine.accounts[lp_idx as usize].funding_index = 0;
 
-    let user_pnl_before = engine.users[user_idx].pnl;
-    let lp_pnl_before = engine.lps[lp_idx].pnl;
+    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
     let total_before = user_pnl_before + lp_pnl_before;
 
     // Accrue funding
@@ -642,12 +637,12 @@ fn funding_p3_zero_sum_between_opposite_positions() {
     engine.funding_index_qpb_e6 = delta;
 
     // Settle both
-    let user_result = engine.touch_user(user_idx);
-    let lp_result = engine.touch_lp(lp_idx);
+    let user_result = engine.touch_account(user_idx);
+    let lp_result = engine.touch_account(lp_idx);
 
     // If both settlements succeeded, check zero-sum
     if user_result.is_ok() && lp_result.is_ok() {
-        let total_after = engine.users[user_idx].pnl + engine.lps[lp_idx].pnl;
+        let total_after = engine.accounts[user_idx as usize].pnl + engine.accounts[lp_idx as usize].pnl;
 
         assert!(total_after == total_before,
                 "Funding must be zero-sum between opposite positions");
@@ -659,15 +654,15 @@ fn funding_p3_zero_sum_between_opposite_positions() {
 fn funding_p4_settle_before_position_change() {
     // P4: Verifies that settlement before position change gives correct results
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let initial_pos: i128 = kani::any();
     kani::assume(initial_pos > 0 && initial_pos < 10_000);
 
-    engine.users[user_idx].position_size = initial_pos;
-    engine.users[user_idx].pnl = 0;
-    engine.users[user_idx].funding_index_user = 0;
+    engine.accounts[user_idx as usize].position_size = initial_pos;
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].funding_index = 0;
 
     // Period 1: accrue funding with initial position
     let delta1: i128 = kani::any();
@@ -675,27 +670,27 @@ fn funding_p4_settle_before_position_change() {
     engine.funding_index_qpb_e6 = delta1;
 
     // Settle BEFORE changing position (correct way)
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
-    let pnl_after_period1 = engine.users[user_idx].pnl;
+    let pnl_after_period1 = engine.accounts[user_idx as usize].pnl;
 
     // Change position
     let new_pos: i128 = kani::any();
     kani::assume(new_pos > 0 && new_pos < 10_000 && new_pos != initial_pos);
-    engine.users[user_idx].position_size = new_pos;
+    engine.accounts[user_idx as usize].position_size = new_pos;
 
     // Period 2: more funding
     let delta2: i128 = kani::any();
     kani::assume(delta2.abs() < 1_000);
     engine.funding_index_qpb_e6 = delta1 + delta2;
 
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
     // The settlement should have correctly applied:
     // - delta1 to initial_pos
     // - delta2 to new_pos
     // Snapshot should equal global index
-    assert!(engine.users[user_idx].funding_index_user == engine.funding_index_qpb_e6,
+    assert!(engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
             "Snapshot must track global index");
 }
 
@@ -704,7 +699,7 @@ fn funding_p4_settle_before_position_change() {
 fn funding_p5_bounded_operations_no_overflow() {
     // P5: No overflows on bounded inputs (or returns Overflow error)
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
 
     // Bounded inputs
     let price: u64 = kani::any();
@@ -733,38 +728,41 @@ fn funding_p5_bounded_operations_no_overflow() {
 fn funding_zero_position_no_change() {
     // Additional invariant: Zero position means no funding payment
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].position_size = 0; // Zero position
+    engine.accounts[user_idx as usize].position_size = 0; // Zero position
 
     let pnl_before: i128 = kani::any();
     kani::assume(pnl_before.abs() < 1_000_000);
-    engine.users[user_idx].pnl = pnl_before;
+    engine.accounts[user_idx as usize].pnl = pnl_before;
 
     // Accrue arbitrary funding
     let delta: i128 = kani::any();
     kani::assume(delta.abs() < 1_000_000_000);
     engine.funding_index_qpb_e6 = delta;
 
-    let _ = engine.touch_user(user_idx);
+    let _ = engine.touch_account(user_idx);
 
     // PNL should be unchanged
-    assert!(engine.users[user_idx].pnl == pnl_before,
+    assert!(engine.accounts[user_idx as usize].pnl == pnl_before,
             "Zero position should not pay or receive funding");
 }
 
 // ============================================================================
 // Warmup Rate Cap Invariant
+// NOTE: These tests are commented out because warmup rate limiting was removed
+// in the slab 4096 redesign for simplicity
 // ============================================================================
 
+/*
 #[kani::proof]
 #[kani::unwind(3)]
 fn warmup_rate_cap_invariant_maintained() {
     // I9: Global warmup rate respects insurance fund limit
     // Invariant: total_warmup_rate * (T/2) <= insurance_fund * max_warmup_rate_fraction_bps / 10_000
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
 
     // Set insurance fund to symbolic value
     let insurance: u128 = kani::any();
@@ -776,7 +774,7 @@ fn warmup_rate_cap_invariant_maintained() {
         if let Ok(user_idx) = engine.add_user(1) {
             let pnl: i128 = kani::any();
             kani::assume(pnl > 0 && pnl < 1_000_000_000);
-            engine.users[user_idx].pnl = pnl;
+            engine.accounts[user_idx as usize].pnl = pnl;
 
             // Update warmup slope
             let _ = engine.update_warmup_slope(user_idx);
@@ -800,19 +798,19 @@ fn warmup_slope_never_exceeds_pnl_over_period() {
     // Verify that slope_per_step * warmup_period <= positive_pnl
     // (Users can't warm up more than they have)
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     engine.insurance_fund.balance = 1_000_000; // Large enough to not be limiting factor
 
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
     kani::assume(pnl > 0 && pnl < 1_000_000);
-    engine.users[user_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].pnl = pnl;
 
     engine.update_warmup_slope(user_idx).unwrap();
 
-    let user = &engine.users[user_idx];
-    let total_warmup = user.warmup_state.slope_per_step.saturating_mul(engine.params.warmup_period_slots as u128);
+    let user = &engine.accounts[user_idx as usize];
+    let total_warmup = user.warmup_slope_per_step.saturating_mul(engine.params.warmup_period_slots as u128);
 
     assert!(total_warmup <= pnl as u128,
             "Slope should not allow warming up more PNL than exists");
@@ -824,26 +822,27 @@ fn warmup_rate_decreases_when_pnl_decreases() {
     // When user's PNL decreases, their slope should decrease,
     // freeing up capacity for other users
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     engine.insurance_fund.balance = 1_000_000;
 
     let user_idx = engine.add_user(1).unwrap();
 
     // User has high PNL
-    engine.users[user_idx].pnl = 100_000;
+    engine.accounts[user_idx as usize].pnl = 100_000;
     engine.update_warmup_slope(user_idx).unwrap();
-    let slope_high = engine.users[user_idx].warmup_state.slope_per_step;
+    let slope_high = engine.accounts[user_idx as usize].warmup_slope_per_step;
     let rate_high = engine.total_warmup_rate;
 
     // PNL decreases
-    engine.users[user_idx].pnl = 50_000;
+    engine.accounts[user_idx as usize].pnl = 50_000;
     engine.update_warmup_slope(user_idx).unwrap();
-    let slope_low = engine.users[user_idx].warmup_state.slope_per_step;
+    let slope_low = engine.accounts[user_idx as usize].warmup_slope_per_step;
     let rate_low = engine.total_warmup_rate;
 
     assert!(slope_low <= slope_high, "Slope should decrease when PNL decreases");
     assert!(rate_low <= rate_high, "Total rate should decrease when user PNL decreases");
 }
+*/
 
 // ============================================================================
 // I10: Withdrawal-Only Mode (Fair Unwinding)
@@ -855,7 +854,7 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     // When insurance fund is depleted and loss_accum > 0,
     // withdrawal_only mode should be activated
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let insurance: u128 = kani::any();
@@ -866,8 +865,8 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     kani::assume(loss > insurance); // Loss exceeds insurance
 
     engine.insurance_fund.balance = insurance;
-    engine.users[user_idx].capital = 10_000;
-    engine.users[user_idx].pnl = 1_000; // Some PNL
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[user_idx as usize].pnl = 1_000; // Some PNL
 
     let _ = engine.apply_adl(loss);
 
@@ -887,7 +886,7 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
 fn i10_fair_unwinding_constant_haircut_ratio() {
     // All users receive the same haircut ratio regardless of withdrawal order
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
 
     // Add two users with different principals
     let user1 = engine.add_user(1).unwrap();
@@ -901,8 +900,8 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
     kani::assume(principal2 > 1_000 && principal2 < 10_000);
     kani::assume(loss > 0 && loss < 5_000);
 
-    engine.users[user1].capital = principal1;
-    engine.users[user2].capital = principal2;
+    engine.accounts[user1 as usize].capital = principal1;
+    engine.accounts[user2 as usize].capital = principal2;
 
     // Trigger withdrawal mode
     engine.withdrawal_only = true;
@@ -914,12 +913,12 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
     // User1 withdraws
     let withdraw1 = principal1 / 2;
     let _ = engine.withdraw(user1, withdraw1);
-    let actual1 = principal1 - engine.users[user1].capital;
+    let actual1 = principal1 - engine.accounts[user1 as usize].capital;
 
     // User2 withdraws (after user1)
     let withdraw2 = principal2 / 2;
     let _ = engine.withdraw(user2, withdraw2);
-    let actual2 = principal2 - engine.users[user2].capital;
+    let actual2 = principal2 - engine.accounts[user2 as usize].capital;
 
     // Calculate expected haircut ratio
     let available = total_principal - loss;
@@ -941,12 +940,12 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
 fn i10_withdrawal_mode_blocks_position_increase() {
     // In withdrawal-only mode, users cannot increase position size
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
-    engine.users[user_idx].capital = 10_000;
-    engine.lps[lp_idx].capital = 50_000;
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[lp_idx as usize].capital = 50_000;
     engine.vault = 60_000;
 
     let position: i128 = kani::any();
@@ -955,7 +954,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
     kani::assume(position.abs() < 5_000);
     kani::assume(increase > 0 && increase < 2_000);
 
-    engine.users[user_idx].position_size = position;
+    engine.accounts[user_idx as usize].position_size = position;
 
     // Enter withdrawal mode
     engine.withdrawal_only = true;
@@ -983,21 +982,21 @@ fn i10_withdrawal_mode_blocks_position_increase() {
 fn i10_withdrawal_mode_allows_position_decrease() {
     // In withdrawal-only mode, users CAN decrease/close positions
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
-    engine.users[user_idx].capital = 10_000;
-    engine.lps[lp_idx].capital = 50_000;
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[lp_idx as usize].capital = 50_000;
     engine.vault = 60_000;
 
     let position: i128 = kani::any();
     kani::assume(position > 1_000 || position < -1_000);
 
-    engine.users[user_idx].position_size = position;
-    engine.users[user_idx].entry_price = 1_000_000;
-    engine.lps[lp_idx].lp_position_size = -position;
-    engine.lps[lp_idx].lp_entry_price = 1_000_000;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = 1_000_000;
+    engine.accounts[lp_idx as usize].position_size = -position;
+    engine.accounts[lp_idx as usize].entry_price = 1_000_000;
 
     // Enter withdrawal mode
     engine.withdrawal_only = true;
@@ -1019,7 +1018,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
 fn i10_total_withdrawals_bounded_by_available() {
     // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1028,7 +1027,7 @@ fn i10_total_withdrawals_bounded_by_available() {
     kani::assume(principal > 1_000 && principal < 10_000);
     kani::assume(loss > 0 && loss < principal);
 
-    engine.users[user_idx].capital = principal;
+    engine.accounts[user_idx as usize].capital = principal;
 
     // Enter withdrawal mode
     engine.withdrawal_only = true;
@@ -1052,7 +1051,7 @@ fn i10_total_withdrawals_bounded_by_available() {
 fn i10_top_up_reduces_loss_accum() {
     // Insurance fund top-ups directly reduce loss_accum
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
 
     let loss: u128 = kani::any();
     let top_up: u128 = kani::any();
@@ -1080,7 +1079,7 @@ fn i10_top_up_reduces_loss_accum() {
 fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     // When loss_accum reaches 0, withdrawal mode should be exited
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
 
     let loss: u128 = kani::any();
     kani::assume(loss > 0 && loss < 10_000);
@@ -1106,7 +1105,7 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
 fn i10_withdrawal_mode_preserves_conservation() {
     // Conservation must be maintained even in withdrawal-only mode
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1117,7 +1116,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
     kani::assume(loss > 0 && loss < principal);
     kani::assume(withdraw > 0 && withdraw < principal);
 
-    engine.users[user_idx].capital = principal;
+    engine.accounts[user_idx as usize].capital = principal;
     engine.vault = principal;
 
     // Enter withdrawal mode
@@ -1138,7 +1137,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
 fn i10_withdrawal_tracking_accuracy() {
     // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1147,7 +1146,7 @@ fn i10_withdrawal_tracking_accuracy() {
     kani::assume(principal > 2_000 && principal < 10_000);
     kani::assume(loss > 0 && loss < principal / 2);
 
-    engine.users[user_idx].capital = principal;
+    engine.accounts[user_idx as usize].capital = principal;
     engine.vault = principal;
 
     // Enter withdrawal mode
@@ -1160,7 +1159,7 @@ fn i10_withdrawal_tracking_accuracy() {
     let withdraw = principal / 3;
     let _ = engine.withdraw(user_idx, withdraw);
 
-    let actual_withdrawn = principal - engine.users[user_idx].capital;
+    let actual_withdrawn = principal - engine.accounts[user_idx as usize].capital;
     let tracking_increase = engine.withdrawal_mode_withdrawn - tracking_before;
 
     assert!(tracking_increase == actual_withdrawn,
@@ -1177,7 +1176,7 @@ fn i1_lp_adl_never_reduces_capital() {
     // I1 for LPs: ADL must NEVER reduce LP capital
     // This is the LP equivalent of i1_adl_never_reduces_principal
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     // Set arbitrary but bounded values
@@ -1189,15 +1188,15 @@ fn i1_lp_adl_never_reduces_capital() {
     kani::assume(pnl > -100_000 && pnl < 100_000);
     kani::assume(loss < 100_000);
 
-    engine.lps[lp_idx].capital = capital;
-    engine.lps[lp_idx].pnl = pnl;
+    engine.accounts[lp_idx as usize].capital = capital;
+    engine.accounts[lp_idx as usize].pnl = pnl;
     engine.insurance_fund.balance = 1_000_000; // Large insurance
 
-    let capital_before = engine.lps[lp_idx].capital;
+    let capital_before = engine.accounts[lp_idx as usize].capital;
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.lps[lp_idx].capital == capital_before,
+    assert!(engine.accounts[lp_idx as usize].capital == capital_before,
             "I1-LP: ADL must NEVER reduce LP capital");
 }
 
@@ -1207,7 +1206,7 @@ fn i1_lp_liquidation_never_reduces_capital() {
     // I1 for LPs: Liquidation must NEVER reduce LP capital
     // LP capital can only be reduced by explicit withdrawals, never by liquidation
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
     let keeper_idx = engine.add_user(1).unwrap();
 
@@ -1219,16 +1218,16 @@ fn i1_lp_liquidation_never_reduces_capital() {
     kani::assume(position != 0 && position > -50_000 && position < 50_000);
     kani::assume(oracle_price > 100_000 && oracle_price < 10_000_000); // $0.10 to $10
 
-    engine.lps[lp_idx].capital = capital;
-    engine.lps[lp_idx].position_size = position;
-    engine.lps[lp_idx].entry_price = 1_000_000; // $1
+    engine.accounts[lp_idx as usize].capital = capital;
+    engine.accounts[lp_idx as usize].position_size = position;
+    engine.accounts[lp_idx as usize].entry_price = 1_000_000; // $1
     engine.vault = capital;
 
-    let capital_before = engine.lps[lp_idx].capital;
+    let capital_before = engine.accounts[lp_idx as usize].capital;
 
-    let _ = engine.liquidate_lp(lp_idx, keeper_idx, oracle_price);
+    let _ = engine.liquidate_account(lp_idx, keeper_idx, oracle_price);
 
-    assert!(engine.lps[lp_idx].capital == capital_before,
+    assert!(engine.accounts[lp_idx as usize].capital == capital_before,
             "I1-LP: Liquidation must NEVER reduce LP capital");
 }
 
@@ -1238,7 +1237,7 @@ fn adl_is_proportional_for_user_and_lp() {
     // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
     // should receive equal haircuts
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1249,24 +1248,24 @@ fn adl_is_proportional_for_user_and_lp() {
     kani::assume(pnl > 0 && pnl < 50_000);
     kani::assume(loss > 0 && loss < 100_000);
 
-    engine.users[user_idx].pnl = pnl;
-    engine.lps[lp_idx].pnl = pnl;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[lp_idx as usize].pnl = pnl;
     engine.insurance_fund.balance = 1_000_000;
 
     // Both start with no reserved PNL and no warmup
     // (so all PNL is unwrapped)
-    engine.users[user_idx].reserved_pnl = 0;
-    engine.lps[lp_idx].reserved_pnl = 0;
-    engine.users[user_idx].warmup_state.slope_per_step = 0;
-    engine.lps[lp_idx].warmup_state.slope_per_step = 0;
+    engine.accounts[user_idx as usize].reserved_pnl = 0;
+    engine.accounts[lp_idx as usize].reserved_pnl = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = 0;
 
-    let user_pnl_before = engine.users[user_idx].pnl;
-    let lp_pnl_before = engine.lps[lp_idx].pnl;
+    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
 
     let _ = engine.apply_adl(loss);
 
-    let user_loss = user_pnl_before - engine.users[user_idx].pnl;
-    let lp_loss = lp_pnl_before - engine.lps[lp_idx].pnl;
+    let user_loss = user_pnl_before - engine.accounts[user_idx as usize].pnl;
+    let lp_loss = lp_pnl_before - engine.accounts[lp_idx as usize].pnl;
 
     // Both should lose the same amount (proportional means equal when starting equal)
     assert!(user_loss == lp_loss,
@@ -1279,7 +1278,7 @@ fn adl_proportionality_general() {
     // General proportional ADL: Haircut percentages should be equal
     // even when PNL amounts differ
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1292,23 +1291,23 @@ fn adl_proportionality_general() {
     kani::assume(loss > 0 && loss < 50_000);
     kani::assume(user_pnl != lp_pnl); // Different amounts
 
-    engine.users[user_idx].pnl = user_pnl;
-    engine.lps[lp_idx].pnl = lp_pnl;
+    engine.accounts[user_idx as usize].pnl = user_pnl;
+    engine.accounts[lp_idx as usize].pnl = lp_pnl;
     engine.insurance_fund.balance = 1_000_000;
 
     // No reserved PNL, no warmup (all unwrapped)
-    engine.users[user_idx].reserved_pnl = 0;
-    engine.lps[lp_idx].reserved_pnl = 0;
-    engine.users[user_idx].warmup_state.slope_per_step = 0;
-    engine.lps[lp_idx].warmup_state.slope_per_step = 0;
+    engine.accounts[user_idx as usize].reserved_pnl = 0;
+    engine.accounts[lp_idx as usize].reserved_pnl = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = 0;
 
-    let user_pnl_before = engine.users[user_idx].pnl;
-    let lp_pnl_before = engine.lps[lp_idx].pnl;
+    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
 
     let _ = engine.apply_adl(loss);
 
-    let user_loss = (user_pnl_before - engine.users[user_idx].pnl) as u128;
-    let lp_loss = (lp_pnl_before - engine.lps[lp_idx].pnl) as u128;
+    let user_loss = (user_pnl_before - engine.accounts[user_idx as usize].pnl) as u128;
+    let lp_loss = (lp_pnl_before - engine.accounts[lp_idx as usize].pnl) as u128;
 
     // Check proportionality using cross-multiplication to avoid division
     // user_loss / user_pnl == lp_loss / lp_pnl
@@ -1331,7 +1330,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
     // This extends i10_fair_unwinding_constant_haircut_ratio to include LPs
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1343,8 +1342,8 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     kani::assume(lp_capital > 1_000 && lp_capital < 10_000);
     kani::assume(loss > 0 && loss < 5_000);
 
-    engine.users[user_idx].capital = user_capital;
-    engine.lps[lp_idx].capital = lp_capital;
+    engine.accounts[user_idx as usize].capital = user_capital;
+    engine.accounts[lp_idx as usize].capital = lp_capital;
     engine.vault = user_capital + lp_capital;
 
     let total_capital = user_capital + lp_capital;
@@ -1357,12 +1356,12 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     // User withdraws half their capital
     let withdraw_user = user_capital / 2;
     let _ = engine.withdraw(user_idx, withdraw_user);
-    let actual_user = user_capital - engine.users[user_idx].capital;
+    let actual_user = user_capital - engine.accounts[user_idx as usize].capital;
 
     // LP withdraws half their capital
     let withdraw_lp = lp_capital / 2;
-    let _ = engine.lp_withdraw(lp_idx, withdraw_lp);
-    let actual_lp = lp_capital - engine.lps[lp_idx].capital;
+    let _ = engine.withdraw(lp_idx, withdraw_lp);
+    let actual_lp = lp_capital - engine.accounts[lp_idx as usize].capital;
 
     // Both should get the same haircut ratio
     // ratio_user = actual_user / withdraw_user
@@ -1384,7 +1383,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
 fn multiple_lps_adl_preserves_all_capitals() {
     // Multi-LP ADL: All LP capitals are preserved, similar to multiple_users_adl_preserves_all_principals
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let lp1 = engine.add_lp([1u8; 32], [1u8; 32], 1).unwrap();
     let lp2 = engine.add_lp([2u8; 32], [2u8; 32], 1).unwrap();
 
@@ -1400,17 +1399,17 @@ fn multiple_lps_adl_preserves_all_capitals() {
     kani::assume(pnl2 > -5_000 && pnl2 < 5_000);
     kani::assume(loss < 10_000);
 
-    engine.lps[lp1].capital = c1;
-    engine.lps[lp1].pnl = pnl1;
-    engine.lps[lp2].capital = c2;
-    engine.lps[lp2].pnl = pnl2;
+    engine.accounts[lp1 as usize].capital = c1;
+    engine.accounts[lp1 as usize].pnl = pnl1;
+    engine.accounts[lp2 as usize].capital = c2;
+    engine.accounts[lp2 as usize].pnl = pnl2;
     engine.insurance_fund.balance = 100_000;
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.lps[lp1].capital == c1,
+    assert!(engine.accounts[lp1 as usize].capital == c1,
             "Multi-LP ADL: LP1 capital preserved");
-    assert!(engine.lps[lp2].capital == c2,
+    assert!(engine.accounts[lp2 as usize].capital == c2,
             "Multi-LP ADL: LP2 capital preserved");
 }
 
@@ -1419,7 +1418,7 @@ fn multiple_lps_adl_preserves_all_capitals() {
 fn mixed_users_and_lps_adl_preserves_all_capitals() {
     // Mixed ADL: Both user and LP capitals are preserved together
 
-    let mut engine = RiskEngine::new(test_params());
+    let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1435,17 +1434,17 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
     kani::assume(lp_pnl > -5_000 && lp_pnl < 5_000);
     kani::assume(loss < 10_000);
 
-    engine.users[user_idx].capital = user_capital;
-    engine.users[user_idx].pnl = user_pnl;
-    engine.lps[lp_idx].capital = lp_capital;
-    engine.lps[lp_idx].pnl = lp_pnl;
+    engine.accounts[user_idx as usize].capital = user_capital;
+    engine.accounts[user_idx as usize].pnl = user_pnl;
+    engine.accounts[lp_idx as usize].capital = lp_capital;
+    engine.accounts[lp_idx as usize].pnl = lp_pnl;
     engine.insurance_fund.balance = 100_000;
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.users[user_idx].capital == user_capital,
+    assert!(engine.accounts[user_idx as usize].capital == user_capital,
             "Mixed ADL: User capital preserved");
-    assert!(engine.lps[lp_idx].capital == lp_capital,
+    assert!(engine.accounts[lp_idx as usize].capital == lp_capital,
             "Mixed ADL: LP capital preserved");
 }
 

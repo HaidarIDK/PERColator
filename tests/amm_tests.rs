@@ -4,7 +4,7 @@
 use percolator::*;
 
 // Use the Vec-based implementation for tests
-type RiskEngine = VecRiskEngine;
+
 
 fn default_params() -> RiskParams {
     RiskParams {
@@ -14,10 +14,8 @@ fn default_params() -> RiskParams {
         trading_fee_bps: 10,              // 0.1%
         liquidation_fee_bps: 50,          // 0.5%
         insurance_fee_share_bps: 5000,    // 50% to insurance
-        max_users: 1000,
-        max_lps: 100,
+        max_accounts: 1000,
         account_fee_bps: 10000,           // 1%
-        max_warmup_rate_fraction_bps: 5000, // 50% of insurance fund in T/2
     }
 }
 
@@ -53,14 +51,14 @@ fn clamp_pos_i128(val: i128) -> u128 {
 fn test_e2e_complete_user_journey() {
     // Scenario: Alice and Bob trade against LP, experience PNL, funding, warmup, withdrawal
 
-    let mut engine = RiskEngine::new(default_params());
+    let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Initialize insurance fund
     engine.insurance_fund.balance = 50_000;
 
     // Add LP with capital (LP takes leveraged position opposite to users)
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].capital = 100_000;
+    engine.accounts[lp as usize].capital = 100_000;
     engine.vault = 100_000;
 
     // Add two users
@@ -82,9 +80,9 @@ fn test_e2e_complete_user_journey() {
     engine.execute_trade(&MATCHER, lp, bob, oracle_price, -3_000).unwrap();
 
     // Check positions
-    assert_eq!(engine.users[alice].position_size, 5_000);
-    assert_eq!(engine.users[bob].position_size, -3_000);
-    assert_eq!(engine.lps[lp].position_size, -2_000); // Net opposite to users
+    assert_eq!(engine.accounts[alice as usize].position_size, 5_000);
+    assert_eq!(engine.accounts[bob as usize].position_size, -3_000);
+    assert_eq!(engine.accounts[lp as usize].position_size, -2_000); // Net opposite to users
 
     // === Phase 2: Price Movement & Unrealized PNL ===
 
@@ -96,8 +94,8 @@ fn test_e2e_complete_user_journey() {
 
     // Alice should have positive PNL from the closed portion
     // Profit = (1.20 - 1.00) × 2500 = 500
-    assert!(engine.users[alice].pnl > 0);
-    let alice_pnl = engine.users[alice].pnl;
+    assert!(engine.accounts[alice as usize].pnl > 0);
+    let alice_pnl = engine.accounts[alice as usize].pnl;
 
     // === Phase 3: Funding Accrual ===
 
@@ -106,47 +104,47 @@ fn test_e2e_complete_user_journey() {
     engine.accrue_funding(engine.current_slot, new_price, 100).unwrap(); // 100 bps/slot, longs pay
 
     // Settle funding for users
-    engine.touch_user(alice).unwrap();
-    engine.touch_user(bob).unwrap();
+    engine.touch_account(alice).unwrap();
+    engine.touch_account(bob).unwrap();
 
     // Alice (long) should have paid funding, Bob (short) should have received
-    assert!(engine.users[alice].pnl < alice_pnl); // PNL reduced by funding
-    assert!(engine.users[bob].pnl > 0); // Received funding
+    assert!(engine.accounts[alice as usize].pnl < alice_pnl); // PNL reduced by funding
+    assert!(engine.accounts[bob as usize].pnl > 0); // Received funding
 
     // === Phase 4: PNL Warmup ===
 
     // Check that Alice's PNL needs to warm up before withdrawal
-    let alice_withdrawable = engine.withdrawable_pnl(&engine.users[alice]);
+    let alice_withdrawable = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
 
     // Advance some slots
     engine.advance_slot(50); // Halfway through warmup
 
-    let alice_warmed_halfway = engine.withdrawable_pnl(&engine.users[alice]);
+    let alice_warmed_halfway = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
     assert!(alice_warmed_halfway > alice_withdrawable);
 
     // Advance to full warmup
     engine.advance_slot(100);
 
-    let alice_fully_warmed = engine.withdrawable_pnl(&engine.users[alice]);
+    let alice_fully_warmed = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
     assert!(alice_fully_warmed >= alice_warmed_halfway);
 
     // === Phase 5: Withdrawal ===
 
     // Alice closes her remaining position first
-    engine.execute_trade(&MATCHER, lp, alice, new_price, -engine.users[alice].position_size).unwrap();
+    engine.execute_trade(&MATCHER, lp, alice, new_price, -engine.accounts[alice as usize].position_size).unwrap();
 
     // Advance time for full warmup
     engine.advance_slot(100);
 
     // Now Alice can withdraw her warmed PNL + principal
-    let alice_final_withdrawable = engine.withdrawable_pnl(&engine.users[alice]);
-    let alice_withdrawal = engine.users[alice].capital + alice_final_withdrawable;
+    let alice_final_withdrawable = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
+    let alice_withdrawal = engine.accounts[alice as usize].capital + alice_final_withdrawable;
 
     if alice_withdrawal > 0 {
         engine.withdraw(alice, alice_withdrawal).unwrap();
 
         // Alice should have minimal remaining balance
-        assert!(engine.users[alice].capital + clamp_pos_i128(engine.users[alice].pnl) < 100);
+        assert!(engine.accounts[alice as usize].capital + clamp_pos_i128(engine.accounts[alice as usize].pnl) < 100);
     }
 
     // === Phase 6: Bob Gets Liquidated ===
@@ -161,17 +159,17 @@ fn test_e2e_complete_user_journey() {
     engine.deposit(keeper, 1_000).unwrap();
 
     // Try to liquidate Bob (will only work if underwater)
-    engine.liquidate_user(bob, keeper, liquidation_price).unwrap();
+    engine.liquidate_account(bob, keeper, liquidation_price).unwrap();
 
     // Check if Bob actually got liquidated (position closed) or was above margin
-    if engine.users[bob].position_size == 0 {
+    if engine.accounts[bob as usize].position_size == 0 {
         // Bob was liquidated - position closed
-        assert!(engine.users[keeper].pnl > 0, "Keeper should receive reward");
+        assert!(engine.accounts[keeper as usize].pnl > 0, "Keeper should receive reward");
         println!("Bob was liquidated successfully");
     } else {
         // Bob was above maintenance margin, so not liquidated
         // This can happen if Bob received enough funding payments
-        let bob_collateral = engine.users[bob].capital as i128 + engine.users[bob].pnl;
+        let bob_collateral = engine.accounts[bob as usize].capital as i128 + engine.accounts[bob as usize].pnl;
         assert!(bob_collateral > 0, "Bob should still have some collateral");
         println!("Bob was not liquidated (above maintenance margin)");
     }
@@ -187,11 +185,11 @@ fn test_e2e_complete_user_journey() {
 fn test_e2e_multi_user_with_adl() {
     // Scenario: Multiple users trade, one causes loss requiring ADL
 
-    let mut engine = RiskEngine::new(default_params());
+    let mut engine = Box::new(RiskEngine::new(default_params()));
     engine.insurance_fund.balance = 10_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].capital = 200_000;
+    engine.accounts[lp as usize].capital = 200_000;
     engine.vault = 200_000;
 
     // Add 5 users
@@ -221,7 +219,7 @@ fn test_e2e_multi_user_with_adl() {
 
     // Users 0-3 should have positive PNL
     for i in 0..4 {
-        assert!(engine.users[users[i]].pnl > 0);
+        assert!(engine.accounts[users[i] as usize].pnl > 0);
     }
 
     // Simulate a large loss event requiring ADL (e.g., LP underwater)
@@ -231,12 +229,12 @@ fn test_e2e_multi_user_with_adl() {
     // Verify ADL haircutted unwrapped PNL first
     // Users should still have their principal intact
     for i in 0..4 {
-        assert_eq!(engine.users[users[i]].capital, 10_000, "Principal protected by I1");
+        assert_eq!(engine.accounts[users[i] as usize].capital, 10_000, "Principal protected by I1");
     }
 
     // Total PNL should be reduced by ADL
     let total_pnl_after: i128 = users.iter()
-        .map(|&u| engine.users[u].pnl)
+        .map(|&u| engine.accounts[u as usize].pnl)
         .sum();
 
     // Some PNL should remain (not all haircutted)
@@ -247,19 +245,21 @@ fn test_e2e_multi_user_with_adl() {
 
 // ============================================================================
 // E2E Test 3: Warmup Rate Limiting Under Stress
+// NOTE: Commented out - warmup rate limiting was removed in slab 4096 redesign
 // ============================================================================
 
+/*
 #[test]
 fn test_e2e_warmup_rate_limiting_stress() {
     // Scenario: Many users with large PNL, warmup capacity gets constrained
 
-    let mut engine = RiskEngine::new(default_params());
+    let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Small insurance fund to test capacity limits
     engine.insurance_fund.balance = 20_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].capital = 500_000;
+    engine.accounts[lp as usize].capital = 500_000;
     engine.vault = 500_000;
 
     // Add 10 users
@@ -288,8 +288,8 @@ fn test_e2e_warmup_rate_limiting_stress() {
     // Each user should have large positive PNL (~5000 each = 50k total)
     let mut total_pnl = 0i128;
     for &user in &users {
-        assert!(engine.users[user].pnl > 1_000);
-        total_pnl += engine.users[user].pnl;
+        assert!(engine.accounts[user as usize].pnl > 1_000);
+        total_pnl += engine.accounts[user as usize].pnl;
     }
     println!("Total realized PNL across all users: {}", total_pnl);
 
@@ -332,7 +332,7 @@ fn test_e2e_warmup_rate_limiting_stress() {
     // Users with higher PNL should get proportionally more capacity
     // But sum of all slopes should be capped
     let total_slope: u128 = users.iter()
-        .map(|&u| engine.users[u].warmup_state.slope_per_step)
+        .map(|&u| engine.accounts[u as usize].warmup_slope_per_step)
         .sum();
 
     assert_eq!(total_slope, engine.total_warmup_rate,
@@ -343,6 +343,7 @@ fn test_e2e_warmup_rate_limiting_stress() {
     println!("✅ E2E test passed: Warmup rate limiting under stress works correctly");
     println!("   Total slope: {}, Max rate: {}", total_slope, max_rate);
 }
+*/
 
 // ============================================================================
 // E2E Test 4: Complete Cycle with Funding
@@ -352,11 +353,11 @@ fn test_e2e_warmup_rate_limiting_stress() {
 fn test_e2e_funding_complete_cycle() {
     // Scenario: Users trade, funding accrues over time, positions flip, funding reverses
 
-    let mut engine = RiskEngine::new(default_params());
+    let mut engine = Box::new(RiskEngine::new(default_params()));
     engine.insurance_fund.balance = 50_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].capital = 100_000;
+    engine.accounts[lp as usize].capital = 100_000;
     engine.vault = 100_000;
 
     let alice = engine.add_user(10_000).unwrap();
@@ -375,11 +376,11 @@ fn test_e2e_funding_complete_cycle() {
     engine.accrue_funding(engine.current_slot, 1_000_000, 50).unwrap(); // 50 bps/slot
 
     // Settle funding
-    engine.touch_user(alice).unwrap();
-    engine.touch_user(bob).unwrap();
+    engine.touch_account(alice).unwrap();
+    engine.touch_account(bob).unwrap();
 
-    let alice_pnl_after_funding = engine.users[alice].pnl;
-    let bob_pnl_after_funding = engine.users[bob].pnl;
+    let alice_pnl_after_funding = engine.accounts[alice as usize].pnl;
+    let bob_pnl_after_funding = engine.accounts[bob as usize].pnl;
 
     // Alice (long) paid, Bob (short) received
     assert!(alice_pnl_after_funding < 0); // Paid funding
@@ -398,19 +399,19 @@ fn test_e2e_funding_complete_cycle() {
     engine.execute_trade(&MATCHER, lp, bob, 1_000_000, 20_000).unwrap();
 
     // Now Alice is short and Bob is long
-    assert!(engine.users[alice].position_size < 0);
-    assert!(engine.users[bob].position_size > 0);
+    assert!(engine.accounts[alice as usize].position_size < 0);
+    assert!(engine.accounts[bob as usize].position_size > 0);
 
     // Advance time and accrue more funding (now Alice receives, Bob pays)
     engine.advance_slot(20);
     engine.accrue_funding(engine.current_slot, 1_000_000, 50).unwrap();
 
-    engine.touch_user(alice).unwrap();
-    engine.touch_user(bob).unwrap();
+    engine.touch_account(alice).unwrap();
+    engine.touch_account(bob).unwrap();
 
     // Now funding should have reversed
-    let alice_final = engine.users[alice].pnl;
-    let bob_final = engine.users[bob].pnl;
+    let alice_final = engine.accounts[alice as usize].pnl;
+    let bob_final = engine.accounts[bob as usize].pnl;
 
     // Alice (now short) should have received some funding back
     assert!(alice_final > alice_pnl_after_funding);
@@ -423,17 +424,19 @@ fn test_e2e_funding_complete_cycle() {
 
 // ============================================================================
 // E2E Test 5: Oracle Manipulation Attack Scenario
+// NOTE: Partially commented out - warmup rate limiting was removed in slab 4096 redesign
 // ============================================================================
 
+/*
 #[test]
 fn test_e2e_oracle_attack_protection() {
     // Scenario: Attacker tries to exploit oracle manipulation but gets limited by warmup + ADL
 
-    let mut engine = RiskEngine::new(default_params());
+    let mut engine = Box::new(RiskEngine::new(default_params()));
     engine.insurance_fund.balance = 30_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].capital = 200_000;
+    engine.accounts[lp as usize].capital = 200_000;
     engine.vault = 200_000;
 
     // Honest user
@@ -463,7 +466,7 @@ fn test_e2e_oracle_attack_protection() {
     // execute_trade automatically calls update_warmup_slope() after realizing PNL
 
     // Attacker has massive fake PNL
-    let attacker_fake_pnl = clamp_pos_i128(engine.users[attacker].pnl);
+    let attacker_fake_pnl = clamp_pos_i128(engine.accounts[attacker as usize].pnl);
     assert!(attacker_fake_pnl > 10_000); // Huge profit from manipulation
 
     // === Phase 3: Warmup Limiting ===
@@ -476,22 +479,22 @@ fn test_e2e_oracle_attack_protection() {
     println!("Insurance fund: {}", engine.insurance_fund.balance);
     println!("Expected max warmup rate: {}", expected_max_rate);
     println!("Actual warmup rate: {}", engine.total_warmup_rate);
-    println!("Attacker slope: {}", engine.users[attacker].warmup_state.slope_per_step);
+    println!("Attacker slope: {}", engine.accounts[attacker as usize].warmup_slope_per_step);
 
     // Verify that warmup slope was actually set
-    assert!(engine.users[attacker].warmup_state.slope_per_step > 0,
+    assert!(engine.accounts[attacker as usize].warmup_slope_per_step > 0,
             "Attacker's warmup slope should be set after realizing PNL");
 
     // Verify rate limiting is working (attacker's slope should be constrained)
     // In a stressed system, individual slope may be less than ideal due to capacity limits
     let ideal_slope = attacker_fake_pnl / engine.params.warmup_period_slots as u128;
     println!("Ideal slope (no limiting): {}", ideal_slope);
-    println!("Actual slope (with limiting): {}", engine.users[attacker].warmup_state.slope_per_step);
+    println!("Actual slope (with limiting): {}", engine.accounts[attacker as usize].warmup_slope_per_step);
 
     // Advance only 10 slots (manipulation is detected quickly)
     engine.advance_slot(10);
 
-    let attacker_warmed = engine.withdrawable_pnl(&engine.users[attacker]);
+    let attacker_warmed = engine.withdrawable_pnl(&engine.accounts[attacker as usize]);
     println!("Attacker withdrawable after 10 slots: {}", attacker_warmed);
 
     // Only a small fraction should be withdrawable
@@ -507,7 +510,7 @@ fn test_e2e_oracle_attack_protection() {
     engine.apply_adl(attacker_fake_pnl).unwrap();
 
     // Attacker's unwrapped (still warming) PNL gets haircutted
-    let attacker_after_adl = clamp_pos_i128(engine.users[attacker].pnl);
+    let attacker_after_adl = clamp_pos_i128(engine.accounts[attacker as usize].pnl);
 
     // Most of the fake PNL should be gone
     assert!(attacker_after_adl < attacker_fake_pnl / 2,
@@ -516,7 +519,7 @@ fn test_e2e_oracle_attack_protection() {
     // === Phase 5: Honest User Protected ===
 
     // Honest user's principal should be intact
-    assert_eq!(engine.users[honest_user].capital, 20_000, "I1: Principal never reduced");
+    assert_eq!(engine.accounts[honest_user as usize].capital, 20_000, "I1: Principal never reduced");
 
     // Insurance fund took some hit, but limited
     assert!(engine.insurance_fund.balance >= 20_000,
@@ -527,3 +530,4 @@ fn test_e2e_oracle_attack_protection() {
     println!("   Attacker after ADL: {}", attacker_after_adl);
     println!("   Attack mitigation: {}%", (attacker_fake_pnl - attacker_after_adl) * 100 / attacker_fake_pnl);
 }
+*/
