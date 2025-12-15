@@ -25,8 +25,15 @@ extern crate kani;
 // Constants
 // ============================================================================
 
+// Use smaller array size for Kani verification to make proofs tractable
+// Production uses 4096, but Kani symbolic execution becomes intractable at that scale
+#[cfg(kani)]
+pub const MAX_ACCOUNTS: usize = 64;  // Must be multiple of 64 for bitmap
+
+#[cfg(not(kani))]
 pub const MAX_ACCOUNTS: usize = 4096;
-pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words of u64
+
+pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words for production, 1 for kani
 
 // ============================================================================
 // Core Data Structures
@@ -202,14 +209,12 @@ pub struct RiskEngine {
     /// Loss accumulator for socialization
     pub loss_accum: u128,
 
-    /// Withdrawal-only mode flag
-    /// When true, only withdrawals are allowed (no trading/deposits)
-    /// Automatically enabled when loss_accum > 0
-    pub withdrawal_only: bool,
+    /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PnL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
+    pub risk_reduction_only: bool,
 
-    /// Total amount withdrawn during withdrawal-only mode
+    /// Total amount withdrawn during risk-reduction-only mode
     /// Used to maintain fair haircut ratio during unwinding
-    pub withdrawal_mode_withdrawn: u128,
+    pub risk_reduction_mode_withdrawn: u128,
 
     /// Warmup pause flag
     pub warmup_paused: bool,
@@ -223,6 +228,9 @@ pub struct RiskEngine {
 
     /// Occupancy bitmap (4096 bits = 64 u64 words)
     pub used: [u64; BITMAP_WORDS],
+
+    /// Number of used accounts (O(1) counter, fixes H2: fee bypass TOCTOU)
+    pub num_used_accounts: u16,
 
     /// Freelist head (u16::MAX = none)
     pub free_head: u16,
@@ -268,13 +276,21 @@ pub enum RiskError {
     PositionSizeMismatch,
 
     /// System in withdrawal-only mode (deposits and trading blocked)
-    WithdrawalOnlyMode,
+    RiskReductionOnlyMode,
 
     /// Account kind mismatch
     AccountKindMismatch,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
+
+/// Operation classification for risk-reduction-only mode gating
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpClass {
+    RiskIncrease,
+    RiskNeutral,
+    RiskReduce,
+}
 
 // ============================================================================
 // Math Helpers (Saturating Arithmetic for Safety)
@@ -383,11 +399,12 @@ impl RiskEngine {
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
             loss_accum: 0,
-            withdrawal_only: false,
-            withdrawal_mode_withdrawn: 0,
+            risk_reduction_only: false,
+            risk_reduction_mode_withdrawn: 0,
             warmup_paused: false,
             warmup_pause_slot: 0,
             used: [0; BITMAP_WORDS],
+            num_used_accounts: 0,
             free_head: 0,
             next_free: [0; MAX_ACCOUNTS],
             accounts: [empty_account(); MAX_ACCOUNTS],
@@ -459,6 +476,8 @@ impl RiskEngine {
         let idx = self.free_head;
         self.free_head = self.next_free[idx as usize];
         self.set_used(idx as usize);
+        // Increment O(1) counter atomically (fixes H2: TOCTOU fee bypass)
+        self.num_used_accounts = self.num_used_accounts.saturating_add(1);
         Ok(idx)
     }
 
@@ -490,9 +509,48 @@ impl RiskEngine {
         count
     }
 
+    // ========================================
+    // Risk-Reduction-Only Mode Helpers
+    // ========================================
+
+    /// Central gate for operation enforcement in risk-reduction-only mode
+    #[inline]
+    fn enforce_op(&self, op: OpClass) -> Result<()> {
+        if !self.risk_reduction_only {
+            return Ok(());
+        }
+        match op {
+            OpClass::RiskIncrease => Err(RiskError::RiskReductionOnlyMode),
+            OpClass::RiskNeutral | OpClass::RiskReduce => Ok(()),
+        }
+    }
+
+    /// Enter risk-reduction-only mode and freeze warmups
+    pub fn enter_risk_reduction_only_mode(&mut self) {
+        self.risk_reduction_only = true;
+        if !self.warmup_paused {
+            self.warmup_paused = true;
+            self.warmup_pause_slot = self.current_slot;
+        }
+    }
+
+    /// Exit risk-reduction-only mode if system is safe (loss fully covered)
+    pub fn exit_risk_reduction_only_mode_if_safe(&mut self) {
+        if self.loss_accum == 0 {
+            self.risk_reduction_only = false;
+            self.risk_reduction_mode_withdrawn = 0;
+            self.warmup_paused = false;
+        }
+    }
+
+    // ========================================
+    // Account Management
+    // ========================================
+
     /// Add a new user account
     pub fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
-        let used_count = self.count_used();
+        // Use O(1) counter instead of O(N) count_used() (fixes H2: TOCTOU fee bypass)
+        let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {
             return Err(RiskError::Overflow);
         }
@@ -535,7 +593,8 @@ impl RiskEngine {
         matching_engine_context: [u8; 32],
         fee_payment: u128,
     ) -> Result<u16> {
-        let used_count = self.count_used();
+        // Use O(1) counter instead of O(N) count_used() (fixes H2: TOCTOU fee bypass)
+        let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {
             return Err(RiskError::Overflow);
         }
@@ -583,9 +642,9 @@ impl RiskEngine {
         // Available = positive PNL - reserved
         let available_pnl = sub_u128(positive_pnl, account.reserved_pnl);
 
-        // Apply warmup pause
+        // Apply warmup pause - when paused, warmup cannot progress beyond pause_slot
         let effective_slot = if self.warmup_paused {
-            self.warmup_pause_slot
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
         } else {
             self.current_slot
         };
@@ -644,6 +703,9 @@ impl RiskEngine {
         oracle_price: u64,
         funding_rate_bps_per_slot: i64,
     ) -> Result<()> {
+        // Funding accrual is risk-neutral (allowed in risk mode)
+        self.enforce_op(OpClass::RiskNeutral)?;
+
         let dt = now_slot.saturating_sub(self.last_funding_slot);
         if dt == 0 {
             return Ok(());
@@ -713,6 +775,9 @@ impl RiskEngine {
 
     /// Touch an account (settle funding before operations)
     pub fn touch_account(&mut self, idx: u16) -> Result<()> {
+        // Funding settlement is risk-neutral (allowed in risk mode)
+        self.enforce_op(OpClass::RiskNeutral)?;
+
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -727,6 +792,9 @@ impl RiskEngine {
 
     /// Deposit funds to account
     pub fn deposit(&mut self, idx: u16, amount: u128) -> Result<()> {
+        // Deposits reduce risk (allowed in risk mode)
+        self.enforce_op(OpClass::RiskReduce)?;
+
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -738,12 +806,10 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Withdraw funds from account
+    /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
     pub fn withdraw(&mut self, idx: u16, amount: u128) -> Result<()> {
-        // In withdrawal-only mode, block ALL withdrawals
-        if self.withdrawal_only {
-            return Err(RiskError::WithdrawalOnlyMode);
-        }
+        // Withdrawals are neutral in risk mode (allowed)
+        self.enforce_op(OpClass::RiskNeutral)?;
 
         // Settle funding before any PNL calculations
         self.touch_account(idx)?;
@@ -826,7 +892,7 @@ impl RiskEngine {
         collateral > margin_required
     }
 
-    /// Execute trade via matching engine
+    /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
     pub fn execute_trade<M: MatchingEngine>(
         &mut self,
         matcher: &M,
@@ -840,16 +906,19 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
-        // In withdrawal-only mode, only allow closing/reducing positions
-        if self.withdrawal_only {
-            let user = &self.accounts[user_idx as usize];
-            let current_position = user.position_size;
-            let new_position = current_position.saturating_add(size);
+        // Check if trade increases risk (absolute exposure for either party)
+        let old_user_pos = self.accounts[user_idx as usize].position_size;
+        let old_lp_pos = self.accounts[lp_idx as usize].position_size;
+        let new_user_pos = old_user_pos.saturating_add(size);
+        let new_lp_pos = old_lp_pos.saturating_sub(size);
 
-            // Allow only if position is being reduced
-            if new_position.abs() > current_position.abs() {
-                return Err(RiskError::WithdrawalOnlyMode);
-            }
+        let user_inc = new_user_pos.abs() > old_user_pos.abs();
+        let lp_inc = new_lp_pos.abs() > old_lp_pos.abs();
+
+        if user_inc || lp_inc {
+            self.enforce_op(OpClass::RiskIncrease)?; // Blocked in risk mode
+        } else {
+            self.enforce_op(OpClass::RiskReduce)?;   // Allowed in risk mode
         }
 
         // Settle funding for both accounts
@@ -877,9 +946,14 @@ impl RiskEngine {
         let notional = mul_u128(size.abs() as u128, oracle_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
-        // Need to handle both accounts - copy data first to avoid borrow issues
-        let user = &self.accounts[user_idx as usize];
-        let lp = &self.accounts[lp_idx as usize];
+        // Use split_at_mut to access both accounts without copying
+        let (user, lp) = if user_idx < lp_idx {
+            let (left, right) = self.accounts.split_at_mut(lp_idx as usize);
+            (&mut left[user_idx as usize], &mut right[0])
+        } else {
+            let (left, right) = self.accounts.split_at_mut(user_idx as usize);
+            (&mut right[0], &mut left[lp_idx as usize])
+        };
 
         // Calculate PNL impact from closing existing position
         let mut user_pnl_delta = 0i128;
@@ -946,26 +1020,49 @@ impl RiskEngine {
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, fee);
 
-        // Now update accounts (can safely get mutable refs separately)
-        let user = &mut self.accounts[user_idx as usize];
+        // Update user account
         user.pnl = user.pnl.saturating_add(user_pnl_delta);
         user.pnl = user.pnl.saturating_sub(fee as i128);
         user.position_size = new_user_position;
         user.entry_price = new_user_entry;
 
-        let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
-        if user_collateral == 0 && user.capital > 0 {
-            return Err(RiskError::Undercollateralized);
+        // Check user maintenance margin requirement
+        if user.position_size != 0 {
+            let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
+            let position_value = mul_u128(
+                user.position_size.abs() as u128,
+                oracle_price as u128
+            ) / 1_000_000;
+            let margin_required = mul_u128(
+                position_value,
+                self.params.maintenance_margin_bps as u128
+            ) / 10_000;
+
+            if user_collateral <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
         }
 
-        let lp = &mut self.accounts[lp_idx as usize];
+        // Update LP account
         lp.pnl = lp.pnl.saturating_add(lp_pnl_delta);
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
 
-        let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
-        if lp_collateral == 0 && lp.capital > 0 {
-            return Err(RiskError::Undercollateralized);
+        // Check LP maintenance margin requirement
+        if lp.position_size != 0 {
+            let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
+            let position_value = mul_u128(
+                lp.position_size.abs() as u128,
+                oracle_price as u128
+            ) / 1_000_000;
+            let margin_required = mul_u128(
+                position_value,
+                self.params.maintenance_margin_bps as u128
+            ) / 10_000;
+
+            if lp_collateral <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
         }
 
         // Update warmup slopes after PNL changes
@@ -981,6 +1078,9 @@ impl RiskEngine {
 
     /// Apply ADL haircut using two-pass bitmap scan
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
+        // ADL reduces risk (allowed in risk mode)
+        self.enforce_op(OpClass::RiskReduce)?;
+
         // Helper to calculate withdrawable PNL inline (can't call self.withdrawable_pnl in closures)
         let effective_slot = if self.warmup_paused {
             self.warmup_pause_slot
@@ -988,10 +1088,13 @@ impl RiskEngine {
             self.current_slot
         };
 
-        // Pass 1: Compute total unwrapped PNL across all accounts
+        // Cache for unwrapped PNL values (fixes H1: critical accounting bug)
+        let mut unwrapped_cache: [u128; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+
+        // Pass 1: Compute total unwrapped PNL and cache values per account
         let mut total_unwrapped = 0u128;
 
-        self.for_each_used(|_idx, account| {
+        self.for_each_used(|idx, account| {
             if account.pnl > 0 {
                 let positive_pnl = account.pnl as u128;
                 let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
@@ -1004,27 +1107,21 @@ impl RiskEngine {
                 let unwrapped = positive_pnl
                     .saturating_sub(withdrawable)
                     .saturating_sub(account.reserved_pnl);
+
+                // Cache the unwrapped value for this account
+                unwrapped_cache[idx] = unwrapped;
                 total_unwrapped = total_unwrapped.saturating_add(unwrapped);
             }
         });
 
-        // Pass 2: Apply proportional haircuts
+        // Pass 2: Apply proportional haircuts using cached values
         let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
 
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            self.for_each_used_mut(|_idx, account| {
+            self.for_each_used_mut(|idx, account| {
                 if account.pnl > 0 {
-                    let positive_pnl = account.pnl as u128;
-                    let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
-
-                    // Calculate withdrawable inline
-                    let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
-                    let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
-                    let withdrawable = core::cmp::min(available_pnl, warmed_up_cap);
-
-                    let unwrapped = positive_pnl
-                        .saturating_sub(withdrawable)
-                        .saturating_sub(account.reserved_pnl);
+                    // Use cached unwrapped value from Pass 1
+                    let unwrapped = unwrapped_cache[idx];
 
                     if unwrapped > 0 {
                         let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
@@ -1047,10 +1144,8 @@ impl RiskEngine {
                     remaining_loss.saturating_sub(insurance_used)
                 );
 
-                // Enable withdrawal-only mode and pause warmup
-                self.withdrawal_only = true;
-                self.warmup_paused = true;
-                self.warmup_pause_slot = self.current_slot;
+                // Enter risk-reduction-only mode (freezes warmup)
+                self.enter_risk_reduction_only_mode();
             } else {
                 self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, remaining_loss);
             }
@@ -1061,6 +1156,9 @@ impl RiskEngine {
 
     /// Top up insurance fund to cover losses
     pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool> {
+        // Insurance top-ups reduce risk (allowed in risk mode)
+        self.enforce_op(OpClass::RiskReduce)?;
+
         // Add to vault
         self.vault = add_u128(self.vault, amount);
 
@@ -1073,13 +1171,13 @@ impl RiskEngine {
             // Add remaining to insurance fund balance
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
 
-            // Exit withdrawal-only mode if loss is fully covered
-            if self.loss_accum == 0 && self.withdrawal_only {
-                self.withdrawal_only = false;
-                self.withdrawal_mode_withdrawn = 0;
-                Ok(true) // Exited withdrawal-only mode
+            // Exit risk-reduction-only mode if loss is fully covered
+            let was_in_mode = self.risk_reduction_only;
+            self.exit_risk_reduction_only_mode_if_safe();
+            if was_in_mode && !self.risk_reduction_only {
+                Ok(true) // Exited risk-reduction-only mode
             } else {
-                Ok(false) // Still in withdrawal-only mode
+                Ok(false) // Still in risk-reduction-only mode
             }
         } else {
             // No loss - just add to insurance fund
@@ -1099,9 +1197,17 @@ impl RiskEngine {
         keeper_idx: u16,
         oracle_price: u64,
     ) -> Result<()> {
+        // Liquidations reduce risk (allowed in risk mode)
+        self.enforce_op(OpClass::RiskReduce)?;
+
         // Validate indices
         if !self.is_used(victim_idx as usize) || !self.is_used(keeper_idx as usize) {
             return Err(RiskError::AccountNotFound);
+        }
+
+        // Prevent self-liquidation
+        if victim_idx == keeper_idx {
+            return Err(RiskError::Unauthorized);
         }
 
         // Settle funding before checking margin

@@ -28,3 +28,11 @@ overflow-checks = true
 [profile.sbf]
 inherits = "release"
 panic = "abort"
+
+[workspace.metadata.kani]
+flags = { tests = true }
+unstable = { stubbing = true }
+
+[[workspace.metadata.kani.proof]]
+harness = ".*"
+unwind = 70
