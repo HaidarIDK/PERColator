@@ -20,6 +20,7 @@ fn default_params() -> RiskParams {
         max_users: 1000,
         max_lps: 100,
         account_fee_bps: 10000, // 1%
+        max_warmup_rate_fraction_bps: 5000, // 50% of insurance fund in T/2
     }
 }
 
@@ -940,4 +941,174 @@ fn test_adl_haircuts_unwrapped_before_warmed() {
     // withdrawable = min(7k, 5k) = 5k
     let still_warmed = engine.withdrawable_pnl(&engine.users[user_idx]);
     assert_eq!(still_warmed, 5_000, "Warmed PNL still withdrawable");
+}
+
+// ============================================================================
+// Warmup Rate Limiting Tests
+// ============================================================================
+
+#[test]
+fn test_warmup_rate_limit_single_user() {
+    // Test that warmup slope is capped by insurance fund capacity
+    let mut params = default_params();
+    params.warmup_period_slots = 100;
+    params.max_warmup_rate_fraction_bps = 5000; // 50% in T/2 = 50 slots
+
+    let mut engine = RiskEngine::new(params);
+
+    // Add insurance fund: 10,000
+    engine.insurance_fund.balance = 10_000;
+
+    // Max warmup rate = 10,000 * 5000 / 50 / 10,000 = 10,000 * 0.5 / 50 = 100 per slot
+    let expected_max_rate = 10_000 * 5000 / 50 / 10_000;
+    assert_eq!(expected_max_rate, 100);
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 1_000).unwrap();
+
+    // Give user 20,000 PNL (would need slope of 200 without limit)
+    engine.users[user].pnl_ledger = 20_000;
+
+    // Update warmup slope
+    engine.update_warmup_slope(user).unwrap();
+
+    // Should be capped at 100 (the max rate)
+    assert_eq!(engine.users[user].warmup_state.slope_per_step, 100);
+    assert_eq!(engine.total_warmup_rate, 100);
+
+    // After 50 slots, only 5,000 should have warmed up (not 10,000)
+    engine.advance_slot(50);
+    let warmed = engine.withdrawable_pnl(&engine.users[user]);
+    assert_eq!(warmed, 5_000); // 100 * 50 = 5,000
+}
+
+#[test]
+fn test_warmup_rate_limit_multiple_users() {
+    // Test that warmup capacity is shared among users
+    let mut params = default_params();
+    params.warmup_period_slots = 100;
+    params.max_warmup_rate_fraction_bps = 5000; // 50% in T/2
+
+    let mut engine = RiskEngine::new(params);
+    engine.insurance_fund.balance = 10_000;
+
+    // Max total warmup rate = 100 per slot
+
+    let user1 = engine.add_user(100).unwrap();
+    let user2 = engine.add_user(100).unwrap();
+
+    engine.deposit(user1, 1_000).unwrap();
+    engine.deposit(user2, 1_000).unwrap();
+
+    // User1 gets 6,000 PNL (would want slope of 60)
+    engine.users[user1].pnl_ledger = 6_000;
+    engine.update_warmup_slope(user1).unwrap();
+    assert_eq!(engine.users[user1].warmup_state.slope_per_step, 60);
+    assert_eq!(engine.total_warmup_rate, 60);
+
+    // User2 gets 8,000 PNL (would want slope of 80)
+    engine.users[user2].pnl_ledger = 8_000;
+    engine.update_warmup_slope(user2).unwrap();
+
+    // Total would be 140, but max is 100, so user2 gets only 40
+    assert_eq!(engine.users[user2].warmup_state.slope_per_step, 40); // 100 - 60 = 40
+    assert_eq!(engine.total_warmup_rate, 100); // 60 + 40 = 100
+}
+
+#[test]
+fn test_warmup_rate_released_on_pnl_decrease() {
+    // Test that warmup capacity is released when user's PNL decreases
+    let mut params = default_params();
+    params.warmup_period_slots = 100;
+    params.max_warmup_rate_fraction_bps = 5000;
+
+    let mut engine = RiskEngine::new(params);
+    engine.insurance_fund.balance = 10_000;
+
+    let user1 = engine.add_user(100).unwrap();
+    let user2 = engine.add_user(100).unwrap();
+
+    engine.deposit(user1, 1_000).unwrap();
+    engine.deposit(user2, 1_000).unwrap();
+
+    // User1 uses all capacity
+    engine.users[user1].pnl_ledger = 15_000;
+    engine.update_warmup_slope(user1).unwrap();
+    assert_eq!(engine.total_warmup_rate, 100);
+
+    // User2 can't get any capacity
+    engine.users[user2].pnl_ledger = 5_000;
+    engine.update_warmup_slope(user2).unwrap();
+    assert_eq!(engine.users[user2].warmup_state.slope_per_step, 0);
+
+    // User1's PNL drops to 3,000 (ADL or loss)
+    engine.users[user1].pnl_ledger = 3_000;
+    engine.update_warmup_slope(user1).unwrap();
+    assert_eq!(engine.users[user1].warmup_state.slope_per_step, 30); // 3000/100
+    assert_eq!(engine.total_warmup_rate, 30);
+
+    // Now user2 can get the remaining 70
+    engine.update_warmup_slope(user2).unwrap();
+    assert_eq!(engine.users[user2].warmup_state.slope_per_step, 50); // 5000/100, but capped at 70
+    assert_eq!(engine.total_warmup_rate, 80); // 30 + 50
+}
+
+#[test]
+fn test_warmup_rate_scales_with_insurance_fund() {
+    // Test that max warmup rate scales with insurance fund size
+    let mut params = default_params();
+    params.warmup_period_slots = 100;
+    params.max_warmup_rate_fraction_bps = 5000; // 50% in T/2
+
+    let mut engine = RiskEngine::new(params);
+
+    // Small insurance fund
+    engine.insurance_fund.balance = 1_000;
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 1_000).unwrap();
+
+    engine.users[user].pnl_ledger = 10_000;
+    engine.update_warmup_slope(user).unwrap();
+
+    // Max rate = 1000 * 0.5 / 50 = 10
+    assert_eq!(engine.users[user].warmup_state.slope_per_step, 10);
+
+    // Increase insurance fund 10x
+    engine.insurance_fund.balance = 10_000;
+
+    // Update slope again
+    engine.update_warmup_slope(user).unwrap();
+
+    // Max rate should be 10x higher = 100
+    assert_eq!(engine.users[user].warmup_state.slope_per_step, 100);
+}
+
+#[test]
+fn test_warmup_rate_limit_invariant_maintained() {
+    // Verify that the invariant is always maintained:
+    // total_warmup_rate * (T/2) <= insurance_fund * max_warmup_rate_fraction
+
+    let mut params = default_params();
+    params.warmup_period_slots = 100;
+    params.max_warmup_rate_fraction_bps = 5000;
+
+    let mut engine = RiskEngine::new(params);
+    engine.insurance_fund.balance = 10_000;
+
+    // Add multiple users with varying PNL
+    for i in 0..10 {
+        let user = engine.add_user(100).unwrap();
+        engine.deposit(user, 1_000).unwrap();
+        engine.users[user].pnl_ledger = (i as i128 + 1) * 1_000;
+        engine.update_warmup_slope(user).unwrap();
+
+        // Check invariant after each update
+        let half_period = params.warmup_period_slots / 2;
+        let max_total_warmup_in_half_period = engine.total_warmup_rate * (half_period as u128);
+        let insurance_limit = engine.insurance_fund.balance * params.max_warmup_rate_fraction_bps as u128 / 10_000;
+
+        assert!(max_total_warmup_in_half_period <= insurance_limit,
+                "Invariant violated: {} > {}", max_total_warmup_in_half_period, insurance_limit);
+    }
 }

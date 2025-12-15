@@ -25,6 +25,7 @@ fn default_params() -> RiskParams {
         max_users: 1000,
         max_lps: 100,
         account_fee_bps: 10000,
+        max_warmup_rate_fraction_bps: 5000, // 50% of insurance fund in T/2
     }
 }
 

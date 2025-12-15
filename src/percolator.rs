@@ -145,6 +145,11 @@ pub struct RiskParams {
 
     /// Base fee for adding accounts (in basis points of notional? Wait, absolute?)
     pub account_fee_bps: u64,
+
+    /// Maximum warmup rate as fraction of insurance fund
+    /// Formula: max_total_warmup_rate = insurance_fund * max_warmup_rate_fraction / (warmup_period / 2)
+    /// Units: basis points (e.g., 5000 = 50% of insurance fund can warm up in T/2)
+    pub max_warmup_rate_fraction_bps: u64,
 }
 
 // ============================================================================
@@ -249,6 +254,10 @@ where
 
     /// Last slot when funding was accrued
     pub last_funding_slot: u64,
+
+    /// Total warmup rate across all users (sum of all slope_per_step values)
+    /// This tracks how much PNL is warming up per slot across the entire system
+    pub total_warmup_rate: u128,
 }
 
 /// Type alias for the default Vec-based RiskEngine
@@ -718,6 +727,68 @@ where
         lp.funding_index_lp = self.funding_index_qpb_e6;
         Ok(())
     }
+
+    /// Update a user's warmup slope based on current PNL, respecting global warmup rate limit
+    ///
+    /// This enforces the invariant: total_warmup_rate <= insurance_fund * max_warmup_rate_fraction / (T/2)
+    ///
+    /// If the desired slope would exceed available capacity, the slope is clamped to the
+    /// available capacity (graceful degradation). This ensures PNL always warms up,
+    /// but at a potentially slower rate when the system is under stress.
+    ///
+    /// # Arguments
+    /// * `user_index` - Index of user to update
+    ///
+    /// # Returns
+    /// * `Ok(())` always succeeds (uses graceful degradation)
+    pub fn update_warmup_slope(&mut self, user_index: usize) -> Result<()> {
+        let user = self
+            .users
+            .get_mut(user_index)
+            .ok_or(RiskError::UserNotFound)?;
+
+        // Calculate positive PNL that needs to warm up
+        let positive_pnl = clamp_pos_i128(user.pnl_ledger);
+
+        // Calculate desired slope: pnl / warmup_period
+        // This is how much PNL should warm up per slot
+        let desired_slope = if self.params.warmup_period_slots > 0 {
+            positive_pnl / (self.params.warmup_period_slots as u128)
+        } else {
+            positive_pnl // Instant warmup if period is 0
+        };
+
+        // Calculate maximum allowed total warmup rate
+        // Formula: insurance_fund * max_warmup_rate_fraction_bps / (warmup_period_slots / 2) / 10_000
+        let half_period = core::cmp::max(1, self.params.warmup_period_slots / 2);
+        let max_total_rate = self
+            .insurance_fund
+            .balance
+            .saturating_mul(self.params.max_warmup_rate_fraction_bps as u128)
+            / (half_period as u128)
+            / 10_000;
+
+        // Calculate current total rate excluding this user's old slope
+        let old_slope = user.warmup_state.slope_per_step;
+        let other_users_rate = self.total_warmup_rate.saturating_sub(old_slope);
+
+        // Check if adding the new slope would exceed capacity
+        let new_total_rate = other_users_rate.saturating_add(desired_slope);
+        let actual_slope = if new_total_rate > max_total_rate {
+            // Clamp to available capacity (graceful degradation)
+            let available_capacity = max_total_rate.saturating_sub(other_users_rate);
+            available_capacity
+        } else {
+            desired_slope
+        };
+
+        // Update the slope and total rate
+        user.warmup_state.slope_per_step = actual_slope;
+        user.warmup_state.started_at_slot = self.current_slot;
+        self.total_warmup_rate = other_users_rate.saturating_add(actual_slope);
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -933,6 +1004,10 @@ where
         user.position_size = new_user_position;
         lp.lp_position_size = new_lp_position;
 
+        // Update warmup slopes after PNL changes
+        self.update_warmup_slope(user_index)?;
+        // Note: LP warmup not implemented yet, would need similar call
+
         Ok(())
     }
 }
@@ -1073,6 +1148,12 @@ where
             keeper.pnl_ledger = keeper.pnl_ledger.saturating_add(keeper_share as i128);
         }
 
+        // Update warmup slopes after PNL changes
+        self.update_warmup_slope(user_index)?;
+        if keeper_account != user_index {
+            self.update_warmup_slope(keeper_account)?;
+        }
+
         Ok(())
     }
 }
@@ -1105,6 +1186,7 @@ where
             fee_carry: 0,
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
+            total_warmup_rate: 0,
         }
     }
 
@@ -1130,7 +1212,7 @@ where
             reserved_pnl: 0,
             warmup_state: Warmup {
                 started_at_slot: self.current_slot,
-                slope_per_step: self.params.warmup_period_slots as u128,
+                slope_per_step: 0, // Will be set by update_warmup_slope when PNL changes
             },
             position_size: 0,
             entry_price: 0,

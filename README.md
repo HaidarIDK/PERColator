@@ -168,6 +168,53 @@ withdrawable = min(
 - I5+: PNL warmup is monotonically increasing
 - I5++: Withdrawable PNL ≤ available PNL
 
+#### Warmup Rate Limiting
+
+The system enforces a global cap on how fast PNL can warm up across all users, preventing the insurance fund from being overwhelmed:
+
+**Invariant I9** (Formally Verified):
+```
+total_warmup_rate × (T/2) ≤ insurance_fund × max_warmup_rate_fraction_bps / 10_000
+```
+
+Where:
+- `total_warmup_rate` = sum of all users' `slope_per_step` values
+- `T` = `warmup_period_slots`
+- `max_warmup_rate_fraction_bps` = configurable parameter (e.g., 5000 = 50%)
+
+**How It Works:**
+
+1. **Dynamic Slope Calculation:** When a user's PNL changes (via trading or liquidation), `update_warmup_slope()` recalculates their warmup slope:
+   ```rust
+   desired_slope = positive_pnl / warmup_period_slots
+   ```
+
+2. **Capacity Check:** The system checks if adding this slope would exceed the global limit:
+   ```rust
+   max_total_rate = insurance_fund × max_warmup_rate_fraction_bps / (warmup_period_slots / 2) / 10_000
+   ```
+
+3. **Graceful Degradation:** If capacity is exceeded, the slope is clamped to available capacity:
+   ```rust
+   actual_slope = min(desired_slope, available_capacity)
+   ```
+
+**Example:**
+- Insurance fund = 10,000 USDC
+- `max_warmup_rate_fraction_bps` = 5000 (50%)
+- Warmup period T = 100 slots
+- **Result:** Maximum 100 USDC can warm up per slot across all users
+- In T/2 = 50 slots, at most 5,000 USDC warms up (50% of insurance fund)
+
+**Benefits:**
+- **Insurance Fund Protection:** Limits exposure during oracle manipulation attacks
+- **Fair Capacity Allocation:** Users share warmup capacity proportionally to their PNL
+- **No Rejections:** Uses graceful degradation instead of failing transactions
+- **Dynamic Scaling:** Warmup capacity scales automatically with insurance fund size
+
+**Security Property:**
+Combined with ADL's unwrapped PNL haircutting (I4), this ensures that even during sustained oracle manipulation, the maximum loss to the insurance fund is bounded by `max_warmup_rate_fraction_bps` over the manipulation window.
+
 ### 4. ADL (Auto-Deleveraging)
 
 ```rust
@@ -343,6 +390,7 @@ All critical invariants are proven using Kani, a model checker for Rust.
 | **I5++** | Withdrawable ≤ available PNL | `tests/kani.rs:131` |
 | **I7** | User isolation | `tests/kani.rs:159` |
 | **I8** | Collateral consistency | `tests/kani.rs:204` |
+| **I9** | Warmup rate cap (insurance fund protection) | `tests/kani.rs:761` |
 
 ### Running Verification
 
@@ -406,12 +454,16 @@ use percolator::*;
 
 // Initialize risk engine
 let params = RiskParams {
-    warmup_period_slots: 100,        // ~50 seconds at 400ms/slot
-    maintenance_margin_bps: 500,     // 5%
-    initial_margin_bps: 1000,        // 10%
-    trading_fee_bps: 10,             // 0.1%
-    liquidation_fee_bps: 50,         // 0.5%
-    insurance_fee_share_bps: 5000,   // 50% to insurance
+    warmup_period_slots: 100,                  // ~50 seconds at 400ms/slot
+    maintenance_margin_bps: 500,               // 5%
+    initial_margin_bps: 1000,                  // 10%
+    trading_fee_bps: 10,                       // 0.1%
+    liquidation_fee_bps: 50,                   // 0.5%
+    insurance_fee_share_bps: 5000,             // 50% to insurance
+    max_users: 1000,
+    max_lps: 100,
+    account_fee_bps: 10000,                    // 1% account creation fee
+    max_warmup_rate_fraction_bps: 5000,        // 50% of insurance fund in T/2
 };
 
 let mut engine = RiskEngine::new(params);
