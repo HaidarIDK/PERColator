@@ -38,7 +38,7 @@ fn test_params() -> RiskParams {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i1_adl_never_reduces_principal() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -69,7 +69,7 @@ fn i1_adl_never_reduces_principal() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i2_deposit_preserves_conservation() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -87,7 +87,7 @@ fn i2_deposit_preserves_conservation() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i2_withdraw_preserves_conservation() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -114,7 +114,7 @@ fn i2_withdraw_preserves_conservation() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i5_warmup_determinism() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -143,7 +143,7 @@ fn i5_warmup_determinism() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i5_warmup_monotonicity() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -173,7 +173,7 @@ fn i5_warmup_monotonicity() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i5_warmup_bounded_by_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -206,7 +206,7 @@ fn i5_warmup_bounded_by_pnl() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn i7_user_isolation_deposit() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
@@ -235,7 +235,7 @@ fn i7_user_isolation_deposit() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn i7_user_isolation_withdrawal() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
@@ -268,7 +268,7 @@ fn i7_user_isolation_withdrawal() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i8_collateral_with_positive_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -290,7 +290,7 @@ fn i8_collateral_with_positive_pnl() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i8_collateral_with_negative_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -315,7 +315,7 @@ fn i8_collateral_with_negative_pnl() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i4_adl_haircuts_unwrapped_first() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -355,7 +355,7 @@ fn i4_adl_haircuts_unwrapped_first() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn withdrawal_requires_sufficient_balance() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -377,7 +377,7 @@ fn withdrawal_requires_sufficient_balance() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn pnl_withdrawal_requires_warmup() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -412,7 +412,7 @@ fn pnl_withdrawal_requires_warmup() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn multiple_users_adl_preserves_all_principals() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user1 = engine.add_user(1).unwrap();
@@ -449,7 +449,7 @@ fn multiple_users_adl_preserves_all_principals() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn saturating_arithmetic_prevents_overflow() {
     let a: u128 = kani::any();
     let b: u128 = kani::any();
@@ -470,7 +470,7 @@ fn saturating_arithmetic_prevents_overflow() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn liquidation_closes_position() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -499,7 +499,7 @@ fn liquidation_closes_position() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn zero_pnl_withdrawable_is_zero() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -514,7 +514,7 @@ fn zero_pnl_withdrawable_is_zero() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn negative_pnl_withdrawable_is_zero() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -536,7 +536,7 @@ fn negative_pnl_withdrawable_is_zero() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn funding_p1_settlement_idempotent() {
     // P1: Funding settlement is idempotent
     // After settling once, settling again with unchanged global index does nothing
@@ -578,7 +578,7 @@ fn funding_p1_settlement_idempotent() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn funding_p2_never_touches_principal() {
     // P2: Funding does not touch principal (extends Invariant I1)
 
@@ -608,7 +608,7 @@ fn funding_p2_never_touches_principal() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn funding_p3_zero_sum_between_opposite_positions() {
     // P3: Funding is zero-sum when user and LP have opposite positions
 
@@ -650,7 +650,7 @@ fn funding_p3_zero_sum_between_opposite_positions() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn funding_p4_settle_before_position_change() {
     // P4: Verifies that settlement before position change gives correct results
 
@@ -695,7 +695,7 @@ fn funding_p4_settle_before_position_change() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn funding_p5_bounded_operations_no_overflow() {
     // P5: No overflows on bounded inputs (or returns Overflow error)
 
@@ -724,7 +724,7 @@ fn funding_p5_bounded_operations_no_overflow() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn funding_zero_position_no_change() {
     // Additional invariant: Zero position means no funding payment
 
@@ -757,7 +757,7 @@ fn funding_zero_position_no_change() {
 
 /*
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn warmup_rate_cap_invariant_maintained() {
     // I9: Global warmup rate respects insurance fund limit
     // Invariant: total_warmup_rate * (T/2) <= insurance_fund * max_warmup_rate_fraction_bps / 10_000
@@ -793,7 +793,7 @@ fn warmup_rate_cap_invariant_maintained() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn warmup_slope_never_exceeds_pnl_over_period() {
     // Verify that slope_per_step * warmup_period <= positive_pnl
     // (Users can't warm up more than they have)
@@ -817,7 +817,7 @@ fn warmup_slope_never_exceeds_pnl_over_period() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn warmup_rate_decreases_when_pnl_decreases() {
     // When user's PNL decreases, their slope should decrease,
     // freeing up capacity for other users
@@ -849,7 +849,7 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     // When insurance fund is depleted and loss_accum > 0,
     // withdrawal_only mode should be activated
@@ -885,7 +885,7 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn i10_fair_unwinding_constant_haircut_ratio() {
     // All users receive the same haircut ratio regardless of withdrawal order
 
@@ -940,7 +940,7 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
 */
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_withdrawal_mode_blocks_position_increase() {
     // In withdrawal-only mode, users cannot increase position size
 
@@ -982,7 +982,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_withdrawal_mode_allows_position_decrease() {
     // In withdrawal-only mode, users CAN decrease/close positions
 
@@ -1021,7 +1021,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_total_withdrawals_bounded_by_available() {
     // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
 
@@ -1055,7 +1055,7 @@ fn i10_total_withdrawals_bounded_by_available() {
 */
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_top_up_reduces_loss_accum() {
     // Insurance fund top-ups directly reduce loss_accum
 
@@ -1083,7 +1083,7 @@ fn i10_top_up_reduces_loss_accum() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     // When loss_accum reaches 0, withdrawal mode should be exited
 
@@ -1109,7 +1109,7 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_withdrawal_mode_preserves_conservation() {
     // Conservation must be maintained even in withdrawal-only mode
 
@@ -1144,7 +1144,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(70)]
 fn i10_withdrawal_tracking_accuracy() {
     // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
 
@@ -1183,7 +1183,7 @@ fn i10_withdrawal_tracking_accuracy() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn i1_lp_adl_never_reduces_capital() {
     // I1 for LPs: ADL must NEVER reduce LP capital
     // This is the LP equivalent of i1_adl_never_reduces_principal
@@ -1213,7 +1213,7 @@ fn i1_lp_adl_never_reduces_capital() {
 }
 
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn i1_lp_liquidation_never_reduces_capital() {
     // I1 for LPs: Liquidation must NEVER reduce LP capital
     // LP capital can only be reduced by explicit withdrawals, never by liquidation
@@ -1244,7 +1244,7 @@ fn i1_lp_liquidation_never_reduces_capital() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn adl_is_proportional_for_user_and_lp() {
     // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
     // should receive equal haircuts
@@ -1285,7 +1285,7 @@ fn adl_is_proportional_for_user_and_lp() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn adl_proportionality_general() {
     // General proportional ADL: Haircut percentages should be equal
     // even when PNL amounts differ
@@ -1340,7 +1340,7 @@ fn adl_proportionality_general() {
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(3)]
+#[kani::unwind(70)]
 fn i10_fair_unwinding_is_fair_for_lps() {
     // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
     // This extends i10_fair_unwinding_constant_haircut_ratio to include LPs
@@ -1395,7 +1395,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
 */
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn multiple_lps_adl_preserves_all_capitals() {
     // Multi-LP ADL: All LP capitals are preserved, similar to multiple_users_adl_preserves_all_principals
 
@@ -1430,7 +1430,7 @@ fn multiple_lps_adl_preserves_all_capitals() {
 }
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(70)]
 fn mixed_users_and_lps_adl_preserves_all_capitals() {
     // Mixed ADL: Both user and LP capitals are preserved together
 

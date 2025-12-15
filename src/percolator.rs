@@ -25,8 +25,15 @@ extern crate kani;
 // Constants
 // ============================================================================
 
+// Use smaller array size for Kani verification to make proofs tractable
+// Production uses 4096, but Kani symbolic execution becomes intractable at that scale
+#[cfg(kani)]
+pub const MAX_ACCOUNTS: usize = 64;  // Must be multiple of 64 for bitmap
+
+#[cfg(not(kani))]
 pub const MAX_ACCOUNTS: usize = 4096;
-pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words of u64
+
+pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words for production, 1 for kani
 
 // ============================================================================
 // Core Data Structures
