@@ -418,7 +418,7 @@ proptest! {
         engine.vault = 11_000_000;
 
         engine.users[user_idx].position_size = initial_size;
-        engine.lps[lp_idx].lp_position_size = -initial_size;
+        engine.lps[lp_idx].position_size = -initial_size;
 
         let expected_user_pos = initial_size.saturating_add(trade_size);
         let expected_lp_pos = (-initial_size).saturating_sub(trade_size);
@@ -428,7 +428,7 @@ proptest! {
         // If trade succeeded, positions should net to zero
         if engine.users[user_idx].position_size == expected_user_pos {
             let total_position = engine.users[user_idx].position_size +
-                                engine.lps[lp_idx].lp_position_size;
+                                engine.lps[lp_idx].position_size;
 
             // Positions should roughly net out (within rounding)
             prop_assert!(total_position.abs() <= 1,
@@ -507,7 +507,7 @@ proptest! {
 
         // Opposite positions
         engine.users[user_idx].position_size = position;
-        engine.lps[lp_idx].lp_position_size = -position;
+        engine.lps[lp_idx].position_size = -position;
 
         let total_pnl_before = engine.users[user_idx].pnl +
                               engine.lps[lp_idx].pnl;
@@ -624,7 +624,7 @@ proptest! {
 
         // Manually set positions
         engine.users[user_idx].position_size = initial_pos;
-        engine.lps[lp_idx].lp_position_size = -initial_pos;
+        engine.lps[lp_idx].position_size = -initial_pos;
 
         // Period 1: accrue funding
         let accrue1 = engine.accrue_funding(1, 100_000_000, rate1);
@@ -644,7 +644,7 @@ proptest! {
                 let _ = engine.touch_user(user_idx);
 
                 // Verify snapshot is current
-                prop_assert_eq!(engine.users[user_idx].funding_index_user,
+                prop_assert_eq!(engine.users[user_idx].funding_index,
                                engine.funding_index_qpb_e6,
                                "Snapshot should equal global index");
             }

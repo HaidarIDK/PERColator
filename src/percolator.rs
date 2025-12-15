@@ -114,12 +114,12 @@ impl Account {
         !self.is_lp()
     }
 
-    /// Get matching engine info (panics if not LP)
-    pub fn matching_engine(&self) -> (&[u8; 32], &[u8; 32]) {
-        (
-            self.matching_engine_program.as_ref().expect("Not an LP account"),
-            self.matching_engine_context.as_ref().expect("Not an LP account"),
-        )
+    /// Get matching engine info (returns error if not LP)
+    pub fn matching_engine(&self) -> Result<(&[u8; 32], &[u8; 32])> {
+        match (self.matching_engine_program.as_ref(), self.matching_engine_context.as_ref()) {
+            (Some(program), Some(context)) => Ok((program, context)),
+            _ => Err(RiskError::NotAnLPAccount),
+        }
     }
 }
 
@@ -169,7 +169,9 @@ pub struct RiskParams {
     /// Maximum number of LPs
     pub max_lps: u64,
 
-    /// Base fee for adding accounts (in basis points of notional? Wait, absolute?)
+    /// Base account creation fee in basis points (e.g., 10000 = 1%)
+    /// Actual fee = (account_fee_bps * capacity_multiplier) / 10000
+    /// The multiplier increases as the system approaches max capacity
     pub account_fee_bps: u64,
 
     /// Maximum warmup rate as fraction of insurance fund
@@ -329,6 +331,9 @@ pub enum RiskError {
     /// LP account not found
     LPNotFound,
 
+    /// Account is not an LP account
+    NotAnLPAccount,
+
     /// Position size mismatch
     PositionSizeMismatch,
 
@@ -358,8 +363,12 @@ fn mul_u128(a: u128, b: u128) -> u128 {
 }
 
 #[inline]
-fn div_u128(a: u128, b: u128) -> u128 {
-    if b == 0 { 0 } else { a / b }
+fn div_u128(a: u128, b: u128) -> Result<u128> {
+    if b == 0 {
+        Err(RiskError::Overflow) // Division by zero
+    } else {
+        Ok(a / b)
+    }
 }
 
 #[inline]
@@ -485,7 +494,7 @@ where
 
     /// Check if user is above maintenance margin
     pub fn is_above_maintenance_margin(&self, user: &Account, oracle_price: u64) -> bool {
-        let collateral = self.user_collateral(user);
+        let collateral = self.account_collateral(user);
 
         // Calculate position value at current price
         let position_value = mul_u128(
@@ -504,6 +513,15 @@ where
 
     /// Check conservation invariant (I2)
     /// vault = sum(principal) + sum(max(0, pnl)) + insurance - fees_outstanding
+    ///
+    /// # Rounding Tolerance
+    /// Allows ±1000 units of discrepancy to account for:
+    /// - Integer division rounding in PNL calculations (entry price, funding, etc.)
+    /// - Basis point conversions (dividing by 10_000)
+    /// - Fee calculations
+    ///
+    /// This tolerance is conservative: with typical position sizes (millions) and
+    /// basis point precision, accumulated rounding error should be << 1000 units.
     pub fn check_conservation(&self) -> bool {
         let mut total_principal = 0u128;
         let mut total_positive_pnl = 0u128;
@@ -523,8 +541,9 @@ where
             self.insurance_fund.balance
         );
 
+        // Allow ±1000 units tolerance for rounding errors from integer arithmetic
         self.vault >= expected_vault.saturating_sub(1000) &&
-        self.vault <= expected_vault.saturating_add(1000) // Allow small rounding
+        self.vault <= expected_vault.saturating_add(1000)
     }
 }
 
@@ -570,6 +589,22 @@ where
             return Ok(());
         }
 
+        // Input validation to prevent overflow
+        // Oracle price should be reasonable (0.01 to 1M USD with 1e6 scale)
+        if oracle_price == 0 || oracle_price > 1_000_000_000_000 {
+            return Err(RiskError::Overflow);
+        }
+
+        // Funding rate should be reasonable (±100% per slot = ±1M bps)
+        if funding_rate_bps_per_slot.abs() > 1_000_000 {
+            return Err(RiskError::Overflow);
+        }
+
+        // Time delta should be reasonable (max 1 year = ~31M slots at 1s per slot)
+        if dt > 31_536_000 {
+            return Err(RiskError::Overflow);
+        }
+
         // Use checked math to prevent silent overflow
         let price = oracle_price as i128;
         let rate = funding_rate_bps_per_slot as i128;
@@ -612,15 +647,26 @@ where
     /// * Does not modify principal (Invariant I1 extended)
     /// * Idempotent if global index unchanged
     /// * Zero-sum with LP when positions are opposite
-    fn settle_user_funding(&mut self, user: &mut Account) -> Result<()> {
-        let delta_f = self
-            .funding_index_qpb_e6
-            .checked_sub(user.funding_index)
+    /// Settle funding for an account (lazy update)
+    ///
+    /// This is a unified funding settlement function for both users and LPs.
+    /// Calculates and applies funding payment based on position size and funding index delta.
+    ///
+    /// # Arguments
+    /// * `account` - Mutable reference to account (user or LP)
+    /// * `global_funding_index` - The current global funding index
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err(RiskError::Overflow)` if calculation overflows
+    fn settle_account_funding(account: &mut Account, global_funding_index: i128) -> Result<()> {
+        let delta_f = global_funding_index
+            .checked_sub(account.funding_index)
             .ok_or(RiskError::Overflow)?;
 
-        if delta_f != 0 && user.position_size != 0 {
+        if delta_f != 0 && account.position_size != 0 {
             // payment = position × ΔF / 1e6
-            let payment = user
+            let payment = account
                 .position_size
                 .checked_mul(delta_f)
                 .ok_or(RiskError::Overflow)?
@@ -628,47 +674,13 @@ where
                 .ok_or(RiskError::Overflow)?;
 
             // Longs pay when funding positive: pnl -= payment
-            user.pnl = user
+            account.pnl = account
                 .pnl
                 .checked_sub(payment)
                 .ok_or(RiskError::Overflow)?;
         }
 
-        user.funding_index = self.funding_index_qpb_e6;
-        Ok(())
-    }
-
-    /// Settle funding for an LP (lazy update)
-    ///
-    /// Same logic as user funding but for LP position.
-    ///
-    /// # Arguments
-    /// * `lp` - Mutable reference to LP account
-    ///
-    /// # Returns
-    /// * `Ok(())` if successful
-    /// * `Err(RiskError::Overflow)` if calculation overflows
-    fn settle_lp_funding(&mut self, lp: &mut Account) -> Result<()> {
-        let delta_f = self
-            .funding_index_qpb_e6
-            .checked_sub(lp.funding_index)
-            .ok_or(RiskError::Overflow)?;
-
-        if delta_f != 0 && lp.position_size != 0 {
-            let payment = lp
-                .position_size
-                .checked_mul(delta_f)
-                .ok_or(RiskError::Overflow)?
-                .checked_div(1_000_000)
-                .ok_or(RiskError::Overflow)?;
-
-            lp.pnl = lp
-                .pnl
-                .checked_sub(payment)
-                .ok_or(RiskError::Overflow)?;
-        }
-
-        lp.funding_index = self.funding_index_qpb_e6;
+        account.funding_index = global_funding_index;
         Ok(())
     }
 
@@ -691,28 +703,7 @@ where
             .users
             .get_mut(user_index)
             .ok_or(RiskError::UserNotFound)?;
-
-        let delta_f = self
-            .funding_index_qpb_e6
-            .checked_sub(user.funding_index)
-            .ok_or(RiskError::Overflow)?;
-
-        if delta_f != 0 && user.position_size != 0 {
-            let payment = user
-                .position_size
-                .checked_mul(delta_f)
-                .ok_or(RiskError::Overflow)?
-                .checked_div(1_000_000)
-                .ok_or(RiskError::Overflow)?;
-
-            user.pnl = user
-                .pnl
-                .checked_sub(payment)
-                .ok_or(RiskError::Overflow)?;
-        }
-
-        user.funding_index = self.funding_index_qpb_e6;
-        Ok(())
+        Self::settle_account_funding(user, self.funding_index_qpb_e6)
     }
 
     /// Touch an LP account (settle funding before operations)
@@ -728,28 +719,7 @@ where
             .lps
             .get_mut(lp_index)
             .ok_or(RiskError::LPNotFound)?;
-
-        let delta_f = self
-            .funding_index_qpb_e6
-            .checked_sub(lp.funding_index)
-            .ok_or(RiskError::Overflow)?;
-
-        if delta_f != 0 && lp.position_size != 0 {
-            let payment = lp
-                .position_size
-                .checked_mul(delta_f)
-                .ok_or(RiskError::Overflow)?
-                .checked_div(1_000_000)
-                .ok_or(RiskError::Overflow)?;
-
-            lp.pnl = lp
-                .pnl
-                .checked_sub(payment)
-                .ok_or(RiskError::Overflow)?;
-        }
-
-        lp.funding_index = self.funding_index_qpb_e6;
-        Ok(())
+        Self::settle_account_funding(lp, self.funding_index_qpb_e6)
     }
 
     /// Update a user's warmup slope based on current PNL, respecting global warmup rate limit
@@ -1149,7 +1119,7 @@ where
         let lp = self.lps.get(lp_index).ok_or(RiskError::LPNotFound)?;
 
         // Call matching engine (can perform CPI in production)
-        let (program, context) = lp.matching_engine();
+        let (program, context) = lp.matching_engine()?;
         matcher.execute_match(
             program,
             context,
@@ -1199,7 +1169,7 @@ where
             let total_size = user.position_size.abs().saturating_add(size.abs());
 
             if total_size != 0 {
-                user.entry_price = div_u128(total_notional, total_size as u128) as u64;
+                user.entry_price = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if user.position_size.abs() < size.abs() {
             // Flipping position
@@ -1215,7 +1185,7 @@ where
             let total_size = lp.position_size.abs().saturating_add(size.abs());
 
             if total_size != 0 {
-                lp.entry_price = div_u128(total_notional, total_size as u128) as u64;
+                lp.entry_price = div_u128(total_notional, total_size as u128)? as u64;
             }
         }
 
@@ -1398,6 +1368,16 @@ where
     /// 1. Check if account is above liquidation threshold
     /// 2. Reduce position to bring account below threshold
     /// 3. Split fee between insurance fund and liquidation keeper
+    ///
+    /// # Insolvency Handling
+    /// This function DOES NOT handle insolvency resolution. If the liquidation
+    /// results in negative capital (bad debt), the account will remain in an
+    /// insolvent state until a separate call to `apply_adl()` socializes the loss.
+    /// This is intentional - liquidation and ADL are separate operations.
+    ///
+    /// # Returns
+    /// * `Ok(())` if liquidation succeeds (or is not needed)
+    /// * `Err` if user not found or other error occurs
     pub fn liquidate_user(
         &mut self,
         user_index: usize,
@@ -1467,6 +1447,16 @@ where
 
     /// Liquidate an LP that is below maintenance margin
     /// CRITICAL FIX: LPs can now be liquidated just like users
+    ///
+    /// # Insolvency Handling
+    /// This function DOES NOT handle insolvency resolution. If the liquidation
+    /// results in negative capital (bad debt), the LP will remain in an
+    /// insolvent state until a separate call to `apply_adl()` socializes the loss.
+    /// This is intentional - liquidation and ADL are separate operations.
+    ///
+    /// # Returns
+    /// * `Ok(())` if liquidation succeeds (or is not needed)
+    /// * `Err` if LP not found or other error occurs
     pub fn liquidate_lp(
         &mut self,
         lp_index: usize,
@@ -1626,11 +1616,9 @@ where
             reserved_pnl: 0,
             warmup_state: Warmup {
                 started_at_slot: self.current_slot,
-                slope_per_step: if self.params.warmup_period_slots > 0 {
-                    u128::MAX / (self.params.warmup_period_slots as u128)
-                } else {
-                    u128::MAX
-                },
+                // Initialize to 0, consistent with user accounts
+                // Slope will be set by update_lp_warmup_slope when LP earns PNL
+                slope_per_step: 0,
             },
             position_size: 0,
             entry_price: 0,
