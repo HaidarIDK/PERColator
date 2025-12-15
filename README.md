@@ -35,8 +35,8 @@ Fixed-size slab design with ~664 KB memory footprint, suitable for a single Sola
 │ - funding_index_qpb_e6: i128        │
 │ - last_funding_slot: u64            │
 │ - loss_accum: u128                  │
-│ - withdrawal_only: bool             │
-│ - withdrawal_mode_withdrawn: u128   │
+│ - risk_reduction_only: bool         │
+│ - risk_reduction_mode_withdrawn: u128│
 │ - warmup_paused: bool               │
 │ - warmup_pause_slot: u64            │
 │                                     │
@@ -246,7 +246,7 @@ Unified withdrawal function that handles both users, LPs, principal, and PNL:
 - Automatically converts vested PNL to capital before withdrawal
 - Must maintain initial margin if position is open
 - Never allows withdrawal below margin requirements
-- Blocks if `withdrawal_only` mode is active
+- In risk-reduction-only mode: withdrawals of capital allowed, but warmup frozen
 
 ### 3. PNL Warmup
 
@@ -299,7 +299,7 @@ pub fn withdrawable_pnl(&self, acct: &Account) -> u128 {
 **Properties:**
 - Prevents PNL from continuing to warm up during ADL
 - Ensures consistent valuation across all accounts
-- Automatically activated when system enters withdrawal-only mode
+- Automatically activated when system enters risk-reduction-only mode
 - Global freeze (affects all accounts uniformly)
 
 ### 4. ADL (Auto-Deleveraging)
@@ -411,43 +411,45 @@ is_safe = collateral >= margin_required
 - Insurance fund builds reserves
 - Works identically for users and LPs
 
-### 6. Withdrawal-Only Mode (Crisis Shutdown)
+### 6. Risk-Reduction-Only Mode (Crisis Lockdown)
 
-When the insurance fund is depleted and losses exceed what can be covered (`loss_accum > 0`), the system automatically enters **withdrawal-only mode** - a controlled shutdown mechanism that blocks withdrawals until solvency is restored.
+When the insurance fund is depleted and losses exceed what can be covered (`loss_accum > 0`), the system automatically enters **risk-reduction-only mode** - a controlled lockdown mechanism that freezes warmups and blocks risk-increasing actions until solvency is restored.
 
 ```rust
 pub fn apply_adl(&mut self, total_loss: u128) -> Result<()>
 ```
 
 **Trigger Condition:**
-When ADL depletes the insurance fund, `withdrawal_only` flag is set:
+When ADL depletes the insurance fund, `risk_reduction_only` flag is set:
 ```rust
 if self.insurance_fund.balance < remaining_loss {
     // Insurance fund depleted - crisis mode
     self.loss_accum = remaining_loss - insurance_fund.balance;
-    self.withdrawal_only = true;    // Block withdrawals
-    self.warmup_paused = true;      // Freeze warmup
+    self.risk_reduction_only = true;  // Enter lockdown
+    self.warmup_paused = true;        // Freeze warmup
 }
 ```
 
 #### Crisis Mode Behavior
 
 **Blocked Operations:**
-- All withdrawals are blocked (return `Err(RiskError::WithdrawalOnlyMode)`)
+- Risk-increasing trades (return `Err(RiskError::RiskReductionOnlyMode)`)
+- Pending PNL cannot be withdrawn (warmup frozen)
 - No new positions can be opened
-- No increasing existing positions
 
 **Allowed Operations:**
+- Withdrawals of capital (principal) subject to margin constraints
 - Closing positions (users can reduce risk)
 - Reducing positions
 - Deposits (helps restore solvency)
 - Insurance fund top-ups
+- Liquidations and ADL
 
-**Position Management:**
+**Trade Gating:**
 ```rust
-// In withdrawal_only mode, only allow reducing positions
-if new_position.abs() > current_position.abs() {
-    return Err(RiskError::WithdrawalOnlyMode);
+// Only allow trades that reduce absolute exposure
+if user_exposure_increases || lp_exposure_increases {
+    return Err(RiskError::RiskReductionOnlyMode);
 }
 ```
 
@@ -464,35 +466,35 @@ pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool>
 **Process:**
 1. Contribution directly reduces `loss_accum` first
 2. Remaining amount goes to insurance fund balance
-3. If `loss_accum` reaches 0, **exits withdrawal-only mode** automatically
-4. Trading resumes once solvency is restored
+3. If `loss_accum` reaches 0, **exits risk-reduction-only mode** automatically
+4. Normal trading resumes once solvency is restored
 
 **Example:**
 ```rust
 // System in crisis: loss_accum = 5,000
-engine.withdrawal_only == true
+engine.risk_reduction_only == true
 
 // Someone tops up 3,000
 engine.top_up_insurance_fund(3_000)?;
-// loss_accum now 2,000, still in withdrawal mode
+// loss_accum now 2,000, still in crisis mode
 
 // Another 2,000 top-up
 let exited = engine.top_up_insurance_fund(2_000)?;
-assert!(exited);  // Exits withdrawal mode
-assert!(!engine.withdrawal_only);  // Trading resumes
+assert!(exited);  // Exits crisis mode
+assert!(!engine.risk_reduction_only);  // Normal trading resumes
 ```
 
 #### Design Benefits
 
 **Simplicity:**
-- Clear rule: no withdrawals during crisis
-- No complex haircut calculations
-- No O(N) scans for total capital computation
+- Clear rule: warmup frozen, only risk-reducing actions allowed
+- No complex haircut calculations for capital
+- Withdrawals of capital still allowed (prevents bank run panic)
 
-**Controlled Shutdown:**
-- Prevents further risk-taking
-- Blocks withdrawal runs
-- Users can still close positions to reduce exposure
+**Controlled Lockdown:**
+- Prevents new risk-taking (no exposure increases)
+- Prevents pending PNL from vesting (warmup frozen)
+- Users can still withdraw capital and close positions
 
 **Recovery Mechanism:**
 - Clear path to restore solvency via insurance top-ups
@@ -500,8 +502,8 @@ assert!(!engine.withdrawal_only);  // Trading resumes
 - Transparent loss amount
 
 **Security Properties:**
-- No withdrawal order gaming
-- No exploitation through position manipulation
+- No withdrawal order gaming (capital always available)
+- Warmup freeze prevents PNL extraction during crisis
 - Clear separation of crisis vs normal operations
 - Conservation maintained throughout
 
@@ -838,7 +840,7 @@ This section documents the slab 4096 rewrite implementation completed in January
 - Unified `liquidate_account()` replaces separate user/LP liquidation
 
 **Behavioral Changes:**
-- Withdrawal-only mode blocks all withdrawals (no proportional haircut)
+- Risk-reduction-only mode freezes warmup and blocks risk-increasing trades
 - ADL is proportional across all accounts (scan-based, not lazy collection)
 - No account deallocation (accounts never freed once allocated)
 - Maximum 4096 accounts (hard limit)
@@ -846,7 +848,6 @@ This section documents the slab 4096 rewrite implementation completed in January
 **Removed Features:**
 - Warmup rate cap (no `total_warmup_rate` tracking)
 - O(1) ADL touch-based collection (reverted to scan-based)
-- Withdrawal haircut during withdrawal-only mode (now blocks completely)
 - Fee accrual system (simplified)
 - Generic account storage abstractions
 
@@ -856,10 +857,11 @@ This section documents the slab 4096 rewrite implementation completed in January
 - Bitmap allocation and iteration
 - Scan-based ADL with proportional haircuts
 - Warmup pause freezes withdrawable
-- Withdrawal-only blocks withdrawals
+- Risk-reduction-only mode blocks risk-increasing trades
 - Conservation check via bitmap scan
 - Funding settlement and idempotence
 - Unified liquidation for users and LPs
+- Risk-reduction-only mode behavior
 
 **Fuzzing Tests:** Property-based testing with proptest
 - Random deposit/withdrawal sequences
@@ -920,8 +922,9 @@ By separating matching from risk:
 ✅ **Conservation of funds across all operations**
 ✅ **Account isolation - one account can't affect another**
 ✅ **No oracle manipulation can extract funds faster than time T**
-✅ **Crisis mode blocks withdrawal runs** during insolvency
+✅ **Crisis mode freezes warmup and blocks risk-increasing actions**
 ✅ **Clear recovery path via insurance fund top-ups**
+✅ **Capital withdrawals still allowed in crisis (prevents bank run panic)**
 
 ### What This Does NOT Guarantee
 
@@ -940,8 +943,8 @@ By separating matching from risk:
 | Matching engine exploit | Signature + solvency checks |
 | Liquidation griefing | Permissionless + keeper incentives |
 | Insurance drain | Fees replenish fund |
-| Withdrawal runs | Crisis mode blocks all withdrawals |
-| Crisis exploitation | Withdrawal-only mode blocks new risk |
+| Withdrawal runs | Capital always available, warmup frozen |
+| Crisis exploitation | Risk-reduction-only mode blocks new risk |
 
 ## Dependencies
 
