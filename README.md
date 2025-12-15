@@ -182,7 +182,7 @@ All account operations use `u16` indices (0..4095):
 Due to the large fixed arrays, tests require increased stack size:
 
 ```bash
-RUST_MIN_STACK=16777216 cargo test
+RUST_MIN_STACK=16777216 cargo test --all-feature
 ```
 
 ## Operations
