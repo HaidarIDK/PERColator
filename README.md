@@ -413,22 +413,38 @@ is_safe = collateral >= margin_required
 
 ### 6. Risk-Reduction-Only Mode (Crisis Lockdown)
 
-When the insurance fund is depleted and losses exceed what can be covered (`loss_accum > 0`), the system automatically enters **risk-reduction-only mode** - a controlled lockdown mechanism that freezes warmups and blocks risk-increasing actions until solvency is restored.
+The system automatically enters **risk-reduction-only mode** when the insurance fund drops below a configured threshold. This is a controlled lockdown mechanism that freezes warmups and blocks risk-increasing actions until solvency is restored.
 
 ```rust
 pub fn apply_adl(&mut self, total_loss: u128) -> Result<()>
 ```
 
-**Trigger Condition:**
-When ADL depletes the insurance fund, `risk_reduction_only` flag is set:
+**Trigger Conditions:**
+
+The system enters risk-reduction mode in two scenarios:
+
+1. **Threshold Trigger** (Preventive): When the insurance fund balance drops below `params.risk_reduction_threshold`
+2. **Depletion Trigger** (Emergency): When the insurance fund is completely depleted and losses exceed what can be covered
+
 ```rust
+// Scenario 1: Threshold trigger (preventive lockdown)
+if self.insurance_fund.balance < self.params.risk_reduction_threshold {
+    self.enter_risk_reduction_only_mode();  // Freeze warmup, block risk-increasing trades
+}
+
+// Scenario 2: Full depletion (emergency lockdown)
 if self.insurance_fund.balance < remaining_loss {
-    // Insurance fund depleted - crisis mode
     self.loss_accum = remaining_loss - insurance_fund.balance;
-    self.risk_reduction_only = true;  // Enter lockdown
-    self.warmup_paused = true;        // Freeze warmup
+    self.enter_risk_reduction_only_mode();
 }
 ```
+
+**Configuration:**
+
+Set `risk_reduction_threshold` in `RiskParams` to control when preventive lockdown occurs:
+- `0`: Only trigger on full depletion (most aggressive)
+- `50% of expected insurance balance`: Trigger early to prevent depletion (conservative)
+- Higher values: More protective, earlier intervention
 
 #### Crisis Mode Behavior
 
@@ -718,7 +734,9 @@ let params = RiskParams {
     trading_fee_bps: 10,                       // 0.1%
     liquidation_fee_bps: 50,                   // 0.5%
     insurance_fee_share_bps: 5000,             // 50% to insurance
+    max_accounts: 4096,                        // Maximum accounts
     account_fee_bps: 10000,                    // 1% account creation fee
+    risk_reduction_threshold: 100_000,         // Enter crisis mode if insurance < 100k
 };
 
 let mut engine = RiskEngine::new(params);

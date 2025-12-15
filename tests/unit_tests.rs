@@ -16,6 +16,7 @@ fn default_params() -> RiskParams {
         insurance_fee_share_bps: 5000, // 50% to insurance
         max_accounts: 1000,
         account_fee_bps: 10000, // 1%
+        risk_reduction_threshold: 0, // Default: only trigger on full depletion
     }
 }
 
@@ -1769,4 +1770,42 @@ fn test_lp_capital_never_reduced_by_adl() {
     
     // Only PNL should be affected
     assert!(engine.accounts[lp_idx as usize].pnl < 5_000, "LP PNL should be haircutted");
+}
+
+#[test]
+fn test_risk_reduction_threshold() {
+    // Test that risk-reduction mode triggers at configured threshold
+    let mut params = default_params();
+    params.risk_reduction_threshold = 5_000; // Trigger when insurance < 5k
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Setup: insurance fund has 10k, which is above threshold
+    engine.insurance_fund.balance = 10_000;
+    assert!(!engine.risk_reduction_only);
+
+    // Apply ADL with 3k loss - should bring insurance to 7k (still above 5k threshold)
+    engine.apply_adl(3_000).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 7_000);
+    assert!(!engine.risk_reduction_only, "Should not trigger yet (7k > 5k)");
+
+    // Apply ADL with 3k loss - should bring insurance to 4k (below 5k threshold)
+    engine.apply_adl(3_000).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 4_000);
+    assert!(engine.risk_reduction_only, "Should trigger now (4k < 5k)");
+    assert!(engine.warmup_paused, "Warmup should be frozen");
+
+    // Top up to 4.5k - still below threshold, should stay in risk mode
+    engine.top_up_insurance_fund(500).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 4_500);
+    assert!(engine.risk_reduction_only, "Should stay in risk mode (4.5k < 5k)");
+
+    // Top up to 5k - exactly at threshold, should exit
+    engine.top_up_insurance_fund(500).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 5_000);
+    assert!(!engine.risk_reduction_only, "Should exit risk mode (5k >= 5k)");
+    assert!(!engine.warmup_paused, "Warmup should unfreeze");
 }

@@ -182,6 +182,10 @@ pub struct RiskParams {
     /// Actual fee = (account_fee_bps * capacity_multiplier) / 10000
     /// The multiplier increases as the system approaches max capacity
     pub account_fee_bps: u64,
+
+    /// Insurance fund threshold for entering risk-reduction-only mode
+    /// If insurance fund balance drops below this, risk-reduction mode activates
+    pub risk_reduction_threshold: u128,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -534,12 +538,15 @@ impl RiskEngine {
         }
     }
 
-    /// Exit risk-reduction-only mode if system is safe (loss fully covered)
+    /// Exit risk-reduction-only mode if system is safe (loss fully covered AND above threshold)
     pub fn exit_risk_reduction_only_mode_if_safe(&mut self) {
         if self.loss_accum == 0 {
-            self.risk_reduction_only = false;
-            self.risk_reduction_mode_withdrawn = 0;
-            self.warmup_paused = false;
+            // Check if insurance fund is back above configured threshold
+            if self.insurance_fund.balance >= self.params.risk_reduction_threshold {
+                self.risk_reduction_only = false;
+                self.risk_reduction_mode_withdrawn = 0;
+                self.warmup_paused = false;
+            }
         }
     }
 
@@ -1147,7 +1154,14 @@ impl RiskEngine {
                 // Enter risk-reduction-only mode (freezes warmup)
                 self.enter_risk_reduction_only_mode();
             } else {
+                // Deduct from insurance fund
                 self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, remaining_loss);
+
+                // Check if we've dropped below configured threshold
+                if self.insurance_fund.balance < self.params.risk_reduction_threshold && !self.risk_reduction_only {
+                    // Enter risk-reduction-only mode at threshold
+                    self.enter_risk_reduction_only_mode();
+                }
             }
         }
 
@@ -1171,7 +1185,7 @@ impl RiskEngine {
             // Add remaining to insurance fund balance
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
 
-            // Exit risk-reduction-only mode if loss is fully covered
+            // Exit risk-reduction-only mode if loss is fully covered and above threshold
             let was_in_mode = self.risk_reduction_only;
             self.exit_risk_reduction_only_mode_if_safe();
             if was_in_mode && !self.risk_reduction_only {
@@ -1182,7 +1196,15 @@ impl RiskEngine {
         } else {
             // No loss - just add to insurance fund
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
-            Ok(false)
+
+            // Check if we can exit risk-reduction mode (may have been triggered by threshold, not loss)
+            let was_in_mode = self.risk_reduction_only;
+            self.exit_risk_reduction_only_mode_if_safe();
+            if was_in_mode && !self.risk_reduction_only {
+                Ok(true) // Exited risk-reduction-only mode
+            } else {
+                Ok(false)
+            }
         }
     }
 
