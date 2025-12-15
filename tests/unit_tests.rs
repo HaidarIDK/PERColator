@@ -885,33 +885,24 @@ fn test_adl_protects_principal_during_warmup() {
     let warmed_after_adl = engine.withdrawable_pnl(&engine.accounts[attacker as usize]);
     assert_eq!(warmed_after_adl, 5_000, "Only early-warmed PNL is withdrawable");
 
-    // In the new implementation, withdrawal-only mode BLOCKS all withdrawals
-    // So attacker cannot withdraw even though they have capital and warmed PnL
-    let total_withdrawable = attacker_principal + 5_000;
+    // In risk-reduction-only mode, withdrawals of capital ARE allowed
+    // The attacker can withdraw their principal + already-warmed PNL (which gets converted to capital)
+    // But warmup is frozen, so the 45k that's still warming won't become available
+    let total_withdrawable = attacker_principal + warmed_after_adl;
     let withdraw_result = engine.withdraw(attacker, total_withdrawable);
-    assert!(withdraw_result.is_err(), "Withdrawals blocked in withdrawal-only mode");
-    assert_eq!(withdraw_result.unwrap_err(), RiskError::RiskReductionOnlyMode);
+    assert!(withdraw_result.is_ok(), "Withdrawals of capital ARE allowed in risk mode");
 
     // To enable withdrawals again, insurance fund must be topped up to cover loss_accum
     // ADL used ~45k from unwrapped PnL, remaining ~5k went to insurance
     // Due to rounding in proportional ADL, there may be small loss_accum
     assert!(engine.loss_accum < 5_100, "Loss mostly covered by unwrapped PnL and insurance");
 
-    // But withdrawal-only was triggered, so top up is needed to exit
-    // Actually, checking the code: ADL enters risk_reduction_only if insurance is insufficient
-    // Let's check the actual state
-    if engine.risk_reduction_only {
-        // System is still in withdrawal-only mode despite no loss_accum
-        // This might be intentional or need adjustment
-        // For now, test that the behavior is consistent
-        assert!(withdraw_result.is_err(), "Withdrawals blocked when risk_reduction_only=true");
-    }
-
     // === Conclusion ===
-    // The attack was MOSTLY FAILED: Attacker only extracted 0 of 50k fake profit (blocked by withdrawal-only)
-    // The 45k that was still warming got haircutted by ADL.
-    // The 5k that had warmed is still in the account but not withdrawable during crisis.
-    // The insurance fund absorbed the remaining 5k loss.
+    // The attack was MOSTLY MITIGATED:
+    // - The attacker could only withdraw their principal + 5k of warmed PNL
+    // - The 45k that was still warming got haircutted by ADL
+    // - Warmup freeze prevents the remaining 45k from ever becoming withdrawable in risk mode
+    // - The insurance fund absorbed any remaining loss
     //
     // This demonstrates the core security property:
     //   "ADL haircuts PNL that is still warming up, protecting principal holders.
@@ -1130,7 +1121,7 @@ fn test_warmup_rate_limit_invariant_maintained() {
 */
 
 // ============================================================================
-// Withdrawal-Only Mode Tests
+// Risk-Reduction-Only Mode Tests
 // ============================================================================
 
 #[test]
@@ -1263,25 +1254,185 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 }
 
+// Test A: Warmup freezes in risk mode
 #[test]
-fn test_risk_reduction_only_blocks_withdraw() {
-    // Test that withdrawal-only mode blocks ALL withdrawals (including capital)
+fn test_warmup_freezes_in_risk_mode() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
-
     let user = engine.add_user(100).unwrap();
+
     engine.deposit(user, 10_000).unwrap();
 
-    // Trigger withdrawal-only mode
-    engine.risk_reduction_only = true;
-    engine.loss_accum = 1_000;
+    // Setup: user has pnl=+1000, slope=10, started_at_slot=0
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].warmup_slope_per_step = 10;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
 
-    // Try to withdraw capital - should be blocked
-    let result = engine.withdraw(user, 5_000);
-    assert!(result.is_err(), "Withdrawals should be blocked in withdrawal-only mode");
+    // Advance slot to 10
+    engine.current_slot = 10;
+    let w1 = engine.withdrawable_pnl(&engine.accounts[user as usize]);
+    assert_eq!(w1, 100, "After 10 slots, 10*10=100 should be warmed");
+
+    // Trigger crisis mode at slot 10
+    engine.enter_risk_reduction_only_mode();
+    assert!(engine.warmup_paused);
+    assert_eq!(engine.warmup_pause_slot, 10);
+
+    // Advance slot +1000
+    engine.current_slot = 1010;
+
+    // Warmup should be frozen at slot 10
+    let w2 = engine.withdrawable_pnl(&engine.accounts[user as usize]);
+    assert_eq!(w2, w1, "Warmup should not progress when paused");
+    assert_eq!(w2, 100, "Should still be 100 even after 1000 slots");
+}
+
+// Test B: In risk mode, deposit withdrawals work from deposited capital
+#[test]
+fn test_risk_mode_deposit_withdrawals_work() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+
+    // User deposit 1000
+    engine.deposit(user, 1000).unwrap();
+
+    // Enter risk mode
+    engine.enter_risk_reduction_only_mode();
+    assert!(engine.risk_reduction_only);
+
+    // Withdraw 200 - should succeed (withdrawing from capital)
+    let result = engine.withdraw(user, 200);
+    assert!(result.is_ok(), "Withdrawals of capital should work in risk mode");
+
+    assert_eq!(engine.accounts[user as usize].capital, 800);
+    assert_eq!(engine.vault, 800);
+}
+
+// Test C: In risk mode, pending PNL cannot be withdrawn (because warmup is frozen)
+#[test]
+fn test_risk_mode_pending_pnl_cannot_be_withdrawn() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+
+    // User has NO capital, only pending PNL
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].warmup_slope_per_step = 10;
+    engine.accounts[user as usize].warmup_started_at_slot = engine.current_slot;
+
+    // Enter risk mode immediately (so warmed amount ~0)
+    engine.enter_risk_reduction_only_mode();
+
+    // Try withdraw 1 - should fail with InsufficientBalance
+    // because capital is 0 and warmup won't progress
+    let result = engine.withdraw(user, 1);
+    assert!(result.is_err(), "Should fail - no capital available");
+    assert_eq!(result.unwrap_err(), RiskError::InsufficientBalance);
+}
+
+// Test D: In risk mode, already-warmed PNL can be withdrawn after conversion
+#[test]
+fn test_risk_mode_already_warmed_pnl_withdrawable() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+
+    // User.pnl=+1000, slope=10, started_at_slot=0
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].warmup_slope_per_step = 10;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+
+    // Advance slot to 10 → warmed=100
+    engine.current_slot = 10;
+    let warmed_before_mode = engine.withdrawable_pnl(&engine.accounts[user as usize]);
+    assert_eq!(warmed_before_mode, 100);
+
+    // Enter risk mode (freezes at slot 10)
+    engine.enter_risk_reduction_only_mode();
+
+    // Call withdraw(50)
+    // Should convert 100 PNL to capital, then withdraw 50
+    let result = engine.withdraw(user, 50);
+    assert!(result.is_ok(), "Should succeed");
+
+    // Check: pnl reduced by 100, capital increased by 100 then decreased by 50
+    assert_eq!(engine.accounts[user as usize].pnl, 900); // 1000 - 100
+    assert_eq!(engine.accounts[user as usize].capital, 50); // 0 + 100 - 50
+}
+
+// Test E: Risk-increasing trade fails in risk mode
+#[test]
+fn test_risk_increasing_trade_fails_in_risk_mode() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+
+    engine.deposit(user, 10_000).unwrap();
+    engine.accounts[lp as usize].capital = 50_000;
+    engine.vault = 60_000;
+
+    // Both start at pos 0
+    assert_eq!(engine.accounts[user as usize].position_size, 0);
+    assert_eq!(engine.accounts[lp as usize].position_size, 0);
+
+    // Enter risk mode
+    engine.enter_risk_reduction_only_mode();
+
+    // Try to open position (0 -> +1, increases absolute exposure)
+    let matcher = NoOpMatcher;
+    let result = engine.execute_trade(&matcher, lp, user, 100_000_000, 1);
+
+    assert!(result.is_err(), "Risk-increasing trade should fail");
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
+}
 
-    // Verify account state unchanged
-    assert_eq!(engine.accounts[user as usize].capital, 10_000);
+// Test F: Reduce-only trade succeeds in risk mode
+#[test]
+fn test_reduce_only_trade_succeeds_in_risk_mode() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+
+    engine.deposit(user, 10_000).unwrap();
+    engine.accounts[lp as usize].capital = 50_000;
+    engine.vault = 60_000;
+
+    // Setup: user pos +10, lp pos -10
+    engine.accounts[user as usize].position_size = 10;
+    engine.accounts[user as usize].entry_price = 100_000_000;
+    engine.accounts[lp as usize].position_size = -10;
+    engine.accounts[lp as usize].entry_price = 100_000_000;
+
+    // Enter risk mode
+    engine.enter_risk_reduction_only_mode();
+
+    // Trade size -5 (reduces user from 10 to 5, LP from -10 to -5)
+    let matcher = NoOpMatcher;
+    let result = engine.execute_trade(&matcher, lp, user, 100_000_000, -5);
+
+    assert!(result.is_ok(), "Reduce-only trade should succeed");
+    assert_eq!(engine.accounts[user as usize].position_size, 5);
+    assert_eq!(engine.accounts[lp as usize].position_size, -5);
+}
+
+// Test G: Exiting mode unfreezes warmup
+#[test]
+fn test_exiting_mode_unfreezes_warmup() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(100).unwrap();
+
+    engine.deposit(user, 10_000).unwrap();
+
+    // Create deficit, enter risk mode
+    engine.loss_accum = 1000;
+    engine.enter_risk_reduction_only_mode();
+
+    assert!(engine.risk_reduction_only);
+    assert!(engine.warmup_paused);
+
+    // Top up to clear loss_accum=0
+    engine.top_up_insurance_fund(1000).unwrap();
+
+    assert_eq!(engine.loss_accum, 0);
+    assert!(!engine.risk_reduction_only, "Should exit risk mode");
+    assert!(!engine.warmup_paused, "Should unfreeze warmup");
 }
 
 #[test]

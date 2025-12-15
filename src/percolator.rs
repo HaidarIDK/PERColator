@@ -526,7 +526,7 @@ impl RiskEngine {
     }
 
     /// Enter risk-reduction-only mode and freeze warmups
-    fn enter_risk_reduction_only_mode(&mut self) {
+    pub fn enter_risk_reduction_only_mode(&mut self) {
         self.risk_reduction_only = true;
         if !self.warmup_paused {
             self.warmup_paused = true;
@@ -535,7 +535,7 @@ impl RiskEngine {
     }
 
     /// Exit risk-reduction-only mode if system is safe (loss fully covered)
-    fn exit_risk_reduction_only_mode_if_safe(&mut self) {
+    pub fn exit_risk_reduction_only_mode_if_safe(&mut self) {
         if self.loss_accum == 0 {
             self.risk_reduction_only = false;
             self.risk_reduction_mode_withdrawn = 0;
