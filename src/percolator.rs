@@ -908,12 +908,17 @@ where
 
         // Calculate haircut ratio BEFORE taking mutable borrow (if needed)
         let actual_amount = if self.withdrawal_only && self.loss_accum > 0 {
-            // Calculate total system principal for haircut ratio
+            // Calculate total system capital for haircut ratio
+            // CRITICAL FIX: Include BOTH user and LP capital
             // Include amounts already withdrawn to maintain fair haircut ratio
-            let current_principal: u128 = self.users.iter()
+            let user_capital: u128 = self.users.iter()
                 .map(|u| u.capital)
                 .sum();
-            let total_principal = add_u128(current_principal, self.withdrawal_mode_withdrawn);
+            let lp_capital: u128 = self.lps.iter()
+                .map(|lp| lp.capital)
+                .sum();
+            let current_capital = add_u128(user_capital, lp_capital);
+            let total_principal = add_u128(current_capital, self.withdrawal_mode_withdrawn);
 
             if total_principal == 0 {
                 return Err(RiskError::InsufficientBalance);
@@ -976,6 +981,114 @@ where
         if self.withdrawal_only {
             self.withdrawal_mode_withdrawn = add_u128(self.withdrawal_mode_withdrawn, actual_amount);
         }
+
+        Ok(())
+    }
+
+    /// Withdraw funds from LP account
+    /// CRITICAL FIX: LPs can now withdraw with same haircut protection as users
+    ///
+    /// This function:
+    /// 1. Converts any warmed-up realized PNL to capital
+    /// 2. Withdraws the requested amount from capital
+    /// 3. Applies proportional haircut if in withdrawal-only mode
+    /// 4. Ensures margin requirements are maintained if LP has open position
+    pub fn lp_withdraw(&mut self, lp_index: usize, amount: u128) -> Result<()> {
+        // Settle funding before any PNL calculations
+        self.touch_lp(lp_index)?;
+
+        // Calculate withdrawable PNL before borrowing mutably
+        let lp = self.lps.get(lp_index).ok_or(RiskError::LPNotFound)?;
+        let warmed_up_pnl = self.withdrawable_pnl(lp);
+
+        // Calculate haircut ratio BEFORE taking mutable borrow (if needed)
+        let actual_amount = if self.withdrawal_only && self.loss_accum > 0 {
+            // Calculate total system capital for haircut ratio
+            // Include BOTH user and LP capital (same calculation as user withdrawal)
+            let user_capital: u128 = self.users.iter()
+                .map(|u| u.capital)
+                .sum();
+            let lp_capital: u128 = self.lps.iter()
+                .map(|lp| lp.capital)
+                .sum();
+            let current_capital = add_u128(user_capital, lp_capital);
+            let total_principal = add_u128(current_capital, self.withdrawal_mode_withdrawn);
+
+            if total_principal == 0 {
+                return Err(RiskError::InsufficientBalance);
+            }
+
+            // Haircut ratio = (total_principal - loss_accum) / total_principal
+            // Actual withdrawal = amount * haircut_ratio
+            let available_principal = if total_principal > self.loss_accum {
+                total_principal.saturating_sub(self.loss_accum)
+            } else {
+                0 // Completely insolvent
+            };
+
+            // Proportional haircut
+            amount.saturating_mul(available_principal) / total_principal
+        } else {
+            amount
+        };
+
+        // Get mutable reference AFTER calculating haircut
+        let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
+
+        // Step 1: Convert warmed-up PNL to capital
+        if warmed_up_pnl > 0 {
+            lp.pnl = lp.pnl.saturating_sub(warmed_up_pnl as i128);
+            lp.capital = add_u128(lp.capital, warmed_up_pnl);
+        }
+
+        // Step 2: Check if LP has enough capital
+        if lp.capital < actual_amount {
+            return Err(RiskError::InsufficientBalance);
+        }
+
+        // Step 3: Calculate new capital after withdrawal
+        let new_capital = sub_u128(lp.capital, actual_amount);
+
+        // Step 4: If LP has open position, ensure initial margin is maintained
+        if lp.position_size != 0 {
+            let position_notional = mul_u128(
+                lp.position_size.abs() as u128,
+                lp.entry_price as u128
+            ) / 1_000_000;
+
+            let initial_margin_required = mul_u128(
+                position_notional,
+                self.params.initial_margin_bps as u128
+            ) / 10_000;
+
+            // Calculate new collateral (capital + positive PNL)
+            let new_collateral = add_u128(new_capital, clamp_pos_i128(lp.pnl));
+
+            if new_collateral < initial_margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
+        }
+
+        // Step 5: Commit the withdrawal
+        lp.capital = new_capital;
+        self.vault = sub_u128(self.vault, actual_amount);
+
+        // Track withdrawal amount if in withdrawal-only mode
+        if self.withdrawal_only {
+            self.withdrawal_mode_withdrawn = add_u128(self.withdrawal_mode_withdrawn, actual_amount);
+        }
+
+        Ok(())
+    }
+
+    /// Deposit funds to LP account
+    /// Mirror of user deposit but for LPs
+    pub fn lp_deposit(&mut self, lp_index: usize, amount: u128) -> Result<()> {
+        // Deposits are allowed even in withdrawal-only mode
+        let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
+
+        lp.capital = add_u128(lp.capital, amount);
+        self.vault = add_u128(self.vault, amount);
 
         Ok(())
     }
@@ -1353,6 +1466,77 @@ where
         if keeper_account != user_index {
             self.update_warmup_slope(keeper_account)?;
         }
+
+        Ok(())
+    }
+
+    /// Liquidate an LP that is below maintenance margin
+    /// CRITICAL FIX: LPs can now be liquidated just like users
+    pub fn liquidate_lp(
+        &mut self,
+        lp_index: usize,
+        keeper_account: usize,
+        oracle_price: u64,
+    ) -> Result<()> {
+        // Settle funding before checking margin and realizing PNL
+        self.touch_lp(lp_index)?;
+
+        let lp = self.lps.get(lp_index).ok_or(RiskError::LPNotFound)?;
+
+        // Check if liquidation is needed using same logic as users
+        let collateral = self.account_collateral(lp);
+        let position_value = mul_u128(lp.position_size.abs() as u128, oracle_price as u128) / 1_000_000;
+        let maintenance_margin = mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+
+        if collateral >= maintenance_margin {
+            return Ok(()); // No liquidation needed
+        }
+
+        let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
+
+        // Calculate liquidation size (reduce position to zero)
+        let liquidation_size = lp.position_size;
+
+        if liquidation_size == 0 {
+            return Ok(()); // No position to liquidate
+        }
+
+        // Calculate liquidation fee
+        let notional = mul_u128(liquidation_size.abs() as u128, oracle_price as u128) / 1_000_000;
+        let liquidation_fee = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
+
+        // Split fee between insurance and keeper
+        let insurance_share = mul_u128(
+            liquidation_fee,
+            self.params.insurance_fee_share_bps as u128
+        ) / 10_000;
+        let keeper_share = sub_u128(liquidation_fee, insurance_share);
+
+        // Realize PNL from position closure
+        let pnl = if lp.position_size > 0 {
+            ((oracle_price as i128 - lp.entry_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+        } else {
+            ((lp.entry_price as i128 - oracle_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+        };
+
+        lp.pnl = lp.pnl.saturating_add(pnl);
+        lp.position_size = 0;
+
+        // Apply fees
+        self.insurance_fund.liquidation_revenue = add_u128(
+            self.insurance_fund.liquidation_revenue,
+            insurance_share
+        );
+        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, insurance_share);
+
+        // Give keeper their share (keeper is a user account)
+        if let Some(keeper) = self.users.get_mut(keeper_account) {
+            keeper.pnl = keeper.pnl.saturating_add(keeper_share as i128);
+        }
+
+        // Update warmup slopes after PNL changes
+        self.update_lp_warmup_slope(lp_index)?;
+        self.update_warmup_slope(keeper_account)?;
 
         Ok(())
     }
