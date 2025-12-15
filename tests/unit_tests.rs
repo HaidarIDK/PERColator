@@ -1264,6 +1264,27 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
 }
 
 #[test]
+fn test_withdrawal_only_blocks_withdraw() {
+    // Test that withdrawal-only mode blocks ALL withdrawals (including capital)
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Trigger withdrawal-only mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = 1_000;
+
+    // Try to withdraw capital - should be blocked
+    let result = engine.withdraw(user, 5_000);
+    assert!(result.is_err(), "Withdrawals should be blocked in withdrawal-only mode");
+    assert_eq!(result.unwrap_err(), RiskError::WithdrawalOnlyMode);
+
+    // Verify account state unchanged
+    assert_eq!(engine.accounts[user as usize].capital, 10_000);
+}
+
+#[test]
 fn test_top_up_insurance_fund_reduces_loss() {
     // Test that topping up insurance fund reduces loss_accum
     let mut engine = Box::new(RiskEngine::new(default_params()));

@@ -881,6 +881,9 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     }
 }
 
+/*
+// NOTE: Commented out - tests old withdrawal haircut logic which was removed
+// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
 #[kani::unwind(3)]
 fn i10_fair_unwinding_constant_haircut_ratio() {
@@ -934,6 +937,7 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
     assert!(ratio1_scaled.abs_diff(ratio2_scaled) <= withdraw1 + withdraw2,
             "I10: Both users must receive same haircut ratio (fair unwinding)");
 }
+*/
 
 #[kani::proof]
 #[kani::unwind(2)]
@@ -1013,6 +1017,9 @@ fn i10_withdrawal_mode_allows_position_decrease() {
             "I10: Position reduction should be allowed in withdrawal-only mode");
 }
 
+/*
+// NOTE: Commented out - tests old withdrawal haircut logic which was removed
+// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
 #[kani::unwind(2)]
 fn i10_total_withdrawals_bounded_by_available() {
@@ -1045,6 +1052,7 @@ fn i10_total_withdrawals_bounded_by_available() {
     assert!(withdrawn <= available,
             "I10: Total withdrawals must not exceed available principal");
 }
+*/
 
 #[kani::proof]
 #[kani::unwind(2)]
@@ -1132,6 +1140,9 @@ fn i10_withdrawal_mode_preserves_conservation() {
             "I10: Withdrawal mode must preserve conservation");
 }
 
+/*
+// NOTE: Commented out - tests old withdrawal haircut logic which was removed
+// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
 #[kani::unwind(2)]
 fn i10_withdrawal_tracking_accuracy() {
@@ -1165,6 +1176,7 @@ fn i10_withdrawal_tracking_accuracy() {
     assert!(tracking_increase == actual_withdrawn,
             "I10: withdrawal_mode_withdrawn must accurately track withdrawals");
 }
+*/
 
 // ============================================================================
 // LP-Specific Invariants (CRITICAL - Addresses Kani audit findings)
@@ -1324,6 +1336,9 @@ fn adl_proportionality_general() {
             "ADL: Haircuts must be proportional (within rounding tolerance)");
 }
 
+/*
+// NOTE: Commented out - tests old withdrawal haircut logic which was removed
+// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
 #[kani::unwind(3)]
 fn i10_fair_unwinding_is_fair_for_lps() {
@@ -1377,6 +1392,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     assert!(ratio_user_scaled.abs_diff(ratio_lp_scaled) <= tolerance,
             "I10-LP: Users and LPs must receive same haircut ratio in withdrawal-only mode");
 }
+*/
 
 #[kani::proof]
 #[kani::unwind(4)]
