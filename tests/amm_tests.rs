@@ -282,12 +282,16 @@ fn test_e2e_warmup_rate_limiting_stress() {
     // Close all positions to realize massive PNL
     for &user in &users {
         engine.execute_trade(&MATCHER, lp, user, boom_price, -10_000).unwrap();
+        // execute_trade automatically calls update_warmup_slope() after PNL changes
     }
 
     // Each user should have large positive PNL (~5000 each = 50k total)
+    let mut total_pnl = 0i128;
     for &user in &users {
         assert!(engine.users[user].pnl_ledger > 1_000);
+        total_pnl += engine.users[user].pnl_ledger;
     }
+    println!("Total realized PNL across all users: {}", total_pnl);
 
     // Verify warmup rate limiting is enforced
     // Max warmup rate = insurance_fund * 0.5 / (T/2)
@@ -295,9 +299,35 @@ fn test_e2e_warmup_rate_limiting_stress() {
     let max_rate = engine.insurance_fund.balance * 5000 / 50 / 10_000;
     assert!(max_rate >= 200, "Max rate should be at least 200");
 
+    println!("Insurance fund balance: {}", engine.insurance_fund.balance);
+    println!("Calculated max warmup rate: {}", max_rate);
+    println!("Actual total warmup rate: {}", engine.total_warmup_rate);
+
+    // CRITICAL: Verify that warmup slopes were actually set by update_warmup_slope()
+    // If total_warmup_rate is 0, it means update_warmup_slope() was never called
+    assert!(engine.total_warmup_rate > 0,
+            "Warmup slopes should be set after PNL changes (update_warmup_slope called by execute_trade)");
+
     // Total warmup rate should not exceed this (allow small rounding tolerance)
     assert!(engine.total_warmup_rate <= max_rate + 5,
             "Warmup rate {} significantly exceeds limit {}", engine.total_warmup_rate, max_rate);
+
+    // CRITICAL: Verify rate limiting is actually constraining the system
+    // Calculate what the total would be WITHOUT rate limiting
+    let total_pnl_u128 = total_pnl as u128;
+    let ideal_total_slope = total_pnl_u128 / engine.params.warmup_period_slots as u128;
+    println!("Ideal total slope (no limiting): {}", ideal_total_slope);
+
+    // If ideal > max_rate, then rate limiting MUST be active
+    if ideal_total_slope > max_rate {
+        assert_eq!(engine.total_warmup_rate, max_rate,
+                   "Rate limiting should cap total slope at max_rate when demand exceeds capacity");
+        println!("✅ Rate limiting is ACTIVE: capped at {} (would be {} without limiting)",
+                 engine.total_warmup_rate, ideal_total_slope);
+    } else {
+        println!("ℹ️  Rate limiting not triggered: demand ({}) below capacity ({})",
+                 ideal_total_slope, max_rate);
+    }
 
     // Users with higher PNL should get proportionally more capacity
     // But sum of all slopes should be capped
@@ -305,8 +335,10 @@ fn test_e2e_warmup_rate_limiting_stress() {
         .map(|&u| engine.users[u].warmup_state.slope_per_step)
         .sum();
 
-    assert_eq!(total_slope, engine.total_warmup_rate);
-    assert!(total_slope <= max_rate);
+    assert_eq!(total_slope, engine.total_warmup_rate,
+               "Sum of individual slopes must equal total_warmup_rate");
+    assert!(total_slope <= max_rate,
+            "Total slope must not exceed max rate");
 
     println!("✅ E2E test passed: Warmup rate limiting under stress works correctly");
     println!("   Total slope: {}, Max rate: {}", total_slope, max_rate);
@@ -428,6 +460,7 @@ fn test_e2e_oracle_attack_protection() {
 
     // Attacker tries to close and realize fake profit
     engine.execute_trade(&MATCHER, lp, attacker, fake_price, -20_000).unwrap();
+    // execute_trade automatically calls update_warmup_slope() after realizing PNL
 
     // Attacker has massive fake PNL
     let attacker_fake_pnl = clamp_pos_i128(engine.users[attacker].pnl_ledger);
@@ -436,17 +469,35 @@ fn test_e2e_oracle_attack_protection() {
     // === Phase 3: Warmup Limiting ===
 
     // Due to warmup rate limiting, attacker's PNL warms up slowly
-    // Max warmup rate = 30000 * 0.5 / 50 = 300 per slot
+    // Max warmup rate = insurance_fund * 0.5 / (T/2)
+    let expected_max_rate = engine.insurance_fund.balance * 5000 / 50 / 10_000;
+
+    println!("Attacker fake PNL: {}", attacker_fake_pnl);
+    println!("Insurance fund: {}", engine.insurance_fund.balance);
+    println!("Expected max warmup rate: {}", expected_max_rate);
+    println!("Actual warmup rate: {}", engine.total_warmup_rate);
+    println!("Attacker slope: {}", engine.users[attacker].warmup_state.slope_per_step);
+
+    // Verify that warmup slope was actually set
+    assert!(engine.users[attacker].warmup_state.slope_per_step > 0,
+            "Attacker's warmup slope should be set after realizing PNL");
+
+    // Verify rate limiting is working (attacker's slope should be constrained)
+    // In a stressed system, individual slope may be less than ideal due to capacity limits
+    let ideal_slope = attacker_fake_pnl / engine.params.warmup_period_slots as u128;
+    println!("Ideal slope (no limiting): {}", ideal_slope);
+    println!("Actual slope (with limiting): {}", engine.users[attacker].warmup_state.slope_per_step);
 
     // Advance only 10 slots (manipulation is detected quickly)
     engine.advance_slot(10);
 
     let attacker_warmed = engine.withdrawable_pnl(&engine.users[attacker]);
+    println!("Attacker withdrawable after 10 slots: {}", attacker_warmed);
 
     // Only a small fraction should be withdrawable
     // Expected: slope was capped by warmup rate limiting + only 10 slots elapsed
     assert!(attacker_warmed < attacker_fake_pnl / 5,
-            "Most fake PNL should still be warming up");
+            "Most fake PNL should still be warming up (got {} out of {})", attacker_warmed, attacker_fake_pnl);
 
     // === Phase 4: Oracle Reverts, ADL Triggered ===
 
