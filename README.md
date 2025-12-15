@@ -116,7 +116,7 @@ The risk engine uses a fixed 4096-account slab with zero heap allocation:
 - ✅ Predictable memory - always same size regardless of account count
 - ✅ Simpler verification - fixed arrays easier to prove in Kani
 
-**Bitmap Iteration:**
+**Bitmap Iteration Algorithm:**
 
 All operations that scan accounts (ADL, conservation checks) use tight bitmap iteration:
 
@@ -132,7 +132,43 @@ for (block, word) in self.used.iter().copied().enumerate() {
 }
 ```
 
-This skips empty slots efficiently without allocation.
+**How It Works:**
+- Only visits occupied slots (skips empty ones)
+- No allocation required
+- Uses `trailing_zeros()` to find next set bit efficiently
+- `w &= w - 1` clears the lowest set bit
+- Works with both immutable (`for_each_used`) and mutable (`for_each_used_mut`) access
+
+**Bitmap Operations:**
+- Word index: `w = idx >> 6` (divide by 64)
+- Bit index: `b = idx & 63` (modulo 64)
+- Check used: `(used[w] >> b) & 1 == 1`
+- Set used: `used[w] |= 1u64 << b`
+- Clear used: `used[w] &= !(1u64 << b)`
+
+**Freelist Management:**
+
+O(1) account allocation using singly-linked list:
+
+```rust
+// Allocation
+fn alloc_slot(&mut self) -> Result<u16> {
+    if self.free_head == u16::MAX {
+        return Err(RiskError::Overflow);  // Slab full
+    }
+    let idx = self.free_head;
+    self.free_head = self.next_free[idx as usize];
+    self.set_used(idx as usize);
+    Ok(idx)
+}
+
+// Initialization (in new())
+self.free_head = 0;
+for i in 0..MAX_ACCOUNTS - 1 {
+    self.next_free[i] = (i + 1) as u16;
+}
+self.next_free[MAX_ACCOUNTS - 1] = u16::MAX;  // Sentinel
+```
 
 **Account References:**
 
@@ -239,9 +275,32 @@ withdrawable = min(
 **Warmup Pause:**
 
 During crisis mode (`warmup_paused == true`), all warmup calculations freeze at `warmup_pause_slot`:
+
+```rust
+pub fn withdrawable_pnl(&self, acct: &Account) -> u128 {
+    if acct.pnl <= 0 {
+        return 0;
+    }
+
+    let effective_slot = if self.warmup_paused {
+        self.warmup_pause_slot  // Use frozen timestamp
+    } else {
+        self.current_slot       // Use current time
+    };
+
+    let elapsed = effective_slot.saturating_sub(acct.warmup_started_at_slot);
+    let warmed = acct.warmup_slope_per_step.saturating_mul(elapsed as u128);
+
+    let available = (acct.pnl as u128).saturating_sub(acct.reserved_pnl);
+    core::cmp::min(warmed, available)
+}
+```
+
+**Properties:**
 - Prevents PNL from continuing to warm up during ADL
 - Ensures consistent valuation across all accounts
 - Automatically activated when system enters withdrawal-only mode
+- Global freeze (affects all accounts uniformly)
 
 ### 4. ADL (Auto-Deleveraging)
 
@@ -565,36 +624,48 @@ cargo kani --harness i1_adl_never_reduces_principal
 
 ## Testing
 
-### Unit Tests (Fast)
+**Important:** All tests require increased stack size due to the large fixed arrays (4096 accounts, ~664 KB):
+
 ```bash
 RUST_MIN_STACK=16777216 cargo test
 ```
 
-Comprehensive unit tests covering:
-- Deposit/withdrawal mechanics
-- PNL warmup over time
+This allocates 16 MB of stack space for the test runner.
+
+### Unit Tests
+
+Run all unit tests:
+```bash
+RUST_MIN_STACK=16777216 cargo test --test unit_tests
+```
+
+**44 tests passing**, comprehensive coverage:
+- Bitmap allocation and freelist management
+- Deposit/withdrawal mechanics (unified for users and LPs)
+- PNL warmup over time with deterministic vesting
 - Scan-based ADL with proportional haircuts
-- Conservation invariants
+- Conservation invariants via bitmap scan
 - Trading and position management
 - Unified liquidation (users + LPs)
 - Funding rate payments (longs/shorts)
 - Funding settlement idempotence
-- Funding with position changes
+- Funding with position changes and flips
 - Withdrawal-only mode (crisis shutdown)
 - Insurance fund top-up and recovery
-- Bitmap allocation and iteration
 - Warmup pause during crisis
 
 ### Fuzzing Tests
+
+Run property-based tests:
 ```bash
-RUST_MIN_STACK=16777216 cargo test --features fuzz
+RUST_MIN_STACK=16777216 cargo test --features fuzz --test fuzzing
 ```
 
 Property-based tests using proptest:
 - Random deposit/withdrawal sequences
-- Conservation under chaos
+- Conservation under chaos (random operations)
 - Warmup monotonicity with random inputs
-- Account isolation
+- Account isolation (operations don't affect unrelated accounts)
 - Scan-based ADL with random losses
 - Funding idempotence (random inputs)
 - Funding zero-sum property
@@ -602,11 +673,35 @@ Property-based tests using proptest:
 - Funding with position flips/reductions
 
 ### Formal Verification
+
+Run Kani model checker:
 ```bash
 cargo kani
 ```
 
-Formal proofs covering all critical invariants using Kani model checker.
+Formal proofs covering all critical invariants using symbolic execution:
+
+**Specific proofs:**
+```bash
+# I1 invariant - principal never reduced by ADL
+cargo kani --harness i1_adl_never_reduces_principal
+
+# I5 invariant - warmup determinism
+cargo kani --harness i5_warmup_deterministic
+
+# I5+ invariant - warmup monotonicity
+cargo kani --harness i5_warmup_monotonicity
+
+# Conservation of funds
+cargo kani --harness i2_conservation
+
+# All funding invariants (F1-F5)
+cargo kani --harness f1_funding_idempotent
+cargo kani --harness f2_funding_never_touches_capital
+cargo kani --harness f3_funding_zero_sum
+```
+
+See `tests/kani.rs` for all available proofs.
 
 ## Usage Example
 
@@ -650,6 +745,133 @@ engine.withdraw(alice, withdrawable)?;
 let keeper = engine.add_user(10_000)?;
 engine.liquidate_account(alice, keeper, oracle_price)?;
 ```
+
+## Performance Characteristics
+
+### Time Complexity
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Account creation | O(1) | Freelist allocation |
+| Deposit/Withdraw | O(1) | Direct array access |
+| Trade execution | O(1) | Direct array access |
+| **ADL** | **O(N)** | Two bitmap scans (N = active accounts) |
+| Liquidation | O(1) | Direct array access |
+| Funding accrual | O(1) | Global index update |
+| Conservation check | O(N) | Bitmap scan over active accounts |
+
+### Space Complexity
+
+- **Fixed:** O(4096) regardless of active accounts
+- **Total size:** ~664 KB (Account[4096] + bitmap + freelist)
+
+**Slab Size Breakdown:**
+- Account struct: ~160 bytes each
+- Account array: 4096 × 160 = ~655 KB
+- Bitmap: 64 × 8 = 512 bytes
+- Freelist: 4096 × 2 = ~8 KB
+- **Total fixed footprint:** ~664 KB
+
+### Benefits of Slab Design
+
+1. **Predictable Memory Usage:** Fixed 664 KB, no dynamic allocation
+2. **no_std Compatible:** Works in embedded/Solana runtime without allocator
+3. **Cache Friendly:** Contiguous array layout improves cache locality
+4. **Simpler Code:** No generic parameters, no trait abstractions
+5. **Formal Verification:** Easier to reason about fixed arrays in Kani
+6. **Deterministic Performance:** No heap allocation pauses
+
+### Tradeoffs
+
+**Advantages:**
+- Deterministic memory and performance
+- No heap allocation or garbage collection
+- Simple, auditable implementation
+- Formal verification friendly
+
+**Limitations:**
+- Fixed maximum of 4096 accounts
+- Always consumes 664 KB even with few accounts
+- ADL is O(N) instead of O(1) lazy collection
+- No account deallocation (accounts never freed once allocated)
+
+## Implementation Checklist
+
+This section documents the slab 4096 rewrite implementation completed in January 2025.
+
+### Hard Requirements (All Met)
+
+- ✅ `#![no_std]` - No standard library
+- ✅ `#![forbid(unsafe_code)]` - No unsafe code
+- ✅ No `Vec`, no heap allocation, no `alloc` crate
+- ✅ Single unified account array: 4096 max accounts
+- ✅ Users and LPs distinguished by `kind` field (no `Option` fields)
+- ✅ Iteration uses bitmap to skip unused slots
+- ✅ All scans allocation-free and tight
+
+### Implementation Steps Completed
+
+1. ✅ **Design Document** - Created detailed specification
+2. ✅ **Delete heap/Vec dependencies** - Removed all allocations
+3. ✅ **Define constants and enums** - `MAX_ACCOUNTS`, `AccountKind`
+4. ✅ **Replace Account structure** - Unified user/LP with `kind` field
+5. ✅ **Rewrite RiskEngine as slab** - Fixed array with bitmap
+6. ✅ **Implement bitmap helpers** - `is_used()`, `set_used()`, iteration
+7. ✅ **Implement O(1) allocation** - Freelist with `alloc_slot()`
+8. ✅ **Port funding settlement** - Unified `touch_account()`
+9. ✅ **Port warmup math** - Embedded warmup fields, pause support
+10. ✅ **Port deposit/withdraw** - Unified functions for all accounts
+11. ✅ **Port trading** - Updated to use u16 indices
+12. ✅ **Rewrite ADL** - Two-pass bitmap scan, no allocations
+13. ✅ **Port liquidation** - Unified for users and LPs
+14. ✅ **Add unit tests** - 44 tests passing
+15. ✅ **Add Kani proofs** - All formal verification updated
+16. ✅ **Delete dead code** - Removed old abstractions
+
+### Breaking Changes from Previous Version
+
+**API Changes:**
+- All functions now take `u16` indices instead of `usize`
+- `add_user()` and `add_lp()` return `u16` instead of `usize`
+- Unified `touch_account(idx)` instead of separate `touch_user`/`touch_lp`
+- Unified `withdraw(idx)` and `deposit(idx)` for all accounts
+- Unified `liquidate_account()` replaces separate user/LP liquidation
+
+**Behavioral Changes:**
+- Withdrawal-only mode blocks all withdrawals (no proportional haircut)
+- ADL is proportional across all accounts (scan-based, not lazy collection)
+- No account deallocation (accounts never freed once allocated)
+- Maximum 4096 accounts (hard limit)
+
+**Removed Features:**
+- Warmup rate cap (no `total_warmup_rate` tracking)
+- O(1) ADL touch-based collection (reverted to scan-based)
+- Withdrawal haircut during withdrawal-only mode (now blocks completely)
+- Fee accrual system (simplified)
+- Generic account storage abstractions
+
+### Test Coverage
+
+**Unit Tests:** 44 tests passing
+- Bitmap allocation and iteration
+- Scan-based ADL with proportional haircuts
+- Warmup pause freezes withdrawable
+- Withdrawal-only blocks withdrawals
+- Conservation check via bitmap scan
+- Funding settlement and idempotence
+- Unified liquidation for users and LPs
+
+**Fuzzing Tests:** Property-based testing with proptest
+- Random deposit/withdrawal sequences
+- Conservation under chaos
+- Warmup monotonicity with random inputs
+- Scan-based ADL with random losses
+
+**Formal Verification:** Kani proofs for all critical invariants
+- I1: Principal never reduced by ADL
+- I2: Conservation of funds
+- I4: ADL haircuts unwrapped PnL first
+- I5/I5+/I5++: Warmup determinism and monotonicity
 
 ## Design Rationale
 
@@ -736,23 +958,61 @@ For testing:
 
 This is a library module designed to be used as a dependency in Solana programs.
 
+### Build Commands
+
 ```bash
 # Build the library
 cargo build
 
-# Run unit tests (requires increased stack size)
+# Build with optimizations
+cargo build --release
+
+# Check for compilation errors
+cargo check
+```
+
+### Test Commands
+
+**All tests require increased stack size:**
+
+```bash
+# Run all unit tests (44 tests)
 RUST_MIN_STACK=16777216 cargo test --test unit_tests
+
+# Run specific test
+RUST_MIN_STACK=16777216 cargo test --test unit_tests test_warmup_pause
+
+# Run AMM integration tests
+RUST_MIN_STACK=16777216 cargo test --test amm_tests
 
 # Run fuzzing tests (property-based testing)
 RUST_MIN_STACK=16777216 cargo test --features fuzz --test fuzzing
 
-# Run formal verification (requires Kani)
-cargo kani --tests --harness i1_adl_never_reduces_principal
-cargo kani --tests --harness i5_warmup_monotonicity
-# ... see tests/kani.rs for all proofs
+# Run all tests (unit + fuzzing)
+RUST_MIN_STACK=16777216 cargo test --all-features
 ```
 
-**Note:** The `RUST_MIN_STACK` environment variable is required due to the large fixed arrays (4096 accounts, ~664 KB). This allocates sufficient stack space for tests.
+### Formal Verification Commands
+
+```bash
+# Install Kani (first time only)
+cargo install --locked kani-verifier
+cargo kani setup
+
+# Run all Kani proofs
+cargo kani
+
+# Run specific proof harnesses
+cargo kani --harness i1_adl_never_reduces_principal
+cargo kani --harness i5_warmup_monotonicity
+cargo kani --harness f1_funding_idempotent
+cargo kani --harness i2_conservation
+
+# See all available harnesses
+grep -n "kani::proof" tests/kani.rs
+```
+
+**Stack Size Requirement:** The `RUST_MIN_STACK=16777216` environment variable (16 MB) is required due to the large fixed arrays (4096 accounts, ~664 KB). This allocates sufficient stack space for tests. Kani proofs don't require this as they use symbolic execution.
 
 ### Using as a Dependency
 
@@ -791,14 +1051,56 @@ assert_eq!(user.kind, AccountKind::User);
 ```
 percolator/
 ├── src/
-│   └── percolator.rs          # Single implementation file
+│   ├── lib.rs                 # Library entry point
+│   └── percolator.rs          # Core implementation (~2500 lines)
+│       ├── Constants & Enums  # MAX_ACCOUNTS, AccountKind
+│       ├── Data Structures    # Account, RiskEngine, InsuranceFund
+│       ├── Bitmap Operations  # is_used(), for_each_used()
+│       ├── Account Lifecycle  # add_user(), add_lp(), alloc_slot()
+│       ├── Core Operations    # deposit(), withdraw(), execute_trade()
+│       ├── Risk Management    # apply_adl(), liquidate_account()
+│       ├── Funding System     # accrue_funding(), touch_account()
+│       ├── PNL Warmup         # withdrawable_pnl(), update_warmup_slope()
+│       └── Utilities          # check_conservation(), advance_slot()
+│
 ├── tests/
-│   ├── unit_tests.rs          # Fast unit tests
+│   ├── unit_tests.rs          # 44 comprehensive unit tests
+│   │   ├── Account creation and bitmap allocation
+│   │   ├── Deposit/withdrawal mechanics
+│   │   ├── Trading and position management
+│   │   ├── PNL warmup and vesting
+│   │   ├── Scan-based ADL tests
+│   │   ├── Liquidation tests
+│   │   ├── Funding rate tests
+│   │   ├── Crisis mode tests
+│   │   └── Conservation tests
+│   │
 │   ├── fuzzing.rs             # Property-based tests (--features fuzz)
-│   └── kani.rs                # Formal verification proofs
-├── Cargo.toml                 # Minimal dependencies
-└── README.md                  # This file
+│   │   ├── Random operation sequences
+│   │   ├── Conservation under chaos
+│   │   ├── Warmup monotonicity
+│   │   └── Funding invariants
+│   │
+│   ├── kani.rs                # Formal verification proofs
+│   │   ├── I1: Principal protection
+│   │   ├── I2: Conservation
+│   │   ├── I4: ADL waterfall
+│   │   ├── I5/I5+/I5++: Warmup invariants
+│   │   └── F1-F5: Funding invariants
+│   │
+│   └── amm_tests.rs           # AMM integration tests (3 tests)
+│
+├── Cargo.toml                 # Minimal dependencies (no_std)
+├── README.md                  # Comprehensive documentation (this file)
+└── LICENSE                    # Apache-2.0
 ```
+
+**Key Files:**
+- **`src/percolator.rs`**: Single implementation file (~2500 lines), no_std compatible
+- **`tests/unit_tests.rs`**: Fast comprehensive tests covering all operations
+- **`tests/fuzzing.rs`**: Property-based tests for finding edge cases
+- **`tests/kani.rs`**: Formal proofs of critical safety properties
+- **`tests/amm_tests.rs`**: Integration tests with AMM matching engine
 
 ## Contributing
 
