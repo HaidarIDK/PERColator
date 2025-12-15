@@ -54,6 +54,7 @@ pub struct UserAccount {
     pub warmup_state: Warmup,      // PNL vesting state
     pub position_size: i128,       // Current position
     pub entry_price: u64,          // Entry price
+    pub funding_index_user: i128,  // Funding index snapshot
     // ... fee tracking fields
 }
 ```
@@ -65,8 +66,11 @@ pub struct LPAccount {
     pub matching_engine_context: [u8; 32],    // Context account
     pub lp_capital: u128,                      // LP deposits
     pub lp_pnl: i128,                          // LP PNL
+    pub lp_reserved_pnl: u128,                 // Reserved LP PNL
+    pub lp_warmup_state: Warmup,               // LP PNL warmup
     pub lp_position_size: i128,                // LP position
     pub lp_entry_price: u64,                   // LP entry
+    pub funding_index_lp: i128,                // Funding index snapshot
 }
 ```
 
@@ -86,29 +90,30 @@ pub struct InsuranceFund {
 **Pluggable Matching Engines:** Order matching is delegated to separate programs via CPI (Cross-Program Invocation). Each LP account specifies its matching engine program.
 
 ```rust
-pub fn execute_trade(
+pub fn execute_trade<M: MatchingEngine>(
     &mut self,
+    matcher: &M,                  // Matching engine implementation
     lp_index: usize,              // LP providing liquidity
     user_index: usize,            // User trading
     oracle_price: u64,            // Oracle price
     size: i128,                   // Position size (+ long, - short)
-    user_signature: &[u8],        // User authorization
 ) -> Result<()>
 ```
 
 **Process:**
-1. Verify user signature authorized the trade
-2. CPI into matching engine program to execute trade
+1. Settle funding for both user and LP (via `touch_user()`/`touch_lp()`)
+2. Call matching engine to validate/execute trade
 3. Apply trading fee → insurance fund
 4. Update LP and user positions
 5. Realize PNL if reducing position
 6. Abort if either account becomes undercollateralized
 
 **Safety:** No whitelist needed for matching engines because:
-- User signature required for all trades
-- Both LP and user must remain solvent (checked)
+- Matching engine validates trade authorization (implementation-specific)
+- Both LP and user must remain solvent (checked by risk engine)
 - Fees flow to insurance fund
 - PNL changes are zero-sum between LP and user
+- Funding settled before position changes
 
 ### 2. Deposits & Withdrawals
 
@@ -120,21 +125,24 @@ pub fn deposit(&mut self, user_index: usize, amount: u128) -> Result<()>
 - Increases `principal` and `vault`
 - Preserves conservation
 
-#### Withdraw Principal
+#### Withdraw
 ```rust
-pub fn withdraw_principal(&mut self, user_index: usize, amount: u128) -> Result<()>
+pub fn withdraw(&mut self, user_index: usize, amount: u128) -> Result<()>
 ```
-- Allowed up to `principal` balance
-- Must maintain margin requirements if user has position
-- Never touches PNL
 
-#### Withdraw PNL
-```rust
-pub fn withdraw_pnl(&mut self, user_index: usize, amount: u128) -> Result<()>
-```
-- Only warmed-up PNL can be withdrawn
-- Limited by insurance fund balance
-- Requires PNL to have vested over time T
+Unified withdrawal function that handles both principal and PNL:
+
+**Process:**
+1. Settle funding (via `touch_user()`)
+2. Convert warmed-up PNL to principal
+3. Withdraw requested amount from principal
+4. Ensure margin requirements maintained if user has open position
+
+**Key Properties:**
+- Withdrawable = principal + warmed_up_pnl - margin_required
+- Automatically converts vested PNL to principal before withdrawal
+- Must maintain initial margin if position is open
+- Never allows withdrawal below margin requirements
 
 ### 3. PNL Warmup
 
@@ -408,25 +416,28 @@ let params = RiskParams {
 
 let mut engine = RiskEngine::new(params);
 
-// Add users and LPs
-let alice = engine.add_user();
-let lp = engine.add_lp(matching_program_id, matching_context);
+// Add users and LPs (with account creation fees)
+let alice = engine.add_user(10_000)?;  // Pay account creation fee
+let lp = engine.add_lp(matching_program_id, matching_context, 10_000)?;
 
 // Alice deposits
 engine.deposit(alice, 10_000)?;
 
+// Define a matcher (NoOpMatcher for tests, or custom implementation)
+let matcher = NoOpMatcher;
+
 // Alice trades (via matching engine)
-engine.execute_trade(lp, alice, 1_000_000, 100, &signature)?;
+engine.execute_trade(&matcher, lp, alice, 1_000_000, 100)?;
 
 // Time passes...
 engine.advance_slot(50);
 
-// Alice can withdraw some PNL (50 slots × slope)
+// Alice can withdraw (warmed-up PNL is automatically converted to principal)
 let withdrawable = engine.withdrawable_pnl(&engine.users[alice]);
-engine.withdraw_pnl(alice, withdrawable)?;
+engine.withdraw(alice, withdrawable)?;
 
 // Liquidations (permissionless)
-let keeper = engine.add_user();
+let keeper = engine.add_user(10_000)?;
 engine.liquidate_user(alice, keeper, oracle_price)?;
 ```
 
