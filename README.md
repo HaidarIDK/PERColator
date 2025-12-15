@@ -30,8 +30,8 @@ All data structures are laid out in a single contiguous memory chunk, suitable f
 ├─────────────────────────────────────┤
 │ - vault: u128                       │
 │ - insurance_fund: InsuranceFund     │
-│ - users: Vec<UserAccount>           │
-│ - lps: Vec<LPAccount>               │
+│ - users: Vec<Account>               │  ← Unified type (matching_engine = None)
+│ - lps: Vec<Account>                 │  ← Unified type (matching_engine = Some(...))
 │ - params: RiskParams                │
 │ - current_slot: u64                 │
 │ - fee_index: u128                   │
@@ -40,7 +40,7 @@ All data structures are laid out in a single contiguous memory chunk, suitable f
 │ - fee_carry: u128                   │
 │ - funding_index_qpb_e6: i128        │
 │ - last_funding_slot: u64            │
-│ - total_warmup_rate: u128           │
+│ - total_warmup_rate: u128           │  ← Shared by users AND LPs
 │ - withdrawal_only: bool             │
 │ - withdrawal_mode_withdrawn: u128   │
 └─────────────────────────────────────┘
@@ -48,34 +48,32 @@ All data structures are laid out in a single contiguous memory chunk, suitable f
 
 ### Core Data Structures
 
-#### UserAccount
+#### Account (Unified for Users and LPs)
 ```rust
-pub struct UserAccount {
-    pub principal: u128,           // NEVER reduced by ADL (Invariant I1)
-    pub pnl_ledger: i128,          // Realized PNL (+ or -)
-    pub reserved_pnl: u128,        // Pending withdrawals
-    pub warmup_state: Warmup,      // PNL vesting state
-    pub position_size: i128,       // Current position
-    pub entry_price: u64,          // Entry price
-    pub funding_index_user: i128,  // Funding index snapshot
-    // ... fee tracking fields
+pub struct Account {
+    // Universal fields
+    pub capital: u128,                        // Deposited capital (NEVER reduced by ADL - I1)
+    pub pnl: i128,                            // Realized PNL (+ or -)
+    pub reserved_pnl: u128,                   // Pending withdrawals
+    pub warmup_state: Warmup,                 // PNL vesting state
+    pub position_size: i128,                  // Current position
+    pub entry_price: u64,                     // Entry price
+    pub fee_index: u128,                      // Fee index snapshot
+    pub fee_accrued: u128,                    // Accrued fees
+    pub vested_pos_snapshot: u128,            // Vested PNL cache
+    pub funding_index: i128,                  // Funding index snapshot
+
+    // LP-specific (optional)
+    pub matching_engine_program: Option<[u8; 32]>,   // None = user, Some = LP
+    pub matching_engine_context: Option<[u8; 32]>,   // LP context account
 }
 ```
 
-#### LPAccount
-```rust
-pub struct LPAccount {
-    pub matching_engine_program: [u8; 32],    // Program ID
-    pub matching_engine_context: [u8; 32],    // Context account
-    pub lp_capital: u128,                      // LP deposits
-    pub lp_pnl: i128,                          // LP PNL
-    pub lp_reserved_pnl: u128,                 // Reserved LP PNL
-    pub lp_warmup_state: Warmup,               // LP PNL warmup
-    pub lp_position_size: i128,                // LP position
-    pub lp_entry_price: u64,                   // LP entry
-    pub funding_index_lp: i128,                // Funding index snapshot
-}
-```
+**Key Innovation**: By unifying UserAccount and LPAccount into a single Account type:
+- ✅ LPs receive **same risk management** as users (warmup, ADL, liquidations)
+- ✅ Eliminates 1000+ lines of code duplication
+- ✅ Makes I1 invariant truly universal (both users and LPs protected)
+- ✅ Prevents LP insolvency from socializing losses to users
 
 #### InsuranceFund
 ```rust
