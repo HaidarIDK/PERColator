@@ -1167,3 +1167,285 @@ fn i10_withdrawal_tracking_accuracy() {
             "I10: withdrawal_mode_withdrawn must accurately track withdrawals");
 }
 
+// ============================================================================
+// LP-Specific Invariants (CRITICAL - Addresses Kani audit findings)
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn i1_lp_adl_never_reduces_capital() {
+    // I1 for LPs: ADL must NEVER reduce LP capital
+    // This is the LP equivalent of i1_adl_never_reduces_principal
+
+    let mut engine = RiskEngine::new(test_params());
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Set arbitrary but bounded values
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(capital < 100_000);
+    kani::assume(pnl > -100_000 && pnl < 100_000);
+    kani::assume(loss < 100_000);
+
+    engine.lps[lp_idx].capital = capital;
+    engine.lps[lp_idx].pnl = pnl;
+    engine.insurance_fund.balance = 1_000_000; // Large insurance
+
+    let capital_before = engine.lps[lp_idx].capital;
+
+    let _ = engine.apply_adl(loss);
+
+    assert!(engine.lps[lp_idx].capital == capital_before,
+            "I1-LP: ADL must NEVER reduce LP capital");
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn i1_lp_liquidation_never_reduces_capital() {
+    // I1 for LPs: Liquidation must NEVER reduce LP capital
+    // LP capital can only be reduced by explicit withdrawals, never by liquidation
+
+    let mut engine = RiskEngine::new(test_params());
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let keeper_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let oracle_price: u64 = kani::any();
+
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(position != 0 && position > -50_000 && position < 50_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 10_000_000); // $0.10 to $10
+
+    engine.lps[lp_idx].capital = capital;
+    engine.lps[lp_idx].position_size = position;
+    engine.lps[lp_idx].entry_price = 1_000_000; // $1
+    engine.vault = capital;
+
+    let capital_before = engine.lps[lp_idx].capital;
+
+    let _ = engine.liquidate_lp(lp_idx, keeper_idx, oracle_price);
+
+    assert!(engine.lps[lp_idx].capital == capital_before,
+            "I1-LP: Liquidation must NEVER reduce LP capital");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn adl_is_proportional_for_user_and_lp() {
+    // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
+    // should receive equal haircuts
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let pnl: i128 = kani::any();
+    let loss: u128 = kani::any();
+
+    // Both have the same unwrapped PNL
+    kani::assume(pnl > 0 && pnl < 50_000);
+    kani::assume(loss > 0 && loss < 100_000);
+
+    engine.users[user_idx].pnl = pnl;
+    engine.lps[lp_idx].pnl = pnl;
+    engine.insurance_fund.balance = 1_000_000;
+
+    // Both start with no reserved PNL and no warmup
+    // (so all PNL is unwrapped)
+    engine.users[user_idx].reserved_pnl = 0;
+    engine.lps[lp_idx].reserved_pnl = 0;
+    engine.users[user_idx].warmup_state.slope_per_step = 0;
+    engine.lps[lp_idx].warmup_state.slope_per_step = 0;
+
+    let user_pnl_before = engine.users[user_idx].pnl;
+    let lp_pnl_before = engine.lps[lp_idx].pnl;
+
+    let _ = engine.apply_adl(loss);
+
+    let user_loss = user_pnl_before - engine.users[user_idx].pnl;
+    let lp_loss = lp_pnl_before - engine.lps[lp_idx].pnl;
+
+    // Both should lose the same amount (proportional means equal when starting equal)
+    assert!(user_loss == lp_loss,
+            "ADL: User and LP with equal unwrapped PNL must receive equal haircuts");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn adl_proportionality_general() {
+    // General proportional ADL: Haircut percentages should be equal
+    // even when PNL amounts differ
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(user_pnl > 0 && user_pnl < 30_000);
+    kani::assume(lp_pnl > 0 && lp_pnl < 30_000);
+    kani::assume(loss > 0 && loss < 50_000);
+    kani::assume(user_pnl != lp_pnl); // Different amounts
+
+    engine.users[user_idx].pnl = user_pnl;
+    engine.lps[lp_idx].pnl = lp_pnl;
+    engine.insurance_fund.balance = 1_000_000;
+
+    // No reserved PNL, no warmup (all unwrapped)
+    engine.users[user_idx].reserved_pnl = 0;
+    engine.lps[lp_idx].reserved_pnl = 0;
+    engine.users[user_idx].warmup_state.slope_per_step = 0;
+    engine.lps[lp_idx].warmup_state.slope_per_step = 0;
+
+    let user_pnl_before = engine.users[user_idx].pnl;
+    let lp_pnl_before = engine.lps[lp_idx].pnl;
+
+    let _ = engine.apply_adl(loss);
+
+    let user_loss = (user_pnl_before - engine.users[user_idx].pnl) as u128;
+    let lp_loss = (lp_pnl_before - engine.lps[lp_idx].pnl) as u128;
+
+    // Check proportionality using cross-multiplication to avoid division
+    // user_loss / user_pnl == lp_loss / lp_pnl
+    // <=> user_loss * lp_pnl == lp_loss * user_pnl
+
+    let cross1 = user_loss.saturating_mul(lp_pnl as u128);
+    let cross2 = lp_loss.saturating_mul(user_pnl as u128);
+
+    // Allow for rounding error of up to (total_pnl) due to integer division
+    let total_pnl = (user_pnl + lp_pnl) as u128;
+    let diff = if cross1 > cross2 { cross1 - cross2 } else { cross2 - cross1 };
+
+    assert!(diff <= total_pnl,
+            "ADL: Haircuts must be proportional (within rounding tolerance)");
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn i10_fair_unwinding_is_fair_for_lps() {
+    // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
+    // This extends i10_fair_unwinding_constant_haircut_ratio to include LPs
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(user_capital > 1_000 && user_capital < 10_000);
+    kani::assume(lp_capital > 1_000 && lp_capital < 10_000);
+    kani::assume(loss > 0 && loss < 5_000);
+
+    engine.users[user_idx].capital = user_capital;
+    engine.lps[lp_idx].capital = lp_capital;
+    engine.vault = user_capital + lp_capital;
+
+    let total_capital = user_capital + lp_capital;
+    kani::assume(total_capital > loss); // Not completely insolvent
+
+    // Trigger withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+
+    // User withdraws half their capital
+    let withdraw_user = user_capital / 2;
+    let _ = engine.withdraw(user_idx, withdraw_user);
+    let actual_user = user_capital - engine.users[user_idx].capital;
+
+    // LP withdraws half their capital
+    let withdraw_lp = lp_capital / 2;
+    let _ = engine.lp_withdraw(lp_idx, withdraw_lp);
+    let actual_lp = lp_capital - engine.lps[lp_idx].capital;
+
+    // Both should get the same haircut ratio
+    // ratio_user = actual_user / withdraw_user
+    // ratio_lp = actual_lp / withdraw_lp
+    // These should be equal (within rounding)
+
+    let ratio_user_scaled = actual_user * withdraw_lp;
+    let ratio_lp_scaled = actual_lp * withdraw_user;
+
+    // Allow for rounding error
+    let tolerance = withdraw_user + withdraw_lp;
+
+    assert!(ratio_user_scaled.abs_diff(ratio_lp_scaled) <= tolerance,
+            "I10-LP: Users and LPs must receive same haircut ratio in withdrawal-only mode");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn multiple_lps_adl_preserves_all_capitals() {
+    // Multi-LP ADL: All LP capitals are preserved, similar to multiple_users_adl_preserves_all_principals
+
+    let mut engine = RiskEngine::new(test_params());
+    let lp1 = engine.add_lp([1u8; 32], [1u8; 32], 1).unwrap();
+    let lp2 = engine.add_lp([2u8; 32], [2u8; 32], 1).unwrap();
+
+    let c1: u128 = kani::any();
+    let c2: u128 = kani::any();
+    let pnl1: i128 = kani::any();
+    let pnl2: i128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(c1 < 5_000);
+    kani::assume(c2 < 5_000);
+    kani::assume(pnl1 > -5_000 && pnl1 < 5_000);
+    kani::assume(pnl2 > -5_000 && pnl2 < 5_000);
+    kani::assume(loss < 10_000);
+
+    engine.lps[lp1].capital = c1;
+    engine.lps[lp1].pnl = pnl1;
+    engine.lps[lp2].capital = c2;
+    engine.lps[lp2].pnl = pnl2;
+    engine.insurance_fund.balance = 100_000;
+
+    let _ = engine.apply_adl(loss);
+
+    assert!(engine.lps[lp1].capital == c1,
+            "Multi-LP ADL: LP1 capital preserved");
+    assert!(engine.lps[lp2].capital == c2,
+            "Multi-LP ADL: LP2 capital preserved");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn mixed_users_and_lps_adl_preserves_all_capitals() {
+    // Mixed ADL: Both user and LP capitals are preserved together
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(user_capital < 5_000);
+    kani::assume(lp_capital < 5_000);
+    kani::assume(user_pnl > -5_000 && user_pnl < 5_000);
+    kani::assume(lp_pnl > -5_000 && lp_pnl < 5_000);
+    kani::assume(loss < 10_000);
+
+    engine.users[user_idx].capital = user_capital;
+    engine.users[user_idx].pnl = user_pnl;
+    engine.lps[lp_idx].capital = lp_capital;
+    engine.lps[lp_idx].pnl = lp_pnl;
+    engine.insurance_fund.balance = 100_000;
+
+    let _ = engine.apply_adl(loss);
+
+    assert!(engine.users[user_idx].capital == user_capital,
+            "Mixed ADL: User capital preserved");
+    assert!(engine.lps[lp_idx].capital == lp_capital,
+            "Mixed ADL: LP capital preserved");
+}
+
