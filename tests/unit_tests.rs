@@ -1112,3 +1112,265 @@ fn test_warmup_rate_limit_invariant_maintained() {
                 "Invariant violated: {} > {}", max_total_warmup_in_half_period, insurance_limit);
     }
 }
+
+// ============================================================================
+// Withdrawal-Only Mode Tests
+// ============================================================================
+
+#[test]
+fn test_withdrawal_only_mode_triggered_by_loss() {
+    // Test that loss_accum > 0 triggers withdrawal-only mode
+    let mut engine = RiskEngine::new(default_params());
+
+    let user1 = engine.add_user(100).unwrap();
+    let user2 = engine.add_user(100).unwrap();
+
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 10_000).unwrap();
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 5_000;
+
+    // Simulate a loss event that depletes insurance fund
+    let loss = 10_000;
+    engine.apply_adl(loss).unwrap();
+
+    // Should be in withdrawal-only mode
+    assert!(engine.withdrawal_only);
+    assert_eq!(engine.loss_accum, 5_000); // 10k loss - 5k insurance = 5k loss_accum
+    assert_eq!(engine.insurance_fund.balance, 0);
+}
+
+#[test]
+fn test_proportional_haircut_on_withdrawal() {
+    // Test that withdrawals are haircutted proportionally when loss_accum > 0
+    let mut engine = RiskEngine::new(default_params());
+
+    let user1 = engine.add_user(100).unwrap();
+    let user2 = engine.add_user(100).unwrap();
+
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 5_000).unwrap();
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 1_000;
+
+    // Total principal = 15,000
+    // Trigger loss that creates 3,000 loss_accum
+    engine.apply_adl(4_000).unwrap();
+
+    assert_eq!(engine.loss_accum, 3_000); // 4k - 1k insurance
+    assert!(engine.withdrawal_only);
+
+    // Available principal = 15,000 - 3,000 = 12,000
+    // Haircut ratio = 12,000 / 15,000 = 80%
+
+    // User1 tries to withdraw 10,000
+    // Fair unwinding: Should get 80% regardless of order
+    // Gets: 10,000 * 0.8 = 8,000
+    let user1_balance_before = engine.users[user1].principal;
+    engine.withdraw(user1, 10_000).unwrap();
+    let withdrawn = user1_balance_before - engine.users[user1].principal;
+
+    assert_eq!(withdrawn, 8_000, "Should withdraw 80% due to haircut");
+
+    // User2 tries to withdraw 5,000
+    // Fair unwinding: Also gets 80% (not less than user1)
+    // Gets: 5,000 * 0.8 = 4,000
+    let user2_balance_before = engine.users[user2].principal;
+    engine.withdraw(user2, 5_000).unwrap();
+    let user2_withdrawn = user2_balance_before - engine.users[user2].principal;
+
+    assert_eq!(user2_withdrawn, 4_000, "Should also get 80% (fair unwinding)");
+
+    // Total withdrawn: 8,000 + 4,000 = 12,000
+    // Exactly the available principal (15k - 3k loss = 12k)
+    let total_withdrawn = withdrawn + user2_withdrawn;
+    assert_eq!(total_withdrawn, 12_000);
+}
+
+#[test]
+fn test_closing_positions_allowed_in_withdrawal_mode() {
+    // Test that users can close positions in withdrawal-only mode
+    let mut engine = RiskEngine::new(default_params());
+
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+    let user = engine.add_user(100).unwrap();
+
+    engine.deposit(user, 10_000).unwrap();
+    engine.lps[lp].lp_capital = 50_000;
+    engine.vault = 60_000;
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 1_000;
+
+    // User opens long position
+    let matcher = NoOpMatcher;
+    engine.execute_trade(&matcher, lp, user, 1_000_000, 5_000).unwrap();
+    assert_eq!(engine.users[user].position_size, 5_000);
+
+    // Trigger withdrawal-only mode
+    engine.apply_adl(2_000).unwrap();
+    assert!(engine.withdrawal_only);
+
+    // User can CLOSE position (reducing from 5000 to 0)
+    let result = engine.execute_trade(&matcher, lp, user, 1_000_000, -5_000);
+    assert!(result.is_ok(), "Closing position should be allowed");
+    assert_eq!(engine.users[user].position_size, 0);
+}
+
+#[test]
+fn test_opening_positions_blocked_in_withdrawal_mode() {
+    // Test that opening new positions is blocked in withdrawal-only mode
+    let mut engine = RiskEngine::new(default_params());
+
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+    let user = engine.add_user(100).unwrap();
+
+    engine.deposit(user, 10_000).unwrap();
+    engine.lps[lp].lp_capital = 50_000;
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 1_000;
+
+    // Trigger withdrawal-only mode
+    engine.apply_adl(2_000).unwrap();
+    assert!(engine.withdrawal_only);
+
+    // User tries to open new position - should fail
+    let matcher = NoOpMatcher;
+    let result = engine.execute_trade(&matcher, lp, user, 1_000_000, 5_000);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), RiskError::WithdrawalOnlyMode);
+}
+
+#[test]
+fn test_top_up_insurance_fund_reduces_loss() {
+    // Test that topping up insurance fund reduces loss_accum
+    let mut engine = RiskEngine::new(default_params());
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 1_000;
+
+    // Trigger withdrawal-only mode with 4k loss_accum
+    engine.apply_adl(5_000).unwrap();
+    assert_eq!(engine.loss_accum, 4_000);
+    assert!(engine.withdrawal_only);
+
+    // Top up with 2k - should reduce loss to 2k
+    let exited = engine.top_up_insurance_fund(2_000).unwrap();
+    assert_eq!(engine.loss_accum, 2_000);
+    assert!(engine.withdrawal_only); // Still in withdrawal mode
+    assert!(!exited);
+
+    // Top up with another 2k - should fully cover loss
+    let exited = engine.top_up_insurance_fund(2_000).unwrap();
+    assert_eq!(engine.loss_accum, 0);
+    assert!(!engine.withdrawal_only); // Exited withdrawal mode
+    assert!(exited);
+}
+
+#[test]
+fn test_deposits_allowed_in_withdrawal_mode() {
+    // Test that deposits are allowed and take on proportional loss
+    let mut engine = RiskEngine::new(default_params());
+
+    let user1 = engine.add_user(100).unwrap();
+    let user2 = engine.add_user(100).unwrap();
+
+    engine.deposit(user1, 10_000).unwrap();
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 1_000;
+
+    // Trigger withdrawal-only mode
+    engine.apply_adl(2_000).unwrap();
+    assert_eq!(engine.loss_accum, 1_000);
+    assert!(engine.withdrawal_only);
+
+    // User2 deposits - should be allowed
+    let result = engine.deposit(user2, 5_000);
+    assert!(result.is_ok(), "Deposits should be allowed in withdrawal mode");
+
+    // Total principal now 15k, loss still 1k
+    // User2's share of loss: (5k / 15k) * 1k ≈ 333
+    // So user2 can withdraw: 5k - 333 ≈ 4,667
+
+    let user2_balance_before = engine.users[user2].principal;
+    engine.withdraw(user2, 5_000).unwrap();
+    let user2_withdrawn = user2_balance_before - engine.users[user2].principal;
+
+    // Should be less than full amount due to proportional haircut
+    assert!(user2_withdrawn < 5_000);
+    assert!(user2_withdrawn > 4_600); // Approximately 4,667
+}
+
+#[test]
+fn test_fair_unwinding_scenario() {
+    // End-to-end test of fair unwinding when system becomes insolvent
+    let mut engine = RiskEngine::new(default_params());
+
+    // 3 users deposit
+    let alice = engine.add_user(100).unwrap();
+    let bob = engine.add_user(100).unwrap();
+    let charlie = engine.add_user(100).unwrap();
+
+    engine.deposit(alice, 10_000).unwrap();
+    engine.deposit(bob, 20_000).unwrap();
+    engine.deposit(charlie, 10_000).unwrap();
+
+    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
+    engine.insurance_fund.balance = 5_000;
+
+    // Total principal: 40k
+    // Insurance fund: 5k
+    // Total system: 45k
+
+    // Catastrophic loss event: 15k loss
+    engine.apply_adl(15_000).unwrap();
+
+    // Loss_accum = 15k - 5k = 10k
+    // Insurance depleted
+    // Available principal = 40k - 10k = 30k
+    // Haircut ratio = 30k / 40k = 75%
+
+    assert_eq!(engine.loss_accum, 10_000);
+    assert_eq!(engine.insurance_fund.balance, 0);
+    assert!(engine.withdrawal_only);
+
+    // With fair unwinding, everyone gets the same haircut ratio (75%)
+    // regardless of withdrawal order
+
+    // Alice withdraws all (10k * 75% = 7.5k)
+    let alice_before = engine.users[alice].principal;
+    engine.withdraw(alice, 10_000).unwrap();
+    let alice_got = alice_before - engine.users[alice].principal;
+    assert_eq!(alice_got, 7_500);
+
+    // Bob withdraws all (20k * 75% = 15k)
+    // Fair unwinding: haircut ratio stays 75% because we track withdrawn amounts
+    let bob_before = engine.users[bob].principal;
+    engine.withdraw(bob, 20_000).unwrap();
+    let bob_got = bob_before - engine.users[bob].principal;
+    assert_eq!(bob_got, 15_000);
+
+    // Charlie withdraws all (10k * 75% = 7.5k)
+    let charlie_before = engine.users[charlie].principal;
+    engine.withdraw(charlie, 10_000).unwrap();
+    let charlie_got = charlie_before - engine.users[charlie].principal;
+    assert_eq!(charlie_got, 7_500);
+
+    // Total withdrawn: 7.5k + 15k + 7.5k = 30k
+    // Exactly the available principal (fair unwinding!)
+    let total_withdrawn = alice_got + bob_got + charlie_got;
+    assert_eq!(total_withdrawn, 30_000);
+
+    // All users proportionally haircutted (25% loss each)
+    assert_eq!(alice_got * 100 / alice_before, 75);
+    assert_eq!(bob_got * 100 / bob_before, 75);
+    assert_eq!(charlie_got * 100 / charlie_before, 75);
+}
+

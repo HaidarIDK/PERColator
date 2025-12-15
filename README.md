@@ -40,6 +40,9 @@ All data structures are laid out in a single contiguous memory chunk, suitable f
 │ - fee_carry: u128                   │
 │ - funding_index_qpb_e6: i128        │
 │ - last_funding_slot: u64            │
+│ - total_warmup_rate: u128           │
+│ - withdrawal_only: bool             │
+│ - withdrawal_mode_withdrawn: u128   │
 └─────────────────────────────────────┘
 ```
 
@@ -289,7 +292,163 @@ is_safe = collateral >= margin_required
 - Keeper receives fee (incentive to call)
 - Insurance fund builds reserves
 
-### 6. Funding Rates
+### 6. Withdrawal-Only Mode (Fair Unwinding)
+
+When the insurance fund is depleted and losses exceed what can be covered (`loss_accum > 0`), the system automatically enters **withdrawal-only mode** - a controlled shutdown mechanism that ensures fair unwinding for all participants.
+
+```rust
+pub fn apply_adl(&mut self, total_loss: u128) -> Result<()>
+```
+
+**Trigger Condition:**
+When ADL Phase 2 depletes the insurance fund, `withdrawal_only` flag is set:
+```rust
+if self.insurance_fund.balance < remaining_loss {
+    // Insurance fund depleted - crisis mode
+    self.loss_accum = remaining_loss - insurance_fund.balance;
+    self.withdrawal_only = true;  // Enter controlled shutdown
+}
+```
+
+#### Fair Unwinding Mechanism
+
+**Key Property: Constant Haircut Ratio**
+
+All withdrawals receive the same proportional haircut regardless of withdrawal order:
+
+```
+haircut_ratio = (total_principal - loss_accum) / total_principal
+actual_withdrawal = requested_amount × haircut_ratio
+```
+
+**Example:**
+- Total principal: 40,000 USDC (across all users)
+- Loss accumulated: 10,000 USDC
+- Available: 30,000 USDC
+- **Haircut ratio: 75% for EVERYONE**
+
+```
+User A deposits: 10,000 → withdraws 7,500 (75%)
+User B deposits: 20,000 → withdraws 15,000 (75%)
+User C deposits: 10,000 → withdraws 7,500 (75%)
+Total withdrawn: 30,000 (exactly the available amount)
+```
+
+**Implementation Detail:**
+
+To maintain a constant haircut ratio despite changing principal amounts, the system tracks withdrawn amounts:
+
+```rust
+// Include already-withdrawn amounts in haircut calculation
+let current_principal = users.iter().map(|u| u.principal).sum();
+let total_principal = current_principal + withdrawal_mode_withdrawn;
+
+// Everyone gets same ratio
+let haircut_ratio = (total_principal - loss_accum) / total_principal;
+```
+
+This prevents "run on the bank" dynamics where early withdrawers get better rates.
+
+#### Restrictions in Withdrawal-Only Mode
+
+**Blocked Operations:**
+- ❌ Opening new positions
+- ❌ Increasing existing positions
+
+**Allowed Operations:**
+- ✅ Closing positions (users can unwind)
+- ✅ Reducing positions
+- ✅ User deposits (take on proportional loss)
+- ✅ Withdrawals (with proportional haircut)
+- ✅ Insurance fund top-ups
+
+**Position Management:**
+```rust
+// In withdrawal_only mode, only allow reducing positions
+if new_position.abs() > current_position.abs() {
+    return Err(RiskError::WithdrawalOnlyMode);
+}
+```
+
+This allows orderly unwinding while preventing new risk-taking.
+
+#### Recovery Path: Insurance Fund Top-Up
+
+Anyone can contribute to the insurance fund to cover losses and restore normal operations:
+
+```rust
+pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool>
+```
+
+**Process:**
+1. Contribution directly reduces `loss_accum` first
+2. Remaining amount goes to insurance fund balance
+3. If `loss_accum` reaches 0, **exits withdrawal-only mode** automatically
+4. Trading resumes once solvency is restored
+
+**Example:**
+```rust
+// System in crisis: loss_accum = 5,000
+engine.withdrawal_only == true
+
+// Someone tops up 3,000
+engine.top_up_insurance_fund(3_000)?;
+// loss_accum now 2,000, still in withdrawal mode
+
+// Another 2,000 top-up
+let exited = engine.top_up_insurance_fund(2_000)?;
+assert!(exited);  // Exits withdrawal mode
+assert!(!engine.withdrawal_only);  // Trading resumes
+```
+
+#### Design Benefits
+
+**Fairness:**
+- All users lose same percentage of principal
+- No first-mover advantage
+- Transparent and deterministic
+
+**Controlled Shutdown:**
+- Prevents further risk-taking
+- Allows orderly position unwinding
+- Users can still close positions to reduce exposure
+
+**Recovery Mechanism:**
+- Clear path to restore solvency
+- Economic incentive for insurance fund contributions
+- Automatic return to normal operations
+
+**Transparency:**
+- Single flag indicates system state
+- Clear loss amount (`loss_accum`)
+- Predictable withdrawal amounts
+
+#### Security Properties
+
+**Invariants:**
+- Total withdrawals in withdrawal-only mode ≤ `total_principal - loss_accum`
+- All users receive same haircut percentage
+- Principal tracking remains accurate despite withdrawals
+- Conservation maintained throughout unwinding
+
+**Attack Resistance:**
+- No withdrawal order gaming (constant haircut ratio)
+- No exploitation through position manipulation
+- Clear separation of crisis vs normal operations
+
+#### Test Coverage
+
+7 comprehensive tests verify withdrawal-only mode behavior:
+- Mode activation on insurance depletion
+- Proportional haircut calculation
+- Position closing allowed, opening blocked
+- Deposits allowed and take proportional loss
+- Insurance fund top-up reduces loss
+- End-to-end fair unwinding scenario
+
+See `tests/unit_tests.rs:1116-1374` for full test suite.
+
+### 7. Funding Rates
 
 **O(1) Perpetual Funding** with cumulative index pattern:
 
@@ -381,16 +540,17 @@ All critical invariants are proven using Kani, a model checker for Rust.
 
 | ID | Property | File |
 |----|----------|------|
-| **I1** | User principal NEVER reduced by ADL | `tests/kani.rs:21` |
-| **I2** | Conservation of funds | `tests/kani.rs:44` |
+| **I1** | User principal NEVER reduced by ADL | `tests/kani.rs:45` |
+| **I2** | Conservation of funds | `tests/kani.rs:76` |
 | **I3** | Authorization enforced | (implied by signature checks) |
 | **I4** | ADL haircuts unwrapped PNL first | `tests/kani.rs:236` |
-| **I5** | PNL warmup deterministic | `tests/kani.rs:75` |
-| **I5+** | PNL warmup monotonic | `tests/kani.rs:105` |
-| **I5++** | Withdrawable ≤ available PNL | `tests/kani.rs:131` |
+| **I5** | PNL warmup deterministic | `tests/kani.rs:121` |
+| **I5+** | PNL warmup monotonic | `tests/kani.rs:150` |
+| **I5++** | Withdrawable ≤ available PNL | `tests/kani.rs:180` |
 | **I7** | User isolation | `tests/kani.rs:159` |
 | **I8** | Collateral consistency | `tests/kani.rs:204` |
 | **I9** | Warmup rate cap (insurance fund protection) | `tests/kani.rs:761` |
+| **I10** | Withdrawal-only mode fair unwinding | `tests/kani.rs:850` |
 
 ### Running Verification
 
@@ -413,7 +573,7 @@ cargo kani --harness i1_adl_never_reduces_principal
 cargo test
 ```
 
-33 unit tests covering:
+47 unit tests covering:
 - Deposit/withdrawal mechanics
 - PNL warmup over time
 - ADL haircut logic
@@ -423,6 +583,8 @@ cargo test
 - Funding rate payments (longs/shorts)
 - Funding settlement idempotence
 - Funding with position changes
+- Withdrawal-only mode and fair unwinding
+- Insurance fund top-up and recovery
 
 ### Fuzzing Tests
 ```bash
@@ -445,7 +607,7 @@ cargo test --features fuzz
 cargo kani
 ```
 
-26+ formal proofs covering all critical invariants (including funding).
+36 formal proofs covering all critical invariants (including funding and withdrawal-only mode).
 
 ## Usage Example
 
@@ -539,6 +701,8 @@ By separating matching from risk:
 ✅ **Conservation of funds across all operations**
 ✅ **User isolation - one user can't affect another**
 ✅ **No oracle manipulation can extract funds faster than time T**
+✅ **Fair unwinding in crisis - all users get same haircut percentage**
+✅ **Clear recovery path via insurance fund top-ups**
 
 ### What This Does NOT Guarantee
 
@@ -557,6 +721,8 @@ By separating matching from risk:
 | Matching engine exploit | User signature + solvency checks |
 | Liquidation griefing | Permissionless + keeper incentives |
 | Insurance drain | Fees replenish fund |
+| Withdrawal order gaming | Fair unwinding with constant haircut ratio |
+| Crisis exploitation | Withdrawal-only mode blocks new risk |
 
 ## Dependencies
 

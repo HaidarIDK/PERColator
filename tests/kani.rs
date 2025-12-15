@@ -12,6 +12,8 @@
 //! - I6: Liquidations maintain system solvency
 //! - I7: User isolation - operations on one user don't affect others
 //! - I8: Collateral calculations are consistent
+//! - I9: Warmup rate cap (insurance fund protection)
+//! - I10: Withdrawal-only mode fair unwinding properties
 
 #![cfg(kani)]
 
@@ -841,5 +843,327 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 
     assert!(slope_low <= slope_high, "Slope should decrease when PNL decreases");
     assert!(rate_low <= rate_high, "Total rate should decrease when user PNL decreases");
+}
+
+// ============================================================================
+// I10: Withdrawal-Only Mode (Fair Unwinding)
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
+    // When insurance fund is depleted and loss_accum > 0,
+    // withdrawal_only mode should be activated
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let insurance: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(insurance < 10_000);
+    kani::assume(loss < 20_000);
+    kani::assume(loss > insurance); // Loss exceeds insurance
+
+    engine.insurance_fund.balance = insurance;
+    engine.users[user_idx].principal = 10_000;
+    engine.users[user_idx].pnl_ledger = 1_000; // Some PNL
+
+    let _ = engine.apply_adl(loss);
+
+    // If loss > insurance, should enter withdrawal mode
+    if loss > insurance {
+        assert!(engine.withdrawal_only,
+                "I10: Withdrawal mode must activate when insurance depleted");
+        assert!(engine.loss_accum > 0,
+                "I10: loss_accum must be > 0 when insurance depleted");
+        assert!(engine.insurance_fund.balance == 0,
+                "I10: Insurance fund must be fully depleted");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn i10_fair_unwinding_constant_haircut_ratio() {
+    // All users receive the same haircut ratio regardless of withdrawal order
+
+    let mut engine = RiskEngine::new(test_params());
+
+    // Add two users with different principals
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+
+    let principal1: u128 = kani::any();
+    let principal2: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(principal1 > 1_000 && principal1 < 10_000);
+    kani::assume(principal2 > 1_000 && principal2 < 10_000);
+    kani::assume(loss > 0 && loss < 5_000);
+
+    engine.users[user1].principal = principal1;
+    engine.users[user2].principal = principal2;
+
+    // Trigger withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+
+    let total_principal = principal1 + principal2;
+    kani::assume(total_principal > loss); // System not completely insolvent
+
+    // User1 withdraws
+    let withdraw1 = principal1 / 2;
+    let _ = engine.withdraw(user1, withdraw1);
+    let actual1 = principal1 - engine.users[user1].principal;
+
+    // User2 withdraws (after user1)
+    let withdraw2 = principal2 / 2;
+    let _ = engine.withdraw(user2, withdraw2);
+    let actual2 = principal2 - engine.users[user2].principal;
+
+    // Calculate expected haircut ratio
+    let available = total_principal - loss;
+
+    // Both should get the same ratio (within rounding)
+    // ratio1 = actual1 / withdraw1
+    // ratio2 = actual2 / withdraw2
+    // These should be equal
+    let ratio1_scaled = actual1 * withdraw2;
+    let ratio2_scaled = actual2 * withdraw1;
+
+    // Allow for 1 unit difference due to integer division
+    assert!(ratio1_scaled.abs_diff(ratio2_scaled) <= withdraw1 + withdraw2,
+            "I10: Both users must receive same haircut ratio (fair unwinding)");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_withdrawal_mode_blocks_position_increase() {
+    // In withdrawal-only mode, users cannot increase position size
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    engine.users[user_idx].principal = 10_000;
+    engine.lps[lp_idx].lp_capital = 50_000;
+    engine.vault = 60_000;
+
+    let position: i128 = kani::any();
+    let increase: i128 = kani::any();
+
+    kani::assume(position.abs() < 5_000);
+    kani::assume(increase > 0 && increase < 2_000);
+
+    engine.users[user_idx].position_size = position;
+
+    // Enter withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = 1_000;
+
+    // Try to increase position
+    let new_size = if position >= 0 {
+        position + increase // Increase long
+    } else {
+        position - increase // Increase short (more negative)
+    };
+
+    let matcher = NoOpMatcher;
+    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, new_size - position);
+
+    // Should fail when trying to increase position
+    if new_size.abs() > position.abs() {
+        assert!(result.is_err(),
+                "I10: Cannot increase position in withdrawal-only mode");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_withdrawal_mode_allows_position_decrease() {
+    // In withdrawal-only mode, users CAN decrease/close positions
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    engine.users[user_idx].principal = 10_000;
+    engine.lps[lp_idx].lp_capital = 50_000;
+    engine.vault = 60_000;
+
+    let position: i128 = kani::any();
+    kani::assume(position > 1_000 || position < -1_000);
+
+    engine.users[user_idx].position_size = position;
+    engine.users[user_idx].entry_price = 1_000_000;
+    engine.lps[lp_idx].lp_position_size = -position;
+    engine.lps[lp_idx].lp_entry_price = 1_000_000;
+
+    // Enter withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = 1_000;
+
+    // Close half the position (reduce size)
+    let reduce = -position / 2; // Opposite sign = reduce
+
+    let matcher = NoOpMatcher;
+    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, reduce);
+
+    // Closing/reducing should be allowed
+    assert!(result.is_ok(),
+            "I10: Position reduction should be allowed in withdrawal-only mode");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_total_withdrawals_bounded_by_available() {
+    // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let principal: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(principal > 1_000 && principal < 10_000);
+    kani::assume(loss > 0 && loss < principal);
+
+    engine.users[user_idx].principal = principal;
+
+    // Enter withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+
+    let vault_before = principal; // Assume vault matches
+    engine.vault = vault_before;
+
+    // Try to withdraw everything
+    let _ = engine.withdraw(user_idx, principal);
+
+    let withdrawn = vault_before.saturating_sub(engine.vault);
+    let available = principal - loss;
+
+    assert!(withdrawn <= available,
+            "I10: Total withdrawals must not exceed available principal");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_top_up_reduces_loss_accum() {
+    // Insurance fund top-ups directly reduce loss_accum
+
+    let mut engine = RiskEngine::new(test_params());
+
+    let loss: u128 = kani::any();
+    let top_up: u128 = kani::any();
+
+    kani::assume(loss > 0 && loss < 10_000);
+    kani::assume(top_up > 0 && top_up < 20_000);
+
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+    engine.vault = 0;
+
+    let loss_before = engine.loss_accum;
+
+    let _ = engine.top_up_insurance_fund(top_up);
+
+    // Loss should decrease by min(top_up, loss_before)
+    let expected_reduction = if top_up > loss_before { loss_before } else { top_up };
+
+    assert!(engine.loss_accum == loss_before - expected_reduction,
+            "I10: Top-up must reduce loss_accum by contribution amount");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
+    // When loss_accum reaches 0, withdrawal mode should be exited
+
+    let mut engine = RiskEngine::new(test_params());
+
+    let loss: u128 = kani::any();
+    kani::assume(loss > 0 && loss < 10_000);
+
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+    engine.vault = 0;
+
+    // Top up exactly the loss amount
+    let result = engine.top_up_insurance_fund(loss);
+
+    assert!(result.is_ok(), "Top-up should succeed");
+    assert!(engine.loss_accum == 0, "Loss should be fully covered");
+    assert!(!engine.withdrawal_only, "I10: Should exit withdrawal mode when loss_accum = 0");
+
+    if let Ok(exited) = result {
+        assert!(exited, "I10: Should return true when exiting withdrawal mode");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_withdrawal_mode_preserves_conservation() {
+    // Conservation must be maintained even in withdrawal-only mode
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let principal: u128 = kani::any();
+    let loss: u128 = kani::any();
+    let withdraw: u128 = kani::any();
+
+    kani::assume(principal > 1_000 && principal < 10_000);
+    kani::assume(loss > 0 && loss < principal);
+    kani::assume(withdraw > 0 && withdraw < principal);
+
+    engine.users[user_idx].principal = principal;
+    engine.vault = principal;
+
+    // Enter withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+
+    assert!(engine.check_conservation(),
+            "Conservation before withdrawal");
+
+    let _ = engine.withdraw(user_idx, withdraw);
+
+    assert!(engine.check_conservation(),
+            "I10: Withdrawal mode must preserve conservation");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn i10_withdrawal_tracking_accuracy() {
+    // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
+
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let principal: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(principal > 2_000 && principal < 10_000);
+    kani::assume(loss > 0 && loss < principal / 2);
+
+    engine.users[user_idx].principal = principal;
+    engine.vault = principal;
+
+    // Enter withdrawal mode
+    engine.withdrawal_only = true;
+    engine.loss_accum = loss;
+
+    let tracking_before = engine.withdrawal_mode_withdrawn;
+
+    // Withdraw some amount
+    let withdraw = principal / 3;
+    let _ = engine.withdraw(user_idx, withdraw);
+
+    let actual_withdrawn = principal - engine.users[user_idx].principal;
+    let tracking_increase = engine.withdrawal_mode_withdrawn - tracking_before;
+
+    assert!(tracking_increase == actual_withdrawn,
+            "I10: withdrawal_mode_withdrawn must accurately track withdrawals");
 }
 

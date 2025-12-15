@@ -258,6 +258,15 @@ where
     /// Total warmup rate across all users (sum of all slope_per_step values)
     /// This tracks how much PNL is warming up per slot across the entire system
     pub total_warmup_rate: u128,
+
+    /// Withdrawal-only mode flag
+    /// When true, only withdrawals are allowed (no trading/deposits)
+    /// Automatically enabled when loss_accum > 0
+    pub withdrawal_only: bool,
+
+    /// Total amount withdrawn during withdrawal-only mode
+    /// Used to maintain fair haircut ratio during unwinding
+    pub withdrawal_mode_withdrawn: u128,
 }
 
 /// Type alias for the default Vec-based RiskEngine
@@ -296,6 +305,9 @@ pub enum RiskError {
 
     /// Position size mismatch
     PositionSizeMismatch,
+
+    /// System in withdrawal-only mode (deposits and trading blocked)
+    WithdrawalOnlyMode,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -802,6 +814,9 @@ where
 {
     /// Deposit funds to user account
     pub fn deposit(&mut self, user_index: usize, amount: u128) -> Result<()> {
+        // Deposits are allowed even in withdrawal-only mode
+        // They effectively take on their share of the loss (proportional haircut applies)
+
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
 
         user.principal = add_u128(user.principal, amount);
@@ -826,7 +841,34 @@ where
         let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
         let warmed_up_pnl = self.withdrawable_pnl(user);
 
-        // Get mutable reference
+        // Calculate haircut ratio BEFORE taking mutable borrow (if needed)
+        let actual_amount = if self.withdrawal_only && self.loss_accum > 0 {
+            // Calculate total system principal for haircut ratio
+            // Include amounts already withdrawn to maintain fair haircut ratio
+            let current_principal: u128 = self.users.iter()
+                .map(|u| u.principal)
+                .sum();
+            let total_principal = add_u128(current_principal, self.withdrawal_mode_withdrawn);
+
+            if total_principal == 0 {
+                return Err(RiskError::InsufficientBalance);
+            }
+
+            // Haircut ratio = (total_principal - loss_accum) / total_principal
+            // Actual withdrawal = amount * haircut_ratio
+            let available_principal = if total_principal > self.loss_accum {
+                total_principal.saturating_sub(self.loss_accum)
+            } else {
+                0 // Completely insolvent
+            };
+
+            // Proportional haircut
+            amount.saturating_mul(available_principal) / total_principal
+        } else {
+            amount
+        };
+
+        // Get mutable reference AFTER calculating haircut
         let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
 
         // Step 1: Convert warmed-up PNL to principal
@@ -836,15 +878,15 @@ where
         }
 
         // Step 2: Check we have enough principal
-        if user.principal < amount {
+        if user.principal < actual_amount {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Step 3: Calculate what state would be after withdrawal
-        let new_principal = sub_u128(user.principal, amount);
+        // Step 4: Calculate what state would be after withdrawal
+        let new_principal = sub_u128(user.principal, actual_amount);
         let new_collateral = add_u128(new_principal, clamp_pos_i128(user.pnl_ledger));
 
-        // Step 4: If user has position, must maintain initial margin
+        // Step 5: If user has position, must maintain initial margin
         if user.position_size != 0 {
             let position_notional = mul_u128(
                 user.position_size.abs() as u128,
@@ -861,9 +903,14 @@ where
             }
         }
 
-        // Step 5: Commit the withdrawal
+        // Step 6: Commit the withdrawal
         user.principal = new_principal;
-        self.vault = sub_u128(self.vault, amount);
+        self.vault = sub_u128(self.vault, actual_amount);
+
+        // Track withdrawal amount if in withdrawal-only mode
+        if self.withdrawal_only {
+            self.withdrawal_mode_withdrawn = add_u128(self.withdrawal_mode_withdrawn, actual_amount);
+        }
 
         Ok(())
     }
@@ -904,6 +951,20 @@ where
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
+        // In withdrawal-only mode, only allow closing/reducing positions
+        if self.withdrawal_only {
+            let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
+
+            // Check if trade would increase position size
+            let current_position = user.position_size;
+            let new_position = current_position.saturating_add(size);
+
+            // Allow only if position is being reduced
+            if new_position.abs() > current_position.abs() {
+                return Err(RiskError::WithdrawalOnlyMode);
+            }
+        }
+
         // Settle funding for both accounts before position changes
         self.touch_user(user_index)?;
         self.touch_lp(lp_index)?;
@@ -1066,12 +1127,56 @@ where
                 self.insurance_fund.balance = 0;
                 self.loss_accum = add_u128(self.loss_accum,
                     sub_u128(remaining_loss, insurance_used));
+
+                // Enable withdrawal-only mode for fair unwinding
+                self.withdrawal_only = true;
             } else {
                 self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, remaining_loss);
             }
         }
 
         Ok(())
+    }
+
+    /// Top up insurance fund to cover losses and potentially exit withdrawal-only mode
+    ///
+    /// This function allows:
+    /// 1. Anyone to contribute funds to the insurance fund
+    /// 2. Contribution directly reduces loss_accum
+    /// 3. If loss_accum reaches 0, exits withdrawal-only mode (trading resumes)
+    /// 4. Enables fair unwinding or recovery from crisis
+    ///
+    /// # Arguments
+    /// * `amount` - Amount to add to insurance fund
+    ///
+    /// # Returns
+    /// * `Ok(bool)` - true if withdrawal-only mode was exited, false otherwise
+    pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool> {
+        // Add to vault (since insurance fund deposit)
+        self.vault = add_u128(self.vault, amount);
+
+        // Apply contribution to loss_accum first (if any)
+        if self.loss_accum > 0 {
+            let loss_coverage = core::cmp::min(amount, self.loss_accum);
+            self.loss_accum = sub_u128(self.loss_accum, loss_coverage);
+            let remaining = sub_u128(amount, loss_coverage);
+
+            // Add remaining to insurance fund balance
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
+
+            // Exit withdrawal-only mode if loss is fully covered
+            if self.loss_accum == 0 && self.withdrawal_only {
+                self.withdrawal_only = false;
+                self.withdrawal_mode_withdrawn = 0; // Reset tracking
+                Ok(true) // Exited withdrawal-only mode
+            } else {
+                Ok(false) // Still in withdrawal-only mode
+            }
+        } else {
+            // No loss - just add to insurance fund
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
+            Ok(false)
+        }
     }
 }
 
@@ -1187,6 +1292,8 @@ where
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
             total_warmup_rate: 0,
+            withdrawal_only: false,
+            withdrawal_mode_withdrawn: 0,
         }
     }
 
