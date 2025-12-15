@@ -852,7 +852,7 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 #[kani::unwind(70)]
 fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     // When insurance fund is depleted and loss_accum > 0,
-    // withdrawal_only mode should be activated
+    // risk_reduction_only mode should be activated
 
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
@@ -872,7 +872,7 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
 
     // If loss > insurance, should enter withdrawal mode
     if loss > insurance {
-        assert!(engine.withdrawal_only,
+        assert!(engine.risk_reduction_only,
                 "I10: Withdrawal mode must activate when insurance depleted");
         assert!(engine.loss_accum > 0,
                 "I10: loss_accum must be > 0 when insurance depleted");
@@ -907,7 +907,7 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
     engine.accounts[user2 as usize].capital = principal2;
 
     // Trigger withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
     let total_principal = principal1 + principal2;
@@ -961,7 +961,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
     engine.accounts[user_idx as usize].position_size = position;
 
     // Enter withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = 1_000;
 
     // Try to increase position
@@ -1003,7 +1003,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
     engine.accounts[lp_idx as usize].entry_price = 1_000_000;
 
     // Enter withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = 1_000;
 
     // Close half the position (reduce size)
@@ -1037,7 +1037,7 @@ fn i10_total_withdrawals_bounded_by_available() {
     engine.accounts[user_idx as usize].capital = principal;
 
     // Enter withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
     let vault_before = principal; // Assume vault matches
@@ -1067,7 +1067,7 @@ fn i10_top_up_reduces_loss_accum() {
     kani::assume(loss > 0 && loss < 10_000);
     kani::assume(top_up > 0 && top_up < 20_000);
 
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
     engine.vault = 0;
 
@@ -1092,7 +1092,7 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     let loss: u128 = kani::any();
     kani::assume(loss > 0 && loss < 10_000);
 
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
     engine.vault = 0;
 
@@ -1101,7 +1101,7 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
 
     assert!(result.is_ok(), "Top-up should succeed");
     assert!(engine.loss_accum == 0, "Loss should be fully covered");
-    assert!(!engine.withdrawal_only, "I10: Should exit withdrawal mode when loss_accum = 0");
+    assert!(!engine.risk_reduction_only, "I10: Should exit withdrawal mode when loss_accum = 0");
 
     if let Ok(exited) = result {
         assert!(exited, "I10: Should return true when exiting withdrawal mode");
@@ -1128,7 +1128,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
     engine.vault = principal;
 
     // Enter withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
     assert!(engine.check_conservation(),
@@ -1161,7 +1161,7 @@ fn i10_withdrawal_tracking_accuracy() {
     engine.vault = principal;
 
     // Enter withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
     let tracking_before = engine.withdrawal_mode_withdrawn;
@@ -1365,7 +1365,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     kani::assume(total_capital > loss); // Not completely insolvent
 
     // Trigger withdrawal mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
     // User withdraws half their capital

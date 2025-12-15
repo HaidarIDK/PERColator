@@ -890,7 +890,7 @@ fn test_adl_protects_principal_during_warmup() {
     let total_withdrawable = attacker_principal + 5_000;
     let withdraw_result = engine.withdraw(attacker, total_withdrawable);
     assert!(withdraw_result.is_err(), "Withdrawals blocked in withdrawal-only mode");
-    assert_eq!(withdraw_result.unwrap_err(), RiskError::WithdrawalOnlyMode);
+    assert_eq!(withdraw_result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 
     // To enable withdrawals again, insurance fund must be topped up to cover loss_accum
     // ADL used ~45k from unwrapped PnL, remaining ~5k went to insurance
@@ -898,13 +898,13 @@ fn test_adl_protects_principal_during_warmup() {
     assert!(engine.loss_accum < 5_100, "Loss mostly covered by unwrapped PnL and insurance");
 
     // But withdrawal-only was triggered, so top up is needed to exit
-    // Actually, checking the code: ADL enters withdrawal_only if insurance is insufficient
+    // Actually, checking the code: ADL enters risk_reduction_only if insurance is insufficient
     // Let's check the actual state
-    if engine.withdrawal_only {
+    if engine.risk_reduction_only {
         // System is still in withdrawal-only mode despite no loss_accum
         // This might be intentional or need adjustment
         // For now, test that the behavior is consistent
-        assert!(withdraw_result.is_err(), "Withdrawals blocked when withdrawal_only=true");
+        assert!(withdraw_result.is_err(), "Withdrawals blocked when risk_reduction_only=true");
     }
 
     // === Conclusion ===
@@ -1134,7 +1134,7 @@ fn test_warmup_rate_limit_invariant_maintained() {
 // ============================================================================
 
 #[test]
-fn test_withdrawal_only_mode_triggered_by_loss() {
+fn test_risk_reduction_only_mode_triggered_by_loss() {
     // Test that loss_accum > 0 triggers withdrawal-only mode
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
@@ -1152,7 +1152,7 @@ fn test_withdrawal_only_mode_triggered_by_loss() {
     engine.apply_adl(loss).unwrap();
 
     // Should be in withdrawal-only mode
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
     assert_eq!(engine.loss_accum, 5_000); // 10k loss - 5k insurance = 5k loss_accum
     assert_eq!(engine.insurance_fund.balance, 0);
 }
@@ -1178,7 +1178,7 @@ fn test_proportional_haircut_on_withdrawal() {
     engine.apply_adl(4_000).unwrap();
 
     assert_eq!(engine.loss_accum, 3_000); // 4k - 1k insurance
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // Available principal = 15,000 - 3,000 = 12,000
     // Haircut ratio = 12,000 / 15,000 = 80%
@@ -1230,7 +1230,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
 
     // Trigger withdrawal-only mode
     engine.apply_adl(2_000).unwrap();
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // User can CLOSE position (reducing from 5000 to 0)
     let result = engine.execute_trade(&matcher, lp, user, 1_000_000, -5_000);
@@ -1254,17 +1254,17 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
 
     // Trigger withdrawal-only mode
     engine.apply_adl(2_000).unwrap();
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // User tries to open new position - should fail
     let matcher = NoOpMatcher;
     let result = engine.execute_trade(&matcher, lp, user, 1_000_000, 5_000);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), RiskError::WithdrawalOnlyMode);
+    assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 }
 
 #[test]
-fn test_withdrawal_only_blocks_withdraw() {
+fn test_risk_reduction_only_blocks_withdraw() {
     // Test that withdrawal-only mode blocks ALL withdrawals (including capital)
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
@@ -1272,13 +1272,13 @@ fn test_withdrawal_only_blocks_withdraw() {
     engine.deposit(user, 10_000).unwrap();
 
     // Trigger withdrawal-only mode
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
     engine.loss_accum = 1_000;
 
     // Try to withdraw capital - should be blocked
     let result = engine.withdraw(user, 5_000);
     assert!(result.is_err(), "Withdrawals should be blocked in withdrawal-only mode");
-    assert_eq!(result.unwrap_err(), RiskError::WithdrawalOnlyMode);
+    assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 
     // Verify account state unchanged
     assert_eq!(engine.accounts[user as usize].capital, 10_000);
@@ -1298,18 +1298,18 @@ fn test_top_up_insurance_fund_reduces_loss() {
     // Trigger withdrawal-only mode with 4k loss_accum
     engine.apply_adl(5_000).unwrap();
     assert_eq!(engine.loss_accum, 4_000);
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // Top up with 2k - should reduce loss to 2k
     let exited = engine.top_up_insurance_fund(2_000).unwrap();
     assert_eq!(engine.loss_accum, 2_000);
-    assert!(engine.withdrawal_only); // Still in withdrawal mode
+    assert!(engine.risk_reduction_only); // Still in withdrawal mode
     assert!(!exited);
 
     // Top up with another 2k - should fully cover loss
     let exited = engine.top_up_insurance_fund(2_000).unwrap();
     assert_eq!(engine.loss_accum, 0);
-    assert!(!engine.withdrawal_only); // Exited withdrawal mode
+    assert!(!engine.risk_reduction_only); // Exited withdrawal mode
     assert!(exited);
 }
 
@@ -1331,7 +1331,7 @@ fn test_deposits_allowed_in_withdrawal_mode() {
     // Trigger withdrawal-only mode
     engine.apply_adl(2_000).unwrap();
     assert_eq!(engine.loss_accum, 1_000);
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // User2 deposits - should be allowed
     let result = engine.deposit(user2, 5_000);
@@ -1384,7 +1384,7 @@ fn test_fair_unwinding_scenario() {
 
     assert_eq!(engine.loss_accum, 10_000);
     assert_eq!(engine.insurance_fund.balance, 0);
-    assert!(engine.withdrawal_only);
+    assert!(engine.risk_reduction_only);
 
     // With fair unwinding, everyone gets the same haircut ratio (75%)
     // regardless of withdrawal order
@@ -1514,7 +1514,7 @@ fn test_lp_withdraw_with_haircut() {
 
     // Simulate crisis - set loss_accum
     engine.loss_accum = 5_000; // 25% loss
-    engine.withdrawal_only = true;
+    engine.risk_reduction_only = true;
 
     // Both should get 75% haircut
     let user_result = engine.withdraw(user_idx, 10_000);
