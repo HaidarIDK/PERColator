@@ -57,12 +57,12 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
 
         let vault_before = engine.vault;
-        let principal_before = engine.users[user_idx].principal;
+        let principal_before = engine.users[user_idx].capital;
 
         let _ = engine.deposit(user_idx, amount);
 
         prop_assert_eq!(engine.vault, vault_before + amount);
-        prop_assert_eq!(engine.users[user_idx].principal, principal_before + amount);
+        prop_assert_eq!(engine.users[user_idx].capital, principal_before + amount);
     }
 }
 
@@ -79,13 +79,13 @@ proptest! {
         engine.deposit(user_idx, deposit_amount).unwrap();
 
         let vault_before = engine.vault;
-        let principal_before = engine.users[user_idx].principal;
+        let principal_before = engine.users[user_idx].capital;
 
         let result = engine.withdraw(user_idx, withdraw_amount);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= vault_before);
-            prop_assert!(engine.users[user_idx].principal <= principal_before);
+            prop_assert!(engine.users[user_idx].capital <= principal_before);
         }
     }
 }
@@ -128,7 +128,7 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].pnl = pnl;
         engine.users[user_idx].warmup_state.slope_per_step = slope;
 
         let earlier_slot = slots1.min(slots2);
@@ -156,13 +156,13 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].principal = principal;
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].capital = principal;
+        engine.users[user_idx].pnl = pnl;
         engine.insurance_fund.balance = 10_000_000; // Large insurance fund
 
         let _ = engine.apply_adl(loss);
 
-        prop_assert_eq!(engine.users[user_idx].principal, principal,
+        prop_assert_eq!(engine.users[user_idx].capital, principal,
                         "ADL must never reduce principal");
     }
 }
@@ -179,7 +179,7 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].pnl = pnl;
         engine.users[user_idx].reserved_pnl = reserved;
         engine.users[user_idx].warmup_state.slope_per_step = slope;
         engine.current_slot = slots;
@@ -204,8 +204,8 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].principal = principal;
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].capital = principal;
+        engine.users[user_idx].pnl = pnl;
 
         let collateral = engine.user_collateral(&engine.users[user_idx]);
 
@@ -235,15 +235,15 @@ proptest! {
         engine.deposit(user1, amount1).unwrap();
         engine.deposit(user2, amount2).unwrap();
 
-        let user2_principal_before = engine.users[user2].principal;
-        let user2_pnl_before = engine.users[user2].pnl_ledger;
+        let user2_principal_before = engine.users[user2].capital;
+        let user2_pnl_before = engine.users[user2].pnl;
 
         // Operate on user1
         let _ = engine.withdraw(user1, withdraw);
 
         // User2 should be unchanged
-        prop_assert_eq!(engine.users[user2].principal, user2_principal_before);
-        prop_assert_eq!(engine.users[user2].pnl_ledger, user2_pnl_before);
+        prop_assert_eq!(engine.users[user2].capital, user2_principal_before);
+        prop_assert_eq!(engine.users[user2].pnl, user2_pnl_before);
     }
 }
 
@@ -258,15 +258,15 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].principal = principal;
-        engine.users[user_idx].pnl_ledger = initial_pnl;
+        engine.users[user_idx].capital = principal;
+        engine.users[user_idx].pnl = initial_pnl;
         engine.insurance_fund.balance = 100_000_000; // Large insurance
 
         for loss in losses {
             let _ = engine.apply_adl(loss);
         }
 
-        prop_assert_eq!(engine.users[user_idx].principal, principal,
+        prop_assert_eq!(engine.users[user_idx].capital, principal,
                         "Multiple ADLs must never reduce principal");
     }
 }
@@ -285,7 +285,7 @@ proptest! {
         let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
         engine.deposit(user_idx, user_capital).unwrap();
-        engine.lps[lp_idx].lp_capital = lp_capital;
+        engine.lps[lp_idx].capital = lp_capital;
         engine.vault = user_capital + lp_capital;
 
         let insurance_before = engine.insurance_fund.fee_revenue;
@@ -340,7 +340,7 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].pnl = pnl;
         engine.users[user_idx].reserved_pnl = reserved;
         engine.users[user_idx].warmup_state.slope_per_step = slope;
         engine.advance_slot(slots);
@@ -389,7 +389,7 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].pnl_ledger = user_pnl;
+        engine.users[user_idx].pnl = user_pnl;
         engine.insurance_fund.balance = insurance_balance;
 
         let _ = engine.apply_adl(loss);
@@ -414,7 +414,7 @@ proptest! {
         let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
         engine.deposit(user_idx, 1_000_000).unwrap();
-        engine.lps[lp_idx].lp_capital = 10_000_000;
+        engine.lps[lp_idx].capital = 10_000_000;
         engine.vault = 11_000_000;
 
         engine.users[user_idx].position_size = initial_size;
@@ -461,11 +461,11 @@ proptest! {
 
         // Settle once
         let _ = engine.touch_user(user_idx);
-        let pnl_first = engine.users[user_idx].pnl_ledger;
+        let pnl_first = engine.users[user_idx].pnl;
 
         // Settle again without accrual
         let _ = engine.touch_user(user_idx);
-        let pnl_second = engine.users[user_idx].pnl_ledger;
+        let pnl_second = engine.users[user_idx].pnl;
 
         prop_assert_eq!(pnl_first, pnl_second,
                        "Funding settlement should be idempotent");
@@ -483,13 +483,13 @@ proptest! {
         let mut engine = RiskEngine::new(default_params());
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.users[user_idx].principal = principal;
+        engine.users[user_idx].capital = principal;
         engine.users[user_idx].position_size = position;
         engine.funding_index_qpb_e6 = funding_delta;
 
         let _ = engine.touch_user(user_idx);
 
-        prop_assert_eq!(engine.users[user_idx].principal, principal,
+        prop_assert_eq!(engine.users[user_idx].capital, principal,
                        "Funding must never modify principal");
     }
 }
@@ -509,8 +509,8 @@ proptest! {
         engine.users[user_idx].position_size = position;
         engine.lps[lp_idx].lp_position_size = -position;
 
-        let total_pnl_before = engine.users[user_idx].pnl_ledger +
-                              engine.lps[lp_idx].lp_pnl;
+        let total_pnl_before = engine.users[user_idx].pnl +
+                              engine.lps[lp_idx].pnl;
 
         engine.funding_index_qpb_e6 = funding_delta;
 
@@ -518,8 +518,8 @@ proptest! {
         let lp_result = engine.touch_lp(lp_idx);
 
         if user_result.is_ok() && lp_result.is_ok() {
-            let total_pnl_after = engine.users[user_idx].pnl_ledger +
-                                 engine.lps[lp_idx].lp_pnl;
+            let total_pnl_after = engine.users[user_idx].pnl +
+                                 engine.lps[lp_idx].pnl;
 
             prop_assert_eq!(total_pnl_after, total_pnl_before,
                            "Funding should be zero-sum");
@@ -561,7 +561,7 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].position_size = position;
-        engine.users[user_idx].pnl_ledger = 0;
+        engine.users[user_idx].pnl = 0;
 
         // Real implementation
         let accrue_result = engine.accrue_funding(dt, price, rate);
@@ -574,7 +574,7 @@ proptest! {
             return Ok(()); // Skip if overflow
         }
 
-        let actual_pnl = engine.users[user_idx].pnl_ledger;
+        let actual_pnl = engine.users[user_idx].pnl;
 
         // Reference implementation (slow but simple)
         let price_i128 = price as i128;
@@ -619,7 +619,7 @@ proptest! {
         let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
         engine.deposit(user_idx, 10_000_000).unwrap();
-        engine.lps[lp_idx].lp_capital = 100_000_000;
+        engine.lps[lp_idx].capital = 100_000_000;
         engine.vault = 110_000_000;
 
         // Manually set positions
@@ -663,13 +663,13 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
 
         engine.users[user_idx].position_size = 0; // Zero position
-        engine.users[user_idx].pnl_ledger = pnl;
+        engine.users[user_idx].pnl = pnl;
 
         engine.funding_index_qpb_e6 = funding_delta;
 
         let _ = engine.touch_user(user_idx);
 
-        prop_assert_eq!(engine.users[user_idx].pnl_ledger, pnl,
+        prop_assert_eq!(engine.users[user_idx].pnl, pnl,
                        "Zero position should not pay funding");
     }
 }

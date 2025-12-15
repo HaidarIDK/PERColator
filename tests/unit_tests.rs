@@ -31,17 +31,17 @@ fn test_deposit_and_withdraw() {
 
     // Deposit
     engine.deposit(user_idx, 1000).unwrap();
-    assert_eq!(engine.users[user_idx].principal, 1000);
+    assert_eq!(engine.users[user_idx].capital, 1000);
     assert_eq!(engine.vault, 1000);
 
     // Withdraw partial
     engine.withdraw(user_idx, 400).unwrap();
-    assert_eq!(engine.users[user_idx].principal, 600);
+    assert_eq!(engine.users[user_idx].capital, 600);
     assert_eq!(engine.vault, 600);
 
     // Withdraw rest
     engine.withdraw(user_idx, 600).unwrap();
-    assert_eq!(engine.users[user_idx].principal, 0);
+    assert_eq!(engine.users[user_idx].capital, 0);
     assert_eq!(engine.vault, 0);
 }
 
@@ -68,7 +68,7 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
     // User has a position and negative PNL of -800
     engine.users[user_idx].position_size = 10_000;
     engine.users[user_idx].entry_price = 1_000_000; // $1 entry price
-    engine.users[user_idx].pnl_ledger = -800;
+    engine.users[user_idx].pnl = -800;
 
     // Trying to withdraw all principal would leave collateral = 0 + max(0, -800) = 0
     // This should fail because user has an open position
@@ -83,7 +83,7 @@ fn test_pnl_warmup() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Give user some positive PNL
-    engine.users[user_idx].pnl_ledger = 1000;
+    engine.users[user_idx].pnl = 1000;
     engine.users[user_idx].warmup_state.slope_per_step = 10; // 10 per slot
 
     // At slot 0, nothing is warmed up yet
@@ -103,7 +103,7 @@ fn test_pnl_warmup_with_reserved() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].pnl_ledger = 1000;
+    engine.users[user_idx].pnl = 1000;
     engine.users[user_idx].reserved_pnl = 300; // 300 reserved for pending withdrawal
     engine.users[user_idx].warmup_state.slope_per_step = 10;
 
@@ -123,7 +123,7 @@ fn test_withdraw_pnl_not_warmed_up() {
     let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
-    engine.users[user_idx].pnl_ledger = 500;
+    engine.users[user_idx].pnl = 500;
 
     // Try to withdraw more than principal + warmed up PNL
     // Since PNL hasn't warmed up, can only withdraw the 1000 principal
@@ -137,7 +137,7 @@ fn test_withdraw_with_warmed_up_pnl() {
     let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
-    engine.users[user_idx].pnl_ledger = 500;
+    engine.users[user_idx].pnl = 500;
     engine.users[user_idx].warmup_state.slope_per_step = 10;
 
     // Advance enough slots to warm up 200 PNL
@@ -146,8 +146,8 @@ fn test_withdraw_with_warmed_up_pnl() {
     // Should be able to withdraw 1200 (1000 principal + 200 warmed PNL)
     // The function will automatically convert the 200 PNL to principal before withdrawal
     engine.withdraw(user_idx, 1200).unwrap();
-    assert_eq!(engine.users[user_idx].pnl_ledger, 300); // 500 - 200 converted
-    assert_eq!(engine.users[user_idx].principal, 0); // 1000 + 200 - 1200
+    assert_eq!(engine.users[user_idx].pnl, 300); // 500 - 200 converted
+    assert_eq!(engine.users[user_idx].capital, 0); // 1000 + 200 - 1200
     assert_eq!(engine.vault, 0);
 }
 #[test]
@@ -168,7 +168,7 @@ fn test_conservation_simple() {
     assert!(engine.check_conservation());
 
     // User1 gets positive PNL
-    engine.users[user1].pnl_ledger = 500;
+    engine.users[user1].pnl = 500;
     engine.vault += 500;
     assert!(engine.check_conservation());
 
@@ -182,8 +182,8 @@ fn test_adl_haircut_unwrapped_pnl() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].principal = 1000;
-    engine.users[user_idx].pnl_ledger = 500; // All unwrapped (warmup not started)
+    engine.users[user_idx].capital = 1000;
+    engine.users[user_idx].pnl = 500; // All unwrapped (warmup not started)
     engine.users[user_idx].warmup_state.slope_per_step = 10;
     engine.vault = 1500;
 
@@ -191,8 +191,8 @@ fn test_adl_haircut_unwrapped_pnl() {
     engine.apply_adl(200).unwrap();
 
     // Should haircut the unwrapped PNL
-    assert_eq!(engine.users[user_idx].pnl_ledger, 300);
-    assert_eq!(engine.users[user_idx].principal, 1000); // Principal untouched!
+    assert_eq!(engine.users[user_idx].pnl, 300);
+    assert_eq!(engine.users[user_idx].capital, 1000); // Principal untouched!
 }
 
 #[test]
@@ -200,8 +200,8 @@ fn test_adl_overflow_to_insurance() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].principal = 1000;
-    engine.users[user_idx].pnl_ledger = 300; // Only 300 unwrapped PNL
+    engine.users[user_idx].capital = 1000;
+    engine.users[user_idx].pnl = 300; // Only 300 unwrapped PNL
     engine.users[user_idx].warmup_state.slope_per_step = 10;
     engine.insurance_fund.balance = 500;
     engine.vault = 1800;
@@ -210,8 +210,8 @@ fn test_adl_overflow_to_insurance() {
     engine.apply_adl(700).unwrap();
 
     // Should haircut all PNL first
-    assert_eq!(engine.users[user_idx].pnl_ledger, 0);
-    assert_eq!(engine.users[user_idx].principal, 1000); // Principal still untouched!
+    assert_eq!(engine.users[user_idx].pnl, 0);
+    assert_eq!(engine.users[user_idx].capital, 1000); // Principal still untouched!
 
     // Remaining 400 should come from insurance (700 - 300 = 400)
     assert_eq!(engine.insurance_fund.balance, 100); // 500 - 400
@@ -222,15 +222,15 @@ fn test_adl_insurance_depleted() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].principal = 1000;
-    engine.users[user_idx].pnl_ledger = 100;
+    engine.users[user_idx].capital = 1000;
+    engine.users[user_idx].pnl = 100;
     engine.insurance_fund.balance = 50;
 
     // Apply ADL loss of 200
     engine.apply_adl(200).unwrap();
 
     // PNL haircut: 100
-    assert_eq!(engine.users[user_idx].pnl_ledger, 0);
+    assert_eq!(engine.users[user_idx].pnl, 0);
 
     // Insurance depleted: 50
     assert_eq!(engine.insurance_fund.balance, 0);
@@ -244,13 +244,13 @@ fn test_collateral_calculation() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].principal = 1000;
-    engine.users[user_idx].pnl_ledger = 500;
+    engine.users[user_idx].capital = 1000;
+    engine.users[user_idx].pnl = 500;
 
     assert_eq!(engine.user_collateral(&engine.users[user_idx]), 1500);
 
     // Negative PNL doesn't add to collateral
-    engine.users[user_idx].pnl_ledger = -300;
+    engine.users[user_idx].pnl = -300;
     assert_eq!(engine.user_collateral(&engine.users[user_idx]), 1000);
 }
 
@@ -259,7 +259,7 @@ fn test_maintenance_margin_check() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].principal = 1000;
+    engine.users[user_idx].capital = 1000;
     engine.users[user_idx].position_size = 10_000; // 10k units
     engine.users[user_idx].entry_price = 1_000_000; // $1
 
@@ -282,7 +282,7 @@ fn test_trading_opens_position() {
 
     // Setup user with capital
     engine.deposit(user_idx, 10_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 100_000;
+    engine.lps[lp_idx].capital = 100_000;
 
     // Execute trade: user buys 1000 units at $1
     let oracle_price = 1_000_000;
@@ -295,7 +295,7 @@ fn test_trading_opens_position() {
     assert_eq!(engine.users[user_idx].entry_price, oracle_price);
 
     // Check LP has opposite position
-    assert_eq!(engine.lps[lp_idx].lp_position_size, -1000);
+    assert_eq!(engine.lps[lp_idx].position_size, -1000);
 
     // Check fee was charged (0.1% of 1000 = 1)
     assert!(engine.insurance_fund.fee_revenue > 0);
@@ -308,7 +308,7 @@ fn test_trading_realizes_pnl() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     engine.deposit(user_idx, 10_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 100_000;
+    engine.lps[lp_idx].capital = 100_000;
     engine.vault = 110_000;
 
     // Open long position at $1
@@ -319,7 +319,7 @@ fn test_trading_realizes_pnl() {
 
     // Check PNL realized (approximately)
     // Price went from $1 to $1.50, so 500 profit on 1000 units
-    assert!(engine.users[user_idx].pnl_ledger > 0);
+    assert!(engine.users[user_idx].pnl > 0);
     assert_eq!(engine.users[user_idx].position_size, 0);
 }
 
@@ -341,14 +341,14 @@ fn test_liquidation() {
     assert!(!engine.is_above_maintenance_margin(&engine.users[user_idx], oracle_price));
 
     // Liquidate
-    let initial_keeper_pnl = engine.users[keeper_idx].pnl_ledger;
+    let initial_keeper_pnl = engine.users[keeper_idx].pnl;
     engine.liquidate_user(user_idx, keeper_idx, oracle_price).unwrap();
 
     // Position should be closed
     assert_eq!(engine.users[user_idx].position_size, 0);
 
     // Keeper should receive fee
-    assert!(engine.users[keeper_idx].pnl_ledger > initial_keeper_pnl);
+    assert!(engine.users[keeper_idx].pnl > initial_keeper_pnl);
 
     // Insurance fund should receive fee
     assert!(engine.insurance_fund.liquidation_revenue > 0);
@@ -363,16 +363,16 @@ fn test_user_isolation() {
     engine.deposit(user1, 1000).unwrap();
     engine.deposit(user2, 2000).unwrap();
 
-    let user2_principal_before = engine.users[user2].principal;
-    let user2_pnl_before = engine.users[user2].pnl_ledger;
+    let user2_principal_before = engine.users[user2].capital;
+    let user2_pnl_before = engine.users[user2].pnl;
 
     // Operate on user1
     engine.withdraw(user1, 500).unwrap();
-    engine.users[user1].pnl_ledger = 300;
+    engine.users[user1].pnl = 300;
 
     // User2 should be unchanged
-    assert_eq!(engine.users[user2].principal, user2_principal_before);
-    assert_eq!(engine.users[user2].pnl_ledger, user2_pnl_before);
+    assert_eq!(engine.users[user2].capital, user2_principal_before);
+    assert_eq!(engine.users[user2].pnl, user2_pnl_before);
 }
 
 #[test]
@@ -381,14 +381,14 @@ fn test_principal_never_reduced_by_adl() {
     let user_idx = engine.add_user(1).unwrap();
 
     let initial_principal = 5000u128;
-    engine.users[user_idx].principal = initial_principal;
-    engine.users[user_idx].pnl_ledger = 100;
+    engine.users[user_idx].capital = initial_principal;
+    engine.users[user_idx].pnl = 100;
 
     // Apply massive ADL
     engine.apply_adl(10_000).unwrap();
 
     // Principal should NEVER be touched
-    assert_eq!(engine.users[user_idx].principal, initial_principal);
+    assert_eq!(engine.users[user_idx].capital, initial_principal);
 }
 
 #[test]
@@ -399,17 +399,17 @@ fn test_multiple_users_adl() {
     let user3 = engine.add_user(1).unwrap();
 
     // User1: has unwrapped PNL
-    engine.users[user1].principal = 1000;
-    engine.users[user1].pnl_ledger = 500;
+    engine.users[user1].capital = 1000;
+    engine.users[user1].pnl = 500;
     engine.users[user1].warmup_state.slope_per_step = 10;
 
     // User2: has unwrapped PNL
-    engine.users[user2].principal = 2000;
-    engine.users[user2].pnl_ledger = 800;
+    engine.users[user2].capital = 2000;
+    engine.users[user2].pnl = 800;
     engine.users[user2].warmup_state.slope_per_step = 10;
 
     // User3: no PNL
-    engine.users[user3].principal = 1500;
+    engine.users[user3].capital = 1500;
 
     engine.insurance_fund.balance = 1000;
 
@@ -419,12 +419,12 @@ fn test_multiple_users_adl() {
     // Should haircut user1 and user2's PNL
     // Total unwrapped PNL = 500 + 800 = 1300
     // Loss = 1000, so both should be haircutted proportionally or sequentially
-    assert!(engine.users[user1].pnl_ledger < 500 || engine.users[user2].pnl_ledger < 800);
+    assert!(engine.users[user1].pnl < 500 || engine.users[user2].pnl < 800);
 
     // All principals should be intact
-    assert_eq!(engine.users[user1].principal, 1000);
-    assert_eq!(engine.users[user2].principal, 2000);
-    assert_eq!(engine.users[user3].principal, 1500);
+    assert_eq!(engine.users[user1].capital, 1000);
+    assert_eq!(engine.users[user2].capital, 2000);
+    assert_eq!(engine.users[user3].capital, 1500);
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn test_warmup_monotonicity() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    engine.users[user_idx].pnl_ledger = 1000;
+    engine.users[user_idx].pnl = 1000;
     engine.users[user_idx].warmup_state.slope_per_step = 10;
 
     // Get withdrawable at different time points
@@ -456,7 +456,7 @@ fn test_fee_accumulation() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 100_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 1_000_000;
+    engine.lps[lp_idx].capital = 1_000_000;
     engine.vault = 1_100_000;
 
     // Track balance after account creation fees
@@ -485,8 +485,8 @@ fn test_lp_warmup_initial_state() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // LP should start with warmup state initialized
-    assert_eq!(engine.lps[lp_idx].lp_reserved_pnl, 0);
-    assert_eq!(engine.lps[lp_idx].lp_warmup_state.started_at_slot, 0);
+    assert_eq!(engine.lps[lp_idx].reserved_pnl, 0);
+    assert_eq!(engine.lps[lp_idx].warmup_state.started_at_slot, 0);
 }
 
 #[test]
@@ -495,18 +495,18 @@ fn test_lp_warmup_monotonic() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // Give LP some positive PNL
-    engine.lps[lp_idx].lp_pnl = 10_000;
+    engine.lps[lp_idx].pnl = 10_000;
 
     // At slot 0
-    let w0 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    let w0 = engine.withdrawable_pnl(&engine.lps[lp_idx]);
 
     // Advance 50 slots
     engine.advance_slot(50);
-    let w50 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    let w50 = engine.withdrawable_pnl(&engine.lps[lp_idx]);
 
     // Advance another 50 slots (total 100)
     engine.advance_slot(50);
-    let w100 = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    let w100 = engine.withdrawable_pnl(&engine.lps[lp_idx]);
 
     // Withdrawable should be monotonically increasing
     assert!(w50 >= w0, "LP warmup should be monotonic: w0={}, w50={}", w0, w50);
@@ -519,14 +519,14 @@ fn test_lp_warmup_bounded() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // Give LP some positive PNL
-    engine.lps[lp_idx].lp_pnl = 5_000;
+    engine.lps[lp_idx].pnl = 5_000;
 
     // Reserve some PNL
-    engine.lps[lp_idx].lp_reserved_pnl = 1_000;
+    engine.lps[lp_idx].reserved_pnl = 1_000;
 
     // Even after long time, withdrawable should not exceed available (positive_pnl - reserved)
     engine.advance_slot(1000);
-    let withdrawable = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.lps[lp_idx]);
 
     assert!(withdrawable <= 4_000, "Withdrawable {} should not exceed available {}", withdrawable, 4_000);
 }
@@ -537,13 +537,13 @@ fn test_lp_warmup_with_negative_pnl() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // LP has negative PNL
-    engine.lps[lp_idx].lp_pnl = -3_000;
+    engine.lps[lp_idx].pnl = -3_000;
 
     // Advance time
     engine.advance_slot(100);
 
     // With negative PNL, withdrawable should be 0
-    let withdrawable = engine.lp_withdrawable_pnl(&engine.lps[lp_idx]);
+    let withdrawable = engine.withdrawable_pnl(&engine.lps[lp_idx]);
     assert_eq!(withdrawable, 0, "Withdrawable should be 0 with negative PNL");
 }
 
@@ -559,7 +559,7 @@ fn test_funding_positive_rate_longs_pay_shorts() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 100_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 1_000_000;
+    engine.lps[lp_idx].capital = 1_000_000;
     engine.vault = 1_100_000;
 
     // User opens long position (+1 base unit)
@@ -567,8 +567,8 @@ fn test_funding_positive_rate_longs_pay_shorts() {
     engine.users[user_idx].entry_price = 100_000_000; // $100
 
     // LP has opposite short position
-    engine.lps[lp_idx].lp_position_size = -1_000_000;
-    engine.lps[lp_idx].lp_entry_price = 100_000_000;
+    engine.lps[lp_idx].position_size = -1_000_000;
+    engine.lps[lp_idx].entry_price = 100_000_000;
 
     // Accrue positive funding: +10 bps/slot for 1 slot
     engine.current_slot = 1;
@@ -578,22 +578,22 @@ fn test_funding_positive_rate_longs_pay_shorts() {
     // User payment = 1M * 100,000 / 1e6 = 100,000
     // LP payment = -1M * 100,000 / 1e6 = -100,000
 
-    let user_pnl_before = engine.users[user_idx].pnl_ledger;
-    let lp_pnl_before = engine.lps[lp_idx].lp_pnl;
+    let user_pnl_before = engine.users[user_idx].pnl;
+    let lp_pnl_before = engine.lps[lp_idx].pnl;
 
     // Settle funding
     engine.touch_user(user_idx).unwrap();
     engine.touch_lp(lp_idx).unwrap();
 
     // User (long) should pay 100,000
-    assert_eq!(engine.users[user_idx].pnl_ledger, user_pnl_before - 100_000);
+    assert_eq!(engine.users[user_idx].pnl, user_pnl_before - 100_000);
 
     // LP (short) should receive 100,000
-    assert_eq!(engine.lps[lp_idx].lp_pnl, lp_pnl_before + 100_000);
+    assert_eq!(engine.lps[lp_idx].pnl, lp_pnl_before + 100_000);
 
     // Zero-sum check
     let total_pnl_before = user_pnl_before + lp_pnl_before;
-    let total_pnl_after = engine.users[user_idx].pnl_ledger + engine.lps[lp_idx].lp_pnl;
+    let total_pnl_after = engine.users[user_idx].pnl + engine.lps[lp_idx].pnl;
     assert_eq!(total_pnl_after, total_pnl_before, "Funding should be zero-sum");
 }
 
@@ -605,22 +605,22 @@ fn test_funding_negative_rate_shorts_pay_longs() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 100_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 1_000_000;
+    engine.lps[lp_idx].capital = 1_000_000;
 
     // User opens short position
     engine.users[user_idx].position_size = -1_000_000;
     engine.users[user_idx].entry_price = 100_000_000;
 
     // LP has opposite long position
-    engine.lps[lp_idx].lp_position_size = 1_000_000;
-    engine.lps[lp_idx].lp_entry_price = 100_000_000;
+    engine.lps[lp_idx].position_size = 1_000_000;
+    engine.lps[lp_idx].entry_price = 100_000_000;
 
     // Accrue negative funding: -10 bps/slot
     engine.current_slot = 1;
     engine.accrue_funding(1, 100_000_000, -10).unwrap();
 
-    let user_pnl_before = engine.users[user_idx].pnl_ledger;
-    let lp_pnl_before = engine.lps[lp_idx].lp_pnl;
+    let user_pnl_before = engine.users[user_idx].pnl;
+    let lp_pnl_before = engine.lps[lp_idx].pnl;
 
     engine.touch_user(user_idx).unwrap();
     engine.touch_lp(lp_idx).unwrap();
@@ -628,10 +628,10 @@ fn test_funding_negative_rate_shorts_pay_longs() {
     // With negative funding rate, delta_F is negative (-100,000)
     // User (short) with negative position: payment = (-1M) * (-100,000) / 1e6 = 100,000
     // User pays 100,000 (shorts pay)
-    assert_eq!(engine.users[user_idx].pnl_ledger, user_pnl_before - 100_000);
+    assert_eq!(engine.users[user_idx].pnl, user_pnl_before - 100_000);
 
     // LP (long) receives 100,000
-    assert_eq!(engine.lps[lp_idx].lp_pnl, lp_pnl_before + 100_000);
+    assert_eq!(engine.lps[lp_idx].pnl, lp_pnl_before + 100_000);
 }
 
 #[test]
@@ -648,11 +648,11 @@ fn test_funding_idempotence() {
 
     // Settle once
     engine.touch_user(user_idx).unwrap();
-    let pnl_after_first = engine.users[user_idx].pnl_ledger;
+    let pnl_after_first = engine.users[user_idx].pnl;
 
     // Settle again without new accrual
     engine.touch_user(user_idx).unwrap();
-    let pnl_after_second = engine.users[user_idx].pnl_ledger;
+    let pnl_after_second = engine.users[user_idx].pnl;
 
     assert_eq!(pnl_after_first, pnl_after_second, "Second settlement should not change PNL");
 }
@@ -665,7 +665,7 @@ fn test_funding_partial_close() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 1_000_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 10_000_000;
+    engine.lps[lp_idx].capital = 10_000_000;
     engine.vault = 11_000_000;
 
     // Open long position of 2M base units
@@ -707,7 +707,7 @@ fn test_funding_position_flip() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
     engine.deposit(user_idx, 1_000_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 10_000_000;
+    engine.lps[lp_idx].capital = 10_000_000;
     engine.vault = 11_000_000;
 
     // Open long
@@ -718,7 +718,7 @@ fn test_funding_position_flip() {
     engine.advance_slot(1);
     engine.accrue_funding(1, 100_000_000, 10).unwrap();
 
-    let pnl_before_flip = engine.users[user_idx].pnl_ledger;
+    let pnl_before_flip = engine.users[user_idx].pnl;
 
     // Flip to short (trade -2M to go from +1M to -1M)
     engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, -2_000_000).unwrap();
@@ -727,7 +727,7 @@ fn test_funding_position_flip() {
 
     // Funding should have been settled before the flip
     // User's funding index should be updated
-    assert_eq!(engine.users[user_idx].funding_index_user, engine.funding_index_qpb_e6);
+    assert_eq!(engine.users[user_idx].funding_index, engine.funding_index_qpb_e6);
 
     // Accrue more funding
     engine.advance_slot(2);
@@ -749,15 +749,15 @@ fn test_funding_liquidation_path() {
 
     // Small principal, large position (risky)
     engine.deposit(user_idx, 10_000).unwrap();
-    engine.lps[lp_idx].lp_capital = 10_000_000;
+    engine.lps[lp_idx].capital = 10_000_000;
     engine.vault = 10_010_000;
 
     // Open large long position
     engine.users[user_idx].position_size = 1_000_000;
     engine.users[user_idx].entry_price = 10_000_000; // $10
 
-    engine.lps[lp_idx].lp_position_size = -1_000_000;
-    engine.lps[lp_idx].lp_entry_price = 10_000_000;
+    engine.lps[lp_idx].position_size = -1_000_000;
+    engine.lps[lp_idx].entry_price = 10_000_000;
 
     // Accrue negative funding (hurts the long)
     engine.advance_slot(1);
@@ -773,7 +773,7 @@ fn test_funding_liquidation_path() {
     // but funding should have been settled before the check
     // Verify snapshot is updated
     if liq_result.is_ok() {
-        assert_eq!(engine.users[user_idx].funding_index_user, engine.funding_index_qpb_e6);
+        assert_eq!(engine.users[user_idx].funding_index, engine.funding_index_qpb_e6);
     }
 }
 
@@ -788,7 +788,7 @@ fn test_funding_zero_position() {
     // No position
     assert_eq!(engine.users[user_idx].position_size, 0);
 
-    let pnl_before = engine.users[user_idx].pnl_ledger;
+    let pnl_before = engine.users[user_idx].pnl;
 
     // Accrue funding
     engine.accrue_funding(1, 100_000_000, 100).unwrap(); // Large rate
@@ -797,7 +797,7 @@ fn test_funding_zero_position() {
     engine.touch_user(user_idx).unwrap();
 
     // PNL should be unchanged
-    assert_eq!(engine.users[user_idx].pnl_ledger, pnl_before);
+    assert_eq!(engine.users[user_idx].pnl, pnl_before);
 }
 
 #[test]
@@ -816,7 +816,7 @@ fn test_funding_does_not_touch_principal() {
     engine.touch_user(user_idx).unwrap();
 
     // Principal must be unchanged
-    assert_eq!(engine.users[user_idx].principal, initial_principal);
+    assert_eq!(engine.users[user_idx].capital, initial_principal);
 }
 
 #[test]
@@ -833,17 +833,17 @@ fn test_adl_protects_principal_during_warmup() {
     engine.deposit(attacker, 10_000).unwrap();
     engine.deposit(victim, 10_000).unwrap();
 
-    let attacker_principal = engine.users[attacker].principal;
-    let victim_principal = engine.users[victim].principal;
+    let attacker_principal = engine.users[attacker].capital;
+    let victim_principal = engine.users[victim].capital;
 
     // === Phase 1: Oracle Manipulation (time < T) ===
     // Attacker manipulates oracle and creates fake $50k profit
     // In reality this would come from trading, but we simulate the result
-    engine.users[attacker].pnl_ledger = 50_000;
+    engine.users[attacker].pnl = 50_000;
     engine.users[attacker].warmup_state.slope_per_step = 500; // Will take 100 slots to warm up
 
     // Victim has corresponding loss
-    engine.users[victim].pnl_ledger = -50_000;
+    engine.users[victim].pnl = -50_000;
 
     // Advance only 10 slots (very early in warmup period)
     engine.advance_slot(10);
@@ -867,17 +867,17 @@ fn test_adl_protects_principal_during_warmup() {
     // === Phase 3: Verify Protection ===
 
     // Attacker's principal is NEVER touched (I1)
-    assert_eq!(engine.users[attacker].principal, attacker_principal,
+    assert_eq!(engine.users[attacker].capital, attacker_principal,
                "Attacker principal protected by I1");
 
     // Victim's principal is NEVER touched (I1)
-    assert_eq!(engine.users[victim].principal, victim_principal,
+    assert_eq!(engine.users[victim].capital, victim_principal,
                "Victim principal protected by I1");
 
     // ADL haircuts unwrapped PNL first (I4)
     // We had 45k unwrapped, so all of it gets haircutted
     // The remaining 5k loss goes to insurance fund
-    let remaining_pnl = engine.users[attacker].pnl_ledger;
+    let remaining_pnl = engine.users[attacker].pnl;
     assert_eq!(remaining_pnl, 5_000, "Unwrapped PNL haircutted, only early-warmed remains");
 
     // === Phase 4: Try to Withdraw After Warmup ===
@@ -916,8 +916,8 @@ fn test_adl_haircuts_unwrapped_before_warmed() {
     let mut engine = RiskEngine::new(default_params());
     let user_idx = engine.add_user(10000).unwrap();
 
-    engine.users[user_idx].principal = 10_000;
-    engine.users[user_idx].pnl_ledger = 10_000;
+    engine.users[user_idx].capital = 10_000;
+    engine.users[user_idx].pnl = 10_000;
     engine.users[user_idx].warmup_state.slope_per_step = 100;
 
     // Advance time so half is warmed up
@@ -933,7 +933,7 @@ fn test_adl_haircuts_unwrapped_before_warmed() {
     engine.apply_adl(3_000).unwrap();
 
     // Should take from unwrapped first
-    assert_eq!(engine.users[user_idx].pnl_ledger, 7_000);
+    assert_eq!(engine.users[user_idx].pnl, 7_000);
 
     // The 5k warmed PNL should still be withdrawable
     // (Actually withdrawable = min(7k - 0, 5k) = 5k... wait)
@@ -967,7 +967,7 @@ fn test_warmup_rate_limit_single_user() {
     engine.deposit(user, 1_000).unwrap();
 
     // Give user 20,000 PNL (would need slope of 200 without limit)
-    engine.users[user].pnl_ledger = 20_000;
+    engine.users[user].pnl = 20_000;
 
     // Update warmup slope
     engine.update_warmup_slope(user).unwrap();
@@ -1001,13 +1001,13 @@ fn test_warmup_rate_limit_multiple_users() {
     engine.deposit(user2, 1_000).unwrap();
 
     // User1 gets 6,000 PNL (would want slope of 60)
-    engine.users[user1].pnl_ledger = 6_000;
+    engine.users[user1].pnl = 6_000;
     engine.update_warmup_slope(user1).unwrap();
     assert_eq!(engine.users[user1].warmup_state.slope_per_step, 60);
     assert_eq!(engine.total_warmup_rate, 60);
 
     // User2 gets 8,000 PNL (would want slope of 80)
-    engine.users[user2].pnl_ledger = 8_000;
+    engine.users[user2].pnl = 8_000;
     engine.update_warmup_slope(user2).unwrap();
 
     // Total would be 140, but max is 100, so user2 gets only 40
@@ -1032,17 +1032,17 @@ fn test_warmup_rate_released_on_pnl_decrease() {
     engine.deposit(user2, 1_000).unwrap();
 
     // User1 uses all capacity
-    engine.users[user1].pnl_ledger = 15_000;
+    engine.users[user1].pnl = 15_000;
     engine.update_warmup_slope(user1).unwrap();
     assert_eq!(engine.total_warmup_rate, 100);
 
     // User2 can't get any capacity
-    engine.users[user2].pnl_ledger = 5_000;
+    engine.users[user2].pnl = 5_000;
     engine.update_warmup_slope(user2).unwrap();
     assert_eq!(engine.users[user2].warmup_state.slope_per_step, 0);
 
     // User1's PNL drops to 3,000 (ADL or loss)
-    engine.users[user1].pnl_ledger = 3_000;
+    engine.users[user1].pnl = 3_000;
     engine.update_warmup_slope(user1).unwrap();
     assert_eq!(engine.users[user1].warmup_state.slope_per_step, 30); // 3000/100
     assert_eq!(engine.total_warmup_rate, 30);
@@ -1068,7 +1068,7 @@ fn test_warmup_rate_scales_with_insurance_fund() {
     let user = engine.add_user(100).unwrap();
     engine.deposit(user, 1_000).unwrap();
 
-    engine.users[user].pnl_ledger = 10_000;
+    engine.users[user].pnl = 10_000;
     engine.update_warmup_slope(user).unwrap();
 
     // Max rate = 1000 * 0.5 / 50 = 10
@@ -1100,7 +1100,7 @@ fn test_warmup_rate_limit_invariant_maintained() {
     for i in 0..10 {
         let user = engine.add_user(100).unwrap();
         engine.deposit(user, 1_000).unwrap();
-        engine.users[user].pnl_ledger = (i as i128 + 1) * 1_000;
+        engine.users[user].pnl = (i as i128 + 1) * 1_000;
         engine.update_warmup_slope(user).unwrap();
 
         // Check invariant after each update
@@ -1168,18 +1168,18 @@ fn test_proportional_haircut_on_withdrawal() {
     // User1 tries to withdraw 10,000
     // Fair unwinding: Should get 80% regardless of order
     // Gets: 10,000 * 0.8 = 8,000
-    let user1_balance_before = engine.users[user1].principal;
+    let user1_balance_before = engine.users[user1].capital;
     engine.withdraw(user1, 10_000).unwrap();
-    let withdrawn = user1_balance_before - engine.users[user1].principal;
+    let withdrawn = user1_balance_before - engine.users[user1].capital;
 
     assert_eq!(withdrawn, 8_000, "Should withdraw 80% due to haircut");
 
     // User2 tries to withdraw 5,000
     // Fair unwinding: Also gets 80% (not less than user1)
     // Gets: 5,000 * 0.8 = 4,000
-    let user2_balance_before = engine.users[user2].principal;
+    let user2_balance_before = engine.users[user2].capital;
     engine.withdraw(user2, 5_000).unwrap();
-    let user2_withdrawn = user2_balance_before - engine.users[user2].principal;
+    let user2_withdrawn = user2_balance_before - engine.users[user2].capital;
 
     assert_eq!(user2_withdrawn, 4_000, "Should also get 80% (fair unwinding)");
 
@@ -1198,7 +1198,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     let user = engine.add_user(100).unwrap();
 
     engine.deposit(user, 10_000).unwrap();
-    engine.lps[lp].lp_capital = 50_000;
+    engine.lps[lp].capital = 50_000;
     engine.vault = 60_000;
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
@@ -1228,7 +1228,7 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
     let user = engine.add_user(100).unwrap();
 
     engine.deposit(user, 10_000).unwrap();
-    engine.lps[lp].lp_capital = 50_000;
+    engine.lps[lp].capital = 50_000;
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
     engine.insurance_fund.balance = 1_000;
@@ -1299,9 +1299,9 @@ fn test_deposits_allowed_in_withdrawal_mode() {
     // User2's share of loss: (5k / 15k) * 1k ≈ 333
     // So user2 can withdraw: 5k - 333 ≈ 4,667
 
-    let user2_balance_before = engine.users[user2].principal;
+    let user2_balance_before = engine.users[user2].capital;
     engine.withdraw(user2, 5_000).unwrap();
-    let user2_withdrawn = user2_balance_before - engine.users[user2].principal;
+    let user2_withdrawn = user2_balance_before - engine.users[user2].capital;
 
     // Should be less than full amount due to proportional haircut
     assert!(user2_withdrawn < 5_000);
@@ -1345,22 +1345,22 @@ fn test_fair_unwinding_scenario() {
     // regardless of withdrawal order
 
     // Alice withdraws all (10k * 75% = 7.5k)
-    let alice_before = engine.users[alice].principal;
+    let alice_before = engine.users[alice].capital;
     engine.withdraw(alice, 10_000).unwrap();
-    let alice_got = alice_before - engine.users[alice].principal;
+    let alice_got = alice_before - engine.users[alice].capital;
     assert_eq!(alice_got, 7_500);
 
     // Bob withdraws all (20k * 75% = 15k)
     // Fair unwinding: haircut ratio stays 75% because we track withdrawn amounts
-    let bob_before = engine.users[bob].principal;
+    let bob_before = engine.users[bob].capital;
     engine.withdraw(bob, 20_000).unwrap();
-    let bob_got = bob_before - engine.users[bob].principal;
+    let bob_got = bob_before - engine.users[bob].capital;
     assert_eq!(bob_got, 15_000);
 
     // Charlie withdraws all (10k * 75% = 7.5k)
-    let charlie_before = engine.users[charlie].principal;
+    let charlie_before = engine.users[charlie].capital;
     engine.withdraw(charlie, 10_000).unwrap();
-    let charlie_got = charlie_before - engine.users[charlie].principal;
+    let charlie_got = charlie_before - engine.users[charlie].capital;
     assert_eq!(charlie_got, 7_500);
 
     // Total withdrawn: 7.5k + 15k + 7.5k = 30k

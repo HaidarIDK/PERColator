@@ -60,7 +60,7 @@ fn test_e2e_complete_user_journey() {
 
     // Add LP with capital (LP takes leveraged position opposite to users)
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].lp_capital = 100_000;
+    engine.lps[lp].capital = 100_000;
     engine.vault = 100_000;
 
     // Add two users
@@ -84,7 +84,7 @@ fn test_e2e_complete_user_journey() {
     // Check positions
     assert_eq!(engine.users[alice].position_size, 5_000);
     assert_eq!(engine.users[bob].position_size, -3_000);
-    assert_eq!(engine.lps[lp].lp_position_size, -2_000); // Net opposite to users
+    assert_eq!(engine.lps[lp].position_size, -2_000); // Net opposite to users
 
     // === Phase 2: Price Movement & Unrealized PNL ===
 
@@ -96,8 +96,8 @@ fn test_e2e_complete_user_journey() {
 
     // Alice should have positive PNL from the closed portion
     // Profit = (1.20 - 1.00) × 2500 = 500
-    assert!(engine.users[alice].pnl_ledger > 0);
-    let alice_pnl = engine.users[alice].pnl_ledger;
+    assert!(engine.users[alice].pnl > 0);
+    let alice_pnl = engine.users[alice].pnl;
 
     // === Phase 3: Funding Accrual ===
 
@@ -110,8 +110,8 @@ fn test_e2e_complete_user_journey() {
     engine.touch_user(bob).unwrap();
 
     // Alice (long) should have paid funding, Bob (short) should have received
-    assert!(engine.users[alice].pnl_ledger < alice_pnl); // PNL reduced by funding
-    assert!(engine.users[bob].pnl_ledger > 0); // Received funding
+    assert!(engine.users[alice].pnl < alice_pnl); // PNL reduced by funding
+    assert!(engine.users[bob].pnl > 0); // Received funding
 
     // === Phase 4: PNL Warmup ===
 
@@ -140,13 +140,13 @@ fn test_e2e_complete_user_journey() {
 
     // Now Alice can withdraw her warmed PNL + principal
     let alice_final_withdrawable = engine.withdrawable_pnl(&engine.users[alice]);
-    let alice_withdrawal = engine.users[alice].principal + alice_final_withdrawable;
+    let alice_withdrawal = engine.users[alice].capital + alice_final_withdrawable;
 
     if alice_withdrawal > 0 {
         engine.withdraw(alice, alice_withdrawal).unwrap();
 
         // Alice should have minimal remaining balance
-        assert!(engine.users[alice].principal + clamp_pos_i128(engine.users[alice].pnl_ledger) < 100);
+        assert!(engine.users[alice].capital + clamp_pos_i128(engine.users[alice].pnl) < 100);
     }
 
     // === Phase 6: Bob Gets Liquidated ===
@@ -166,12 +166,12 @@ fn test_e2e_complete_user_journey() {
     // Check if Bob actually got liquidated (position closed) or was above margin
     if engine.users[bob].position_size == 0 {
         // Bob was liquidated - position closed
-        assert!(engine.users[keeper].pnl_ledger > 0, "Keeper should receive reward");
+        assert!(engine.users[keeper].pnl > 0, "Keeper should receive reward");
         println!("Bob was liquidated successfully");
     } else {
         // Bob was above maintenance margin, so not liquidated
         // This can happen if Bob received enough funding payments
-        let bob_collateral = engine.users[bob].principal as i128 + engine.users[bob].pnl_ledger;
+        let bob_collateral = engine.users[bob].capital as i128 + engine.users[bob].pnl;
         assert!(bob_collateral > 0, "Bob should still have some collateral");
         println!("Bob was not liquidated (above maintenance margin)");
     }
@@ -191,7 +191,7 @@ fn test_e2e_multi_user_with_adl() {
     engine.insurance_fund.balance = 10_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].lp_capital = 200_000;
+    engine.lps[lp].capital = 200_000;
     engine.vault = 200_000;
 
     // Add 5 users
@@ -221,7 +221,7 @@ fn test_e2e_multi_user_with_adl() {
 
     // Users 0-3 should have positive PNL
     for i in 0..4 {
-        assert!(engine.users[users[i]].pnl_ledger > 0);
+        assert!(engine.users[users[i]].pnl > 0);
     }
 
     // Simulate a large loss event requiring ADL (e.g., LP underwater)
@@ -231,12 +231,12 @@ fn test_e2e_multi_user_with_adl() {
     // Verify ADL haircutted unwrapped PNL first
     // Users should still have their principal intact
     for i in 0..4 {
-        assert_eq!(engine.users[users[i]].principal, 10_000, "Principal protected by I1");
+        assert_eq!(engine.users[users[i]].capital, 10_000, "Principal protected by I1");
     }
 
     // Total PNL should be reduced by ADL
     let total_pnl_after: i128 = users.iter()
-        .map(|&u| engine.users[u].pnl_ledger)
+        .map(|&u| engine.users[u].pnl)
         .sum();
 
     // Some PNL should remain (not all haircutted)
@@ -259,7 +259,7 @@ fn test_e2e_warmup_rate_limiting_stress() {
     engine.insurance_fund.balance = 20_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].lp_capital = 500_000;
+    engine.lps[lp].capital = 500_000;
     engine.vault = 500_000;
 
     // Add 10 users
@@ -288,8 +288,8 @@ fn test_e2e_warmup_rate_limiting_stress() {
     // Each user should have large positive PNL (~5000 each = 50k total)
     let mut total_pnl = 0i128;
     for &user in &users {
-        assert!(engine.users[user].pnl_ledger > 1_000);
-        total_pnl += engine.users[user].pnl_ledger;
+        assert!(engine.users[user].pnl > 1_000);
+        total_pnl += engine.users[user].pnl;
     }
     println!("Total realized PNL across all users: {}", total_pnl);
 
@@ -356,7 +356,7 @@ fn test_e2e_funding_complete_cycle() {
     engine.insurance_fund.balance = 50_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].lp_capital = 100_000;
+    engine.lps[lp].capital = 100_000;
     engine.vault = 100_000;
 
     let alice = engine.add_user(10_000).unwrap();
@@ -378,8 +378,8 @@ fn test_e2e_funding_complete_cycle() {
     engine.touch_user(alice).unwrap();
     engine.touch_user(bob).unwrap();
 
-    let alice_pnl_after_funding = engine.users[alice].pnl_ledger;
-    let bob_pnl_after_funding = engine.users[bob].pnl_ledger;
+    let alice_pnl_after_funding = engine.users[alice].pnl;
+    let bob_pnl_after_funding = engine.users[bob].pnl;
 
     // Alice (long) paid, Bob (short) received
     assert!(alice_pnl_after_funding < 0); // Paid funding
@@ -409,8 +409,8 @@ fn test_e2e_funding_complete_cycle() {
     engine.touch_user(bob).unwrap();
 
     // Now funding should have reversed
-    let alice_final = engine.users[alice].pnl_ledger;
-    let bob_final = engine.users[bob].pnl_ledger;
+    let alice_final = engine.users[alice].pnl;
+    let bob_final = engine.users[bob].pnl;
 
     // Alice (now short) should have received some funding back
     assert!(alice_final > alice_pnl_after_funding);
@@ -433,7 +433,7 @@ fn test_e2e_oracle_attack_protection() {
     engine.insurance_fund.balance = 30_000;
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.lps[lp].lp_capital = 200_000;
+    engine.lps[lp].capital = 200_000;
     engine.vault = 200_000;
 
     // Honest user
@@ -463,7 +463,7 @@ fn test_e2e_oracle_attack_protection() {
     // execute_trade automatically calls update_warmup_slope() after realizing PNL
 
     // Attacker has massive fake PNL
-    let attacker_fake_pnl = clamp_pos_i128(engine.users[attacker].pnl_ledger);
+    let attacker_fake_pnl = clamp_pos_i128(engine.users[attacker].pnl);
     assert!(attacker_fake_pnl > 10_000); // Huge profit from manipulation
 
     // === Phase 3: Warmup Limiting ===
@@ -507,7 +507,7 @@ fn test_e2e_oracle_attack_protection() {
     engine.apply_adl(attacker_fake_pnl).unwrap();
 
     // Attacker's unwrapped (still warming) PNL gets haircutted
-    let attacker_after_adl = clamp_pos_i128(engine.users[attacker].pnl_ledger);
+    let attacker_after_adl = clamp_pos_i128(engine.users[attacker].pnl);
 
     // Most of the fake PNL should be gone
     assert!(attacker_after_adl < attacker_fake_pnl / 2,
@@ -516,7 +516,7 @@ fn test_e2e_oracle_attack_protection() {
     // === Phase 5: Honest User Protected ===
 
     // Honest user's principal should be intact
-    assert_eq!(engine.users[honest_user].principal, 20_000, "I1: Principal never reduced");
+    assert_eq!(engine.users[honest_user].capital, 20_000, "I1: Principal never reduced");
 
     // Insurance fund took some hit, but limited
     assert!(engine.insurance_fund.balance >= 20_000,
