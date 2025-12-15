@@ -105,7 +105,7 @@ fn i2_withdraw_preserves_conservation() {
 
     assert!(engine.check_conservation());
 
-    let _ = engine.withdraw_principal(user_idx, withdraw);
+    let _ = engine.withdraw(user_idx, withdraw);
 
     assert!(engine.check_conservation(),
             "I2: Withdrawal must preserve conservation");
@@ -256,7 +256,7 @@ fn i7_user_isolation_withdrawal() {
     let user2_pnl = engine.users[user2].pnl_ledger;
 
     // Operate on user1
-    let _ = engine.withdraw_principal(user1, 50);
+    let _ = engine.withdraw(user1, 50);
 
     // User2 should be unchanged
     assert!(engine.users[user2].principal == user2_principal,
@@ -372,10 +372,10 @@ fn withdrawal_requires_sufficient_balance() {
     engine.users[user_idx].principal = principal;
     engine.vault = principal;
 
-    let result = engine.withdraw_principal(user_idx, withdraw);
+    let result = engine.withdraw(user_idx, withdraw);
 
     assert!(result.is_err(),
-            "Withdrawal of more than principal must fail");
+            "Withdrawal of more than available must fail");
 }
 
 #[kani::proof]
@@ -392,15 +392,20 @@ fn pnl_withdrawal_requires_warmup() {
 
     engine.users[user_idx].pnl_ledger = pnl;
     engine.users[user_idx].warmup_state.slope_per_step = 10;
+    engine.users[user_idx].principal = 0; // No principal
     engine.insurance_fund.balance = 100_000;
+    engine.vault = pnl as u128;
     engine.current_slot = 0; // At slot 0, nothing warmed up
 
+    // withdrawable_pnl should be 0 at slot 0
     let withdrawable = engine.withdrawable_pnl(&engine.users[user_idx]);
+    assert!(withdrawable == 0, "No PNL warmed up at slot 0");
 
-    if withdraw > withdrawable {
-        let result = engine.withdraw_pnl(user_idx, withdraw);
+    // Trying to withdraw should fail (no principal, no warmed PNL)
+    if withdraw > 0 {
+        let result = engine.withdraw(user_idx, withdraw);
         assert!(result.is_err(),
-                "Cannot withdraw more PNL than warmed up");
+                "Cannot withdraw when no principal and PNL not warmed up");
     }
 }
 
