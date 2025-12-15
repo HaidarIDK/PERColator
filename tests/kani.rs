@@ -1464,3 +1464,134 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
             "Mixed ADL: LP capital preserved");
 }
 
+// ============================================================================
+// Risk-Reduction-Only Mode Proofs
+// ============================================================================
+
+// Proof 1: Warmup does not advance while paused
+#[kani::proof]
+#[kani::unwind(70)]
+fn proof_warmup_frozen_when_paused() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let started_at: u64 = kani::any();
+    let pause_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(pnl > 0 && pnl < 10_000);
+    kani::assume(slope > 0 && slope < 1_000);
+    kani::assume(started_at < 100);
+    kani::assume(pause_slot >= started_at && pause_slot < 200);
+    kani::assume(current_slot >= pause_slot && current_slot < 300);
+
+    // Setup account with PNL and warmup
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = started_at;
+
+    // Pause warmup at pause_slot
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = pause_slot;
+
+    // Compute withdrawable at pause_slot
+    engine.current_slot = pause_slot;
+    let withdrawable_at_pause = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+    // Compute withdrawable at later current_slot (should be same)
+    engine.current_slot = current_slot;
+    let withdrawable_later = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+    // PROOF: Withdrawable PNL does not increase when warmup is paused
+    assert!(withdrawable_later == withdrawable_at_pause,
+            "Warmup should not advance while paused");
+}
+
+// Proof 2: In risk mode, withdraw never decreases PNL directly (only via warmup conversion)
+#[kani::proof]
+#[kani::unwind(70)]
+fn proof_withdraw_only_decreases_via_conversion() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let amount: u128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > 0 && pnl < 5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(amount > 0 && amount < 1_000);
+
+    // Setup account
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+    engine.vault = 100_000;
+
+    // Enter risk mode
+    engine.enter_risk_reduction_only_mode();
+
+    // Compute expected warmed amount
+    let warmed = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+    let pnl_before = engine.accounts[user_idx as usize].pnl;
+
+    // Attempt withdrawal
+    let _ = engine.withdraw(user_idx, amount);
+
+    let pnl_after = engine.accounts[user_idx as usize].pnl;
+
+    // PROOF: PNL only decreases by the warmed conversion amount
+    // pnl_after should be >= pnl_before - warmed
+    // and pnl_after should be <= pnl_before
+    assert!(pnl_after >= pnl_before - (warmed as i128),
+            "PNL should not decrease more than warmed amount");
+    assert!(pnl_after <= pnl_before,
+            "PNL should not increase during withdrawal");
+}
+
+// Proof 3: Risk-increasing trades are rejected in risk mode
+#[kani::proof]
+#[kani::unwind(70)]
+fn proof_risk_increasing_trades_rejected() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let old_pos: i128 = kani::any();
+    let delta: i128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(old_pos >= -100 && old_pos <= 100);
+    kani::assume(delta >= -100 && delta <= 100);
+    kani::assume(delta != 0); // Non-zero trade
+
+    // Setup positions
+    engine.accounts[user_idx as usize].position_size = old_pos;
+    engine.accounts[lp_idx as usize].position_size = -old_pos;
+    engine.accounts[user_idx as usize].capital = 100_000;
+    engine.accounts[lp_idx as usize].capital = 100_000;
+    engine.vault = 200_000;
+
+    let new_pos = old_pos.saturating_add(delta);
+    let user_increases = new_pos.abs() > old_pos.abs();
+
+    // Enter risk mode
+    engine.enter_risk_reduction_only_mode();
+
+    // Attempt trade
+    let result = engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, 100_000_000, delta);
+
+    // PROOF: If trade increases absolute exposure, it must be rejected in risk mode
+    if user_increases {
+        assert!(result.is_err(), "Risk-increasing trades must fail in risk mode");
+    }
+}
+
