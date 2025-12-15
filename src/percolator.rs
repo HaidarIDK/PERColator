@@ -1271,60 +1271,57 @@ where
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
         let mut remaining_loss = total_loss;
 
-        // Phase 1a: Haircut unwrapped USER PNL (youngest first)
-        // Calculate all haircuts first, then apply
-        let mut user_haircuts = Vec::new();
-        for (idx, user) in self.users.iter().enumerate() {
-            if remaining_loss == 0 {
-                break;
-            }
+        // Phase 1: Haircut unwrapped PNL PROPORTIONALLY across ALL accounts (users AND LPs)
+        // CRITICAL FIX: Fair treatment - no preferential ordering
 
+        // Step 1: Calculate total unwrapped PNL across all accounts
+        let mut total_unwrapped = 0u128;
+        let mut user_unwrapped_amounts = Vec::new();
+        let mut lp_unwrapped_amounts = Vec::new();
+
+        for (idx, user) in self.users.iter().enumerate() {
             let positive_pnl = clamp_pos_i128(user.pnl);
             let withdrawable = self.withdrawable_pnl(user);
-
-            // Unwrapped PNL = positive PNL - withdrawable - reserved
             let unwrapped = sub_u128(sub_u128(positive_pnl, withdrawable), user.reserved_pnl);
 
             if unwrapped > 0 {
-                let haircut = core::cmp::min(unwrapped, remaining_loss);
-                user_haircuts.push((idx, haircut));
-                remaining_loss = sub_u128(remaining_loss, haircut);
+                user_unwrapped_amounts.push((idx, unwrapped));
+                total_unwrapped = add_u128(total_unwrapped, unwrapped);
             }
         }
 
-        // Apply user haircuts
-        for (idx, haircut) in user_haircuts {
-            if let Some(user) = self.users.get_mut(idx) {
-                user.pnl = user.pnl.saturating_sub(haircut as i128);
-            }
-        }
-
-        // Phase 1b: Haircut unwrapped LP PNL (if user haircuts insufficient)
-        // CRITICAL FIX: LPs now subject to same ADL protection as users
-        let mut lp_haircuts = Vec::new();
         for (idx, lp) in self.lps.iter().enumerate() {
-            if remaining_loss == 0 {
-                break;
-            }
-
             let positive_pnl = clamp_pos_i128(lp.pnl);
             let withdrawable = self.withdrawable_pnl(lp);
-
-            // Unwrapped PNL = positive PNL - withdrawable - reserved
             let unwrapped = sub_u128(sub_u128(positive_pnl, withdrawable), lp.reserved_pnl);
 
             if unwrapped > 0 {
-                let haircut = core::cmp::min(unwrapped, remaining_loss);
-                lp_haircuts.push((idx, haircut));
-                remaining_loss = sub_u128(remaining_loss, haircut);
+                lp_unwrapped_amounts.push((idx, unwrapped));
+                total_unwrapped = add_u128(total_unwrapped, unwrapped);
             }
         }
 
-        // Apply LP haircuts
-        for (idx, haircut) in lp_haircuts {
-            if let Some(lp) = self.lps.get_mut(idx) {
-                lp.pnl = lp.pnl.saturating_sub(haircut as i128);
+        // Step 2: Apply proportional haircuts to ALL accounts
+        if total_unwrapped > 0 {
+            let loss_to_socialize = core::cmp::min(remaining_loss, total_unwrapped);
+
+            // Haircut users proportionally
+            for (idx, unwrapped) in user_unwrapped_amounts {
+                let haircut = mul_u128(loss_to_socialize, unwrapped) / total_unwrapped;
+                if let Some(user) = self.users.get_mut(idx) {
+                    user.pnl = user.pnl.saturating_sub(haircut as i128);
+                }
             }
+
+            // Haircut LPs proportionally (same formula)
+            for (idx, unwrapped) in lp_unwrapped_amounts {
+                let haircut = mul_u128(loss_to_socialize, unwrapped) / total_unwrapped;
+                if let Some(lp) = self.lps.get_mut(idx) {
+                    lp.pnl = lp.pnl.saturating_sub(haircut as i128);
+                }
+            }
+
+            remaining_loss = sub_u128(remaining_loss, loss_to_socialize);
         }
 
         // Phase 2: Apply remaining loss to insurance fund

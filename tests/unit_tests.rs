@@ -1374,3 +1374,194 @@ fn test_fair_unwinding_scenario() {
     assert_eq!(charlie_got * 100 / charlie_before, 75);
 }
 
+// ==============================================================================
+// LP-SPECIFIC TESTS (CRITICAL - Addresses audit findings)
+// ==============================================================================
+
+#[test]
+fn test_lp_liquidation() {
+    // CRITICAL: Tests that liquidate_lp() actually works
+    let mut engine = RiskEngine::new(default_params());
+
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    let keeper_idx = engine.add_user(1).unwrap();
+
+    // LP deposits capital
+    engine.lp_deposit(lp_idx, 100).unwrap();
+
+    // Simulate LP taking a large losing position
+    // Position size = 10,000 units, entry at $1
+    // Position value = 10,000 units * $1 = $10,000
+    // Maintenance margin = $10,000 * 5% = $500
+    // Collateral = capital + clamp_pos(pnl) = 100 + 0 = 100
+    // 100 < 500 -> liquidatable!
+    engine.lps[lp_idx].position_size = 10_000;
+    engine.lps[lp_idx].entry_price = 1_000_000;
+    engine.lps[lp_idx].pnl = -50; // Some loss
+
+    let oracle_price = 1_000_000; // $1
+
+    // Calculate if LP is underwater (using same logic as liquidate_lp)
+    let collateral = engine.lps[lp_idx].capital + (if engine.lps[lp_idx].pnl > 0 { engine.lps[lp_idx].pnl as u128 } else { 0 });
+    let position_value = (engine.lps[lp_idx].position_size.abs() as u128 * oracle_price as u128) / 1_000_000;
+    let maintenance_margin = position_value * 500 / 10_000; // 5%
+
+    assert!(collateral < maintenance_margin, "LP should be underwater: collateral {} < maintenance {}", collateral, maintenance_margin);
+
+    // Liquidate LP
+    let result = engine.liquidate_lp(lp_idx, keeper_idx, oracle_price);
+    assert!(result.is_ok(), "LP liquidation should succeed");
+
+    // Verify position closed
+    assert_eq!(engine.lps[lp_idx].position_size, 0, "LP position should be closed");
+
+    // Verify keeper received reward
+    assert!(engine.users[keeper_idx].pnl > 0, "Keeper should receive liquidation fee");
+}
+
+#[test]
+fn test_lp_withdraw() {
+    // CRITICAL: Tests that lp_withdraw() works correctly
+    let mut engine = RiskEngine::new(default_params());
+
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+
+    // LP deposits capital
+    engine.lp_deposit(lp_idx, 10_000).unwrap();
+
+    // Fund insurance fund to allow warmup (warmup rate is limited by insurance fund balance)
+    engine.insurance_fund.balance = 1_000_000;
+
+    // LP earns some PNL
+    engine.lps[lp_idx].pnl = 5_000;
+
+    // Advance time to allow warmup
+    engine.current_slot = 100;
+    engine.update_lp_warmup_slope(lp_idx).unwrap();
+    engine.current_slot = 200; // Full warmup
+
+    // lp_withdraw converts warmed PNL to capital, then withdraws
+    // After conversion: capital = 10,000 + 5,000 = 15,000
+    // But vault only has 10,000 (from deposit), so can only withdraw up to 10,000
+    let result = engine.lp_withdraw(lp_idx, 10_000);
+    assert!(result.is_ok(), "LP withdrawal should succeed: {:?}", result);
+
+    assert_eq!(engine.vault, 0, "Vault should be empty after withdrawal");
+    assert_eq!(engine.lps[lp_idx].capital, 5_000, "LP should have 5,000 capital remaining (from converted PNL)");
+    assert_eq!(engine.lps[lp_idx].pnl, 0, "PNL should be converted to capital");
+}
+
+#[test]
+fn test_lp_withdraw_with_haircut() {
+    // CRITICAL: Tests that LPs are subject to withdrawal-mode haircuts
+    let mut engine = RiskEngine::new(default_params());
+    
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    
+    engine.deposit(user_idx, 10_000).unwrap();
+    engine.lp_deposit(lp_idx, 10_000).unwrap();
+    
+    // Simulate crisis - set loss_accum
+    engine.loss_accum = 5_000; // 25% loss
+    engine.withdrawal_only = true;
+    
+    // Both should get 75% haircut
+    let user_result = engine.withdraw(user_idx, 10_000);
+    assert!(user_result.is_ok());
+    
+    let lp_result = engine.lp_withdraw(lp_idx, 10_000);
+    assert!(lp_result.is_ok());
+    
+    // Both should have withdrawn same proportion
+    let total_withdrawn = engine.withdrawal_mode_withdrawn;
+    assert!(total_withdrawn < 20_000, "Total withdrawn should be less than requested due to haircuts");
+    assert!(total_withdrawn > 14_000, "Haircut should be approximately 25%");
+}
+
+#[test]
+fn test_update_lp_warmup_slope() {
+    // CRITICAL: Tests that LP warmup actually gets rate limited
+    let mut engine = RiskEngine::new(default_params());
+    
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    
+    // Set insurance fund
+    engine.insurance_fund.balance = 10_000;
+    
+    // LP earns large PNL
+    engine.lps[lp_idx].pnl = 50_000;
+    
+    // Update warmup slope
+    engine.update_lp_warmup_slope(lp_idx).unwrap();
+    
+    // Should be rate limited
+    let ideal_slope = 50_000 / 100; // 500 per slot
+    let actual_slope = engine.lps[lp_idx].warmup_state.slope_per_step;
+    
+    assert!(actual_slope < ideal_slope, "LP warmup should be rate limited");
+    assert!(engine.total_warmup_rate > 0, "LP should contribute to total warmup rate");
+}
+
+#[test]
+fn test_adl_proportional_haircut_users_and_lps() {
+    // CRITICAL: Tests that ADL haircuts users and LPs PROPORTIONALLY, not sequentially
+    let mut engine = RiskEngine::new(default_params());
+    
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    
+    // Both have unwrapped PNL
+    engine.users[user_idx].pnl = 10_000; // User has 10k unwrapped
+    engine.lps[lp_idx].pnl = 10_000;     // LP has 10k unwrapped
+    
+    // Apply ADL with 10k loss
+    engine.apply_adl(10_000).unwrap();
+    
+    // BOTH should be haircutted proportionally (50% each)
+    assert_eq!(engine.users[user_idx].pnl, 5_000, "User should lose 5k (50%)");
+    assert_eq!(engine.lps[lp_idx].pnl, 5_000, "LP should lose 5k (50%)");
+}
+
+#[test]
+fn test_adl_fairness_different_amounts() {
+    // CRITICAL: Tests proportional ADL with different PNL amounts
+    let mut engine = RiskEngine::new(default_params());
+    
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    
+    // User has more unwrapped PNL than LP
+    engine.users[user_idx].pnl = 15_000; // User: 15k
+    engine.lps[lp_idx].pnl = 5_000;      // LP: 5k
+    // Total: 20k
+    
+    // Apply ADL with 10k loss (50% of total)
+    engine.apply_adl(10_000).unwrap();
+    
+    // Each should lose 50% of their PNL
+    assert_eq!(engine.users[user_idx].pnl, 7_500, "User should lose 7.5k (50% of 15k)");
+    assert_eq!(engine.lps[lp_idx].pnl, 2_500, "LP should lose 2.5k (50% of 5k)");
+}
+
+#[test]
+fn test_lp_capital_never_reduced_by_adl() {
+    // CRITICAL: Verifies Invariant I1 for LPs
+    let mut engine = RiskEngine::new(default_params());
+    
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    
+    engine.lp_deposit(lp_idx, 10_000).unwrap();
+    engine.lps[lp_idx].pnl = 5_000;
+    
+    let capital_before = engine.lps[lp_idx].capital;
+    
+    // Apply massive ADL
+    engine.apply_adl(100_000).unwrap();
+    
+    // Capital should NEVER be reduced
+    assert_eq!(engine.lps[lp_idx].capital, capital_before, "I1: LP capital must never be reduced by ADL");
+    
+    // Only PNL should be affected
+    assert!(engine.lps[lp_idx].pnl < 5_000, "LP PNL should be haircutted");
+}
