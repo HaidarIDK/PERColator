@@ -342,7 +342,7 @@ if remaining_loss > 0:
     leftover = remaining_loss - insurance_cover
     if leftover > 0:
         loss_accum += leftover
-        withdrawal_only = true
+        risk_reduction_only = true
         warmup_paused = true
 ```
 
