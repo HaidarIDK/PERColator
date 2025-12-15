@@ -21,80 +21,117 @@
 #[cfg(kani)]
 extern crate kani;
 
-extern crate alloc;
-use alloc::vec::Vec;
+// ============================================================================
+// Constants
+// ============================================================================
+
+pub const MAX_ACCOUNTS: usize = 4096;
+pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words of u64
 
 // ============================================================================
 // Core Data Structures
 // ============================================================================
 
-/// Time-based PNL warmup state
-/// PNL must warm up over time T before becoming withdrawable principal
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Warmup {
-    /// Slot when warmup started
-    pub started_at_slot: u64,
-    /// Linear vesting rate per slot
-    pub slope_per_step: u128,
+pub enum AccountKind {
+    User = 0,
+    LP = 1,
 }
 
-/// User account with PNL warmup and fee tracking
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UserAccount {
-    /// User's deposited principal - NEVER reduced by ADL/socialization (Invariant I1)
-    pub principal: u128,
+/// Unified account - can be user or LP
+///
+/// LPs are distinguished by having kind = LP and matcher_program/context set.
+/// Users have kind = User and matcher arrays zeroed.
+///
+/// This unification ensures LPs receive the same risk management protections as users:
+/// - PNL warmup
+/// - ADL (Auto-Deleveraging)
+/// - Liquidations
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Account {
+    pub kind: AccountKind,
 
-    /// Realized PNL (can be positive or negative)
-    pub pnl_ledger: i128,
+    // ========================================
+    // Capital & PNL (universal)
+    // ========================================
+
+    /// Deposited capital (user principal or LP capital)
+    /// NEVER reduced by ADL/socialization (Invariant I1)
+    pub capital: u128,
+
+    /// Realized PNL from trading (can be positive or negative)
+    pub pnl: i128,
 
     /// PNL reserved for pending withdrawals
     pub reserved_pnl: u128,
 
-    /// Warmup state for PNL vesting
-    pub warmup_state: Warmup,
+    // ========================================
+    // Warmup (embedded, no separate struct)
+    // ========================================
 
-    /// Current position size (for liquidation checks)
+    /// Slot when warmup started
+    pub warmup_started_at_slot: u64,
+
+    /// Linear vesting rate per slot
+    pub warmup_slope_per_step: u128,
+
+    // ========================================
+    // Position (universal)
+    // ========================================
+
+    /// Current position size (+ long, - short)
     pub position_size: i128,
 
-    /// Last entry price (for PNL calculation)
+    /// Average entry price for position
     pub entry_price: u64,
 
-    /// Fee index snapshot at last update
-    pub fee_index_user: u128,
+    // ========================================
+    // Funding (universal)
+    // ========================================
 
-    /// Accrued but not yet claimed fees
-    pub fee_accrued: u128,
+    /// Funding index snapshot (quote per base, 1e6 scale)
+    pub funding_index: i128,
 
-    /// Cached vested positive PNL for fee distribution
-    pub vested_pos_snapshot: u128,
+    // ========================================
+    // LP-specific (only meaningful for LP kind)
+    // ========================================
+
+    /// Matching engine program ID (zero for user accounts)
+    pub matcher_program: [u8; 32],
+
+    /// Matching engine context account (zero for user accounts)
+    pub matcher_context: [u8; 32],
 }
 
-/// LP account - one per matching engine
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LPAccount {
-    /// Matching engine program ID
-    pub matching_engine_program: [u8; 32],
+impl Account {
+    /// Check if this account is an LP
+    pub fn is_lp(&self) -> bool {
+        self.kind == AccountKind::LP
+    }
 
-    /// Matching engine context account
-    pub matching_engine_context: [u8; 32],
+    /// Check if this account is a regular user
+    pub fn is_user(&self) -> bool {
+        self.kind == AccountKind::User
+    }
+}
 
-    /// LP deposited capital
-    pub lp_capital: u128,
-
-    /// LP's PNL from providing liquidity
-    pub lp_pnl: i128,
-
-    /// Reserved PNL for pending LP withdrawals
-    pub lp_reserved_pnl: u128,
-
-    /// PNL warmup state for LP
-    pub lp_warmup_state: Warmup,
-
-    /// LP position (opposite of user positions)
-    pub lp_position_size: i128,
-
-    /// LP's entry price
-    pub lp_entry_price: u64,
+/// Helper to create empty account
+fn empty_account() -> Account {
+    Account {
+        kind: AccountKind::User,
+        capital: 0,
+        pnl: 0,
+        reserved_pnl: 0,
+        warmup_started_at_slot: 0,
+        warmup_slope_per_step: 0,
+        position_size: 0,
+        entry_price: 0,
+        funding_index: 0,
+        matcher_program: [0; 32],
+        matcher_context: [0; 32],
+    }
 }
 
 /// Insurance fund state
@@ -131,17 +168,17 @@ pub struct RiskParams {
     /// Insurance fund share of liquidation fee (rest goes to keeper)
     pub insurance_fee_share_bps: u64,
 
-    /// Maximum number of users
-    pub max_users: u64,
+    /// Maximum number of accounts
+    pub max_accounts: u64,
 
-    /// Maximum number of LPs
-    pub max_lps: u64,
-
-    /// Base fee for adding accounts (in basis points of notional? Wait, absolute?)
+    /// Base account creation fee in basis points (e.g., 10000 = 1%)
+    /// Actual fee = (account_fee_bps * capacity_multiplier) / 10000
+    /// The multiplier increases as the system approaches max capacity
     pub account_fee_bps: u64,
 }
 
-/// Main risk engine state - all in one contiguous memory chunk
+/// Main risk engine state - fixed slab with bitmap
+#[repr(C)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RiskEngine {
     /// Total vault balance (all deposited funds)
@@ -150,29 +187,51 @@ pub struct RiskEngine {
     /// Insurance fund
     pub insurance_fund: InsuranceFund,
 
-    /// All user accounts
-    pub users: Vec<UserAccount>,
-
-    /// All LP accounts (one per matching engine)
-    pub lps: Vec<LPAccount>,
-
     /// Risk parameters
     pub params: RiskParams,
 
     /// Current slot (for warmup calculations)
     pub current_slot: u64,
 
-    /// Global fee index for fee distribution
-    pub fee_index: u128,
+    /// Global funding index (quote per 1 base, scaled by 1e6)
+    pub funding_index_qpb_e6: i128,
 
-    /// Sum of all vested positive PNL (for fee distribution)
-    pub sum_vested_pos_pnl: u128,
+    /// Last slot when funding was accrued
+    pub last_funding_slot: u64,
 
     /// Loss accumulator for socialization
     pub loss_accum: u128,
 
-    /// Fee carry for rounding
-    pub fee_carry: u128,
+    /// Withdrawal-only mode flag
+    /// When true, only withdrawals are allowed (no trading/deposits)
+    /// Automatically enabled when loss_accum > 0
+    pub withdrawal_only: bool,
+
+    /// Total amount withdrawn during withdrawal-only mode
+    /// Used to maintain fair haircut ratio during unwinding
+    pub withdrawal_mode_withdrawn: u128,
+
+    /// Warmup pause flag
+    pub warmup_paused: bool,
+
+    /// Slot when warmup was paused
+    pub warmup_pause_slot: u64,
+
+    // ========================================
+    // Slab Management
+    // ========================================
+
+    /// Occupancy bitmap (4096 bits = 64 u64 words)
+    pub used: [u64; BITMAP_WORDS],
+
+    /// Freelist head (u16::MAX = none)
+    pub free_head: u16,
+
+    /// Freelist next pointers
+    pub next_free: [u16; MAX_ACCOUNTS],
+
+    /// Account slab (4096 accounts)
+    pub accounts: [Account; MAX_ACCOUNTS],
 }
 
 // ============================================================================
@@ -199,14 +258,20 @@ pub enum RiskError {
     /// Arithmetic overflow
     Overflow,
 
-    /// User account not found
-    UserNotFound,
+    /// Account not found
+    AccountNotFound,
 
-    /// LP account not found
-    LPNotFound,
+    /// Account is not an LP account
+    NotAnLPAccount,
 
     /// Position size mismatch
     PositionSizeMismatch,
+
+    /// System in withdrawal-only mode (deposits and trading blocked)
+    WithdrawalOnlyMode,
+
+    /// Account kind mismatch
+    AccountKindMismatch,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -231,8 +296,12 @@ fn mul_u128(a: u128, b: u128) -> u128 {
 }
 
 #[inline]
-fn div_u128(a: u128, b: u128) -> u128 {
-    if b == 0 { 0 } else { a / b }
+fn div_u128(a: u128, b: u128) -> Result<u128> {
+    if b == 0 {
+        Err(RiskError::Overflow) // Division by zero
+    } else {
+        Ok(a / b)
+    }
 }
 
 #[inline]
@@ -246,12 +315,153 @@ fn clamp_neg_i128(val: i128) -> u128 {
 }
 
 // ============================================================================
-// Core Invariants and Helpers
+// Matching Engine Trait
+// ============================================================================
+
+/// Trait for pluggable matching engines
+///
+/// Implementers can provide custom order matching logic via CPI.
+/// The matching engine is responsible for validating and executing trades
+/// according to its own rules (CLOB, AMM, RFQ, etc).
+pub trait MatchingEngine {
+    /// Execute a trade between LP and user
+    ///
+    /// # Arguments
+    /// * `lp_program` - The LP's matching engine program ID
+    /// * `lp_context` - The LP's matching engine context account
+    /// * `oracle_price` - Current oracle price for reference
+    /// * `size` - Requested position size (positive = long, negative = short)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the matching engine approves the trade
+    /// * `Err(RiskError)` if the trade is rejected
+    ///
+    /// # Safety
+    /// The matching engine MUST verify user authorization before approving trades.
+    /// The risk engine will check solvency after the trade executes.
+    fn execute_match(
+        &self,
+        lp_program: &[u8; 32],
+        lp_context: &[u8; 32],
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<()>;
+}
+
+/// No-op matching engine (for testing)
+pub struct NoOpMatcher;
+
+impl MatchingEngine for NoOpMatcher {
+    fn execute_match(
+        &self,
+        _lp_program: &[u8; 32],
+        _lp_context: &[u8; 32],
+        _oracle_price: u64,
+        _size: i128,
+    ) -> Result<()> {
+        // Always approve trades (no actual matching logic)
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Core Implementation
 // ============================================================================
 
 impl RiskEngine {
-    /// Calculate withdrawable PNL for a user (after warmup)
-    /// This is the core PNL warmup mechanism (Invariant I5)
+    /// Create a new risk engine
+    pub fn new(params: RiskParams) -> Self {
+        let mut engine = Self {
+            vault: 0,
+            insurance_fund: InsuranceFund {
+                balance: 0,
+                fee_revenue: 0,
+                liquidation_revenue: 0,
+            },
+            params,
+            current_slot: 0,
+            funding_index_qpb_e6: 0,
+            last_funding_slot: 0,
+            loss_accum: 0,
+            withdrawal_only: false,
+            withdrawal_mode_withdrawn: 0,
+            warmup_paused: false,
+            warmup_pause_slot: 0,
+            used: [0; BITMAP_WORDS],
+            free_head: 0,
+            next_free: [0; MAX_ACCOUNTS],
+            accounts: [empty_account(); MAX_ACCOUNTS],
+        };
+
+        // Initialize freelist: 0 -> 1 -> 2 -> ... -> 4095 -> NONE
+        for i in 0..MAX_ACCOUNTS - 1 {
+            engine.next_free[i] = (i + 1) as u16;
+        }
+        engine.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
+
+        engine
+    }
+
+    // ========================================
+    // Bitmap Helpers
+    // ========================================
+
+    fn is_used(&self, idx: usize) -> bool {
+        let w = idx >> 6;
+        let b = idx & 63;
+        ((self.used[w] >> b) & 1) == 1
+    }
+
+    fn set_used(&mut self, idx: usize) {
+        let w = idx >> 6;
+        let b = idx & 63;
+        self.used[w] |= 1u64 << b;
+    }
+
+    fn clear_used(&mut self, idx: usize) {
+        let w = idx >> 6;
+        let b = idx & 63;
+        self.used[w] &= !(1u64 << b);
+    }
+
+    fn for_each_used_mut<F: FnMut(usize, &mut Account)>(&mut self, mut f: F) {
+        for (block, word) in self.used.iter().copied().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1; // Clear lowest bit
+                f(idx, &mut self.accounts[idx]);
+            }
+        }
+    }
+
+    fn for_each_used<F: FnMut(usize, &Account)>(&self, mut f: F) {
+        for (block, word) in self.used.iter().copied().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1; // Clear lowest bit
+                f(idx, &self.accounts[idx]);
+            }
+        }
+    }
+
+    // ========================================
+    // Account Allocation
+    // ========================================
+
+    fn alloc_slot(&mut self) -> Result<u16> {
+        if self.free_head == u16::MAX {
+            return Err(RiskError::Overflow); // Slab full
+        }
+        let idx = self.free_head;
+        self.free_head = self.next_free[idx as usize];
+        self.set_used(idx as usize);
+        Ok(idx)
+    }
+
     /// Calculate account creation fee multiplier
     fn account_fee_multiplier(max: u64, used: u64) -> u128 {
         if used >= max {
@@ -270,19 +480,122 @@ impl RiskEngine {
             }
         }
     }
-    pub fn withdrawable_pnl(&self, user: &UserAccount) -> u128 {
+
+    /// Count used accounts
+    fn count_used(&self) -> u64 {
+        let mut count = 0u64;
+        self.for_each_used(|_, _| {
+            count += 1;
+        });
+        count
+    }
+
+    /// Add a new user account
+    pub fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
+        let used_count = self.count_used();
+        if used_count >= self.params.max_accounts {
+            return Err(RiskError::Overflow);
+        }
+
+        let multiplier = Self::account_fee_multiplier(self.params.max_accounts, used_count);
+        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        if fee_payment < required_fee {
+            return Err(RiskError::InsufficientBalance);
+        }
+
+        // Pay fee to insurance
+        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
+        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
+
+        // Allocate slot
+        let idx = self.alloc_slot()?;
+
+        // Initialize account
+        self.accounts[idx as usize] = Account {
+            kind: AccountKind::User,
+            capital: 0,
+            pnl: 0,
+            reserved_pnl: 0,
+            warmup_started_at_slot: self.current_slot,
+            warmup_slope_per_step: 0,
+            position_size: 0,
+            entry_price: 0,
+            funding_index: self.funding_index_qpb_e6,
+            matcher_program: [0; 32],
+            matcher_context: [0; 32],
+        };
+
+        Ok(idx)
+    }
+
+    /// Add a new LP account
+    pub fn add_lp(
+        &mut self,
+        matching_engine_program: [u8; 32],
+        matching_engine_context: [u8; 32],
+        fee_payment: u128,
+    ) -> Result<u16> {
+        let used_count = self.count_used();
+        if used_count >= self.params.max_accounts {
+            return Err(RiskError::Overflow);
+        }
+
+        let multiplier = Self::account_fee_multiplier(self.params.max_accounts, used_count);
+        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        if fee_payment < required_fee {
+            return Err(RiskError::InsufficientBalance);
+        }
+
+        // Pay fee to insurance
+        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
+        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
+
+        // Allocate slot
+        let idx = self.alloc_slot()?;
+
+        // Initialize account
+        self.accounts[idx as usize] = Account {
+            kind: AccountKind::LP,
+            capital: 0,
+            pnl: 0,
+            reserved_pnl: 0,
+            warmup_started_at_slot: self.current_slot,
+            warmup_slope_per_step: 0,
+            position_size: 0,
+            entry_price: 0,
+            funding_index: self.funding_index_qpb_e6,
+            matcher_program: matching_engine_program,
+            matcher_context: matching_engine_context,
+        };
+
+        Ok(idx)
+    }
+
+    // ========================================
+    // Warmup
+    // ========================================
+
+    /// Calculate withdrawable PNL for an account after warmup
+    pub fn withdrawable_pnl(&self, account: &Account) -> u128 {
         // Only positive PNL can be withdrawn
-        let positive_pnl = clamp_pos_i128(user.pnl_ledger);
+        let positive_pnl = clamp_pos_i128(account.pnl);
 
         // Available = positive PNL - reserved
-        let available_pnl = sub_u128(positive_pnl, user.reserved_pnl);
+        let available_pnl = sub_u128(positive_pnl, account.reserved_pnl);
+
+        // Apply warmup pause
+        let effective_slot = if self.warmup_paused {
+            self.warmup_pause_slot
+        } else {
+            self.current_slot
+        };
 
         // Calculate elapsed slots
-        let elapsed_slots = self.current_slot.saturating_sub(user.warmup_state.started_at_slot);
+        let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
 
         // Calculate warmed up cap: slope * elapsed_slots
         let warmed_up_cap = mul_u128(
-            user.warmup_state.slope_per_step,
+            account.warmup_slope_per_step,
             elapsed_slots as u128
         );
 
@@ -290,117 +603,184 @@ impl RiskEngine {
         core::cmp::min(available_pnl, warmed_up_cap)
     }
 
-    /// Calculate withdrawable PNL for an LP (after warmup)
-    pub fn lp_withdrawable_pnl(&self, lp: &LPAccount) -> u128 {
-        // Only positive PNL can be withdrawn
-        let positive_pnl = clamp_pos_i128(lp.lp_pnl);
-
-        // Available = positive PNL - reserved
-        let available_pnl = sub_u128(positive_pnl, lp.lp_reserved_pnl);
-
-        // Calculate elapsed slots
-        let elapsed_slots = self.current_slot.saturating_sub(lp.lp_warmup_state.started_at_slot);
-
-        // Calculate warmed up cap: slope * elapsed_slots
-        let warmed_up_cap = mul_u128(
-            lp.lp_warmup_state.slope_per_step,
-            elapsed_slots as u128
-        );
-
-        // Return minimum of available and warmed up
-        core::cmp::min(available_pnl, warmed_up_cap)
-    }
-
-    /// Calculate user's collateral (principal + positive PNL)
-    pub fn user_collateral(&self, user: &UserAccount) -> u128 {
-        add_u128(user.principal, clamp_pos_i128(user.pnl_ledger))
-    }
-
-    /// Check if user is above maintenance margin
-    pub fn is_above_maintenance_margin(&self, user: &UserAccount, oracle_price: u64) -> bool {
-        let collateral = self.user_collateral(user);
-
-        // Calculate position value at current price
-        let position_value = mul_u128(
-            user.position_size.abs() as u128,
-            oracle_price as u128
-        ) / 1_000_000; // Assuming price is in 1e6 format
-
-        // Maintenance margin requirement
-        let margin_required = mul_u128(
-            position_value,
-            self.params.maintenance_margin_bps as u128
-        ) / 10_000;
-
-        collateral > margin_required
-    }
-
-    /// Check conservation invariant (I2)
-    /// vault = sum(principal) + sum(max(0, pnl)) + insurance - fees_outstanding
-    pub fn check_conservation(&self) -> bool {
-        let mut total_principal = 0u128;
-        let mut total_positive_pnl = 0u128;
-
-        for user in &self.users {
-            total_principal = add_u128(total_principal, user.principal);
-            total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(user.pnl_ledger));
+    /// Update warmup slope for an account
+    /// NOTE: No warmup rate cap (removed for simplicity)
+    pub fn update_warmup_slope(&mut self, idx: u16) -> Result<()> {
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
         }
 
-        for lp in &self.lps {
-            total_principal = add_u128(total_principal, lp.lp_capital);
-            total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(lp.lp_pnl));
+        let account = &mut self.accounts[idx as usize];
+
+        // Calculate positive PNL that needs to warm up
+        let positive_pnl = clamp_pos_i128(account.pnl);
+
+        // Calculate slope: pnl / warmup_period
+        let slope = if self.params.warmup_period_slots > 0 {
+            positive_pnl / (self.params.warmup_period_slots as u128)
+        } else {
+            positive_pnl // Instant warmup if period is 0
+        };
+
+        // Update slope
+        account.warmup_slope_per_step = slope;
+
+        // Don't update started_at_slot if warmup is paused
+        if !self.warmup_paused {
+            account.warmup_started_at_slot = self.current_slot;
         }
 
-        let expected_vault = add_u128(
-            add_u128(total_principal, total_positive_pnl),
-            self.insurance_fund.balance
-        );
-
-        self.vault >= expected_vault.saturating_sub(1000) &&
-        self.vault <= expected_vault.saturating_add(1000) // Allow small rounding
+        Ok(())
     }
-}
 
-// ============================================================================
-// User Operations
-// ============================================================================
+    // ========================================
+    // Funding
+    // ========================================
 
-impl RiskEngine {
-    /// Deposit funds to user account
-    pub fn deposit(&mut self, user_index: usize, amount: u128) -> Result<()> {
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
+    /// Accrue funding globally in O(1)
+    pub fn accrue_funding(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_bps_per_slot: i64,
+    ) -> Result<()> {
+        let dt = now_slot.saturating_sub(self.last_funding_slot);
+        if dt == 0 {
+            return Ok(());
+        }
 
-        user.principal = add_u128(user.principal, amount);
+        // Input validation to prevent overflow
+        if oracle_price == 0 || oracle_price > 1_000_000_000_000 {
+            return Err(RiskError::Overflow);
+        }
+
+        if funding_rate_bps_per_slot.abs() > 1_000_000 {
+            return Err(RiskError::Overflow);
+        }
+
+        if dt > 31_536_000 {
+            return Err(RiskError::Overflow);
+        }
+
+        // Use checked math to prevent silent overflow
+        let price = oracle_price as i128;
+        let rate = funding_rate_bps_per_slot as i128;
+        let dt_i = dt as i128;
+
+        // ΔF = price × rate × dt / 10,000
+        let delta = price
+            .checked_mul(rate)
+            .ok_or(RiskError::Overflow)?
+            .checked_mul(dt_i)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(10_000)
+            .ok_or(RiskError::Overflow)?;
+
+        self.funding_index_qpb_e6 = self
+            .funding_index_qpb_e6
+            .checked_add(delta)
+            .ok_or(RiskError::Overflow)?;
+
+        self.last_funding_slot = now_slot;
+        Ok(())
+    }
+
+    /// Settle funding for an account (lazy update)
+    fn settle_account_funding(account: &mut Account, global_funding_index: i128) -> Result<()> {
+        let delta_f = global_funding_index
+            .checked_sub(account.funding_index)
+            .ok_or(RiskError::Overflow)?;
+
+        if delta_f != 0 && account.position_size != 0 {
+            // payment = position × ΔF / 1e6
+            let payment = account
+                .position_size
+                .checked_mul(delta_f)
+                .ok_or(RiskError::Overflow)?
+                .checked_div(1_000_000)
+                .ok_or(RiskError::Overflow)?;
+
+            // Longs pay when funding positive: pnl -= payment
+            account.pnl = account
+                .pnl
+                .checked_sub(payment)
+                .ok_or(RiskError::Overflow)?;
+        }
+
+        account.funding_index = global_funding_index;
+        Ok(())
+    }
+
+    /// Touch an account (settle funding before operations)
+    pub fn touch_account(&mut self, idx: u16) -> Result<()> {
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let account = &mut self.accounts[idx as usize];
+        Self::settle_account_funding(account, self.funding_index_qpb_e6)
+    }
+
+    // ========================================
+    // Deposits and Withdrawals
+    // ========================================
+
+    /// Deposit funds to account
+    pub fn deposit(&mut self, idx: u16, amount: u128) -> Result<()> {
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let account = &mut self.accounts[idx as usize];
+        account.capital = add_u128(account.capital, amount);
         self.vault = add_u128(self.vault, amount);
 
         Ok(())
     }
 
-    /// Withdraw principal
-    ///
-    /// Users can withdraw principal, but if they have an open position, they must
-    /// maintain sufficient collateral to meet initial margin requirements.
-    pub fn withdraw_principal(&mut self, user_index: usize, amount: u128) -> Result<()> {
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
+    /// Withdraw funds from account
+    pub fn withdraw(&mut self, idx: u16, amount: u128) -> Result<()> {
+        // In withdrawal-only mode, block ALL withdrawals
+        if self.withdrawal_only {
+            return Err(RiskError::WithdrawalOnlyMode);
+        }
 
-        if user.principal < amount {
+        // Settle funding before any PNL calculations
+        self.touch_account(idx)?;
+
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Calculate withdrawable PNL
+        let account = &self.accounts[idx as usize];
+        let warmed_up_pnl = self.withdrawable_pnl(account);
+
+        // Get mutable reference
+        let account = &mut self.accounts[idx as usize];
+
+        // Step 1: Convert warmed-up PNL to capital
+        if warmed_up_pnl > 0 {
+            account.pnl = account.pnl.saturating_sub(warmed_up_pnl as i128);
+            account.capital = add_u128(account.capital, warmed_up_pnl);
+        }
+
+        // Step 2: Check we have enough capital
+        if account.capital < amount {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Check that withdrawal doesn't violate margin requirements
-        let new_principal = sub_u128(user.principal, amount);
-        let new_collateral = add_u128(new_principal, clamp_pos_i128(user.pnl_ledger));
+        // Step 3: Calculate new state after withdrawal
+        let new_capital = sub_u128(account.capital, amount);
+        let new_collateral = add_u128(new_capital, clamp_pos_i128(account.pnl));
 
-        // If user has position, must maintain initial margin
-        if user.position_size != 0 {
-            // Calculate position notional value (using last known entry price as approximation)
-            // In production, this should use current oracle price
+        // Step 4: If account has position, must maintain initial margin
+        if account.position_size != 0 {
             let position_notional = mul_u128(
-                user.position_size.abs() as u128,
-                user.entry_price as u128
+                account.position_size.abs() as u128,
+                account.entry_price as u128
             ) / 1_000_000;
 
-            // Check initial margin requirement (more conservative than maintenance)
             let initial_margin_required = mul_u128(
                 position_notional,
                 self.params.initial_margin_bps as u128
@@ -411,67 +791,100 @@ impl RiskEngine {
             }
         }
 
-        user.principal = new_principal;
+        // Step 5: Commit the withdrawal
+        account.capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
 
         Ok(())
     }
-    /// Withdraw PNL (only warmed up portion)
-    /// Converts warmed-up realized PNL to principal
-    pub fn withdraw_pnl(&mut self, user_index: usize, amount: u128) -> Result<()> {
-        // Calculate withdrawable before borrowing mutably
-        let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
-        let withdrawable = self.withdrawable_pnl(user);
 
-        if withdrawable < amount {
-            return Err(RiskError::PnlNotWarmedUp);
+    // ========================================
+    // Trading
+    // ========================================
+
+    /// Calculate account's collateral (capital + positive PNL)
+    pub fn account_collateral(&self, account: &Account) -> u128 {
+        add_u128(account.capital, clamp_pos_i128(account.pnl))
+    }
+
+    /// Check if account is above maintenance margin
+    pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
+        let collateral = self.account_collateral(account);
+
+        // Calculate position value at current price
+        let position_value = mul_u128(
+            account.position_size.abs() as u128,
+            oracle_price as u128
+        ) / 1_000_000;
+
+        // Maintenance margin requirement
+        let margin_required = mul_u128(
+            position_value,
+            self.params.maintenance_margin_bps as u128
+        ) / 10_000;
+
+        collateral > margin_required
+    }
+
+    /// Execute trade via matching engine
+    pub fn execute_trade<M: MatchingEngine>(
+        &mut self,
+        matcher: &M,
+        lp_idx: u16,
+        user_idx: u16,
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<()> {
+        // Validate indices
+        if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
+            return Err(RiskError::AccountNotFound);
         }
 
-        // Now mutate: convert PNL to principal
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
-        user.pnl_ledger = user.pnl_ledger.saturating_sub(amount as i128);
-        user.principal = add_u128(user.principal, amount);
+        // In withdrawal-only mode, only allow closing/reducing positions
+        if self.withdrawal_only {
+            let user = &self.accounts[user_idx as usize];
+            let current_position = user.position_size;
+            let new_position = current_position.saturating_add(size);
 
-        Ok(())
-    }
-}
-impl RiskEngine {
+            // Allow only if position is being reduced
+            if new_position.abs() > current_position.abs() {
+                return Err(RiskError::WithdrawalOnlyMode);
+            }
+        }
 
-// ============================================================================
-// Trading Operations
-// ============================================================================
+        // Settle funding for both accounts
+        self.touch_account(user_idx)?;
+        self.touch_account(lp_idx)?;
 
-    /// Execute trade via matching engine (with CPI)
-    ///
-    /// This function assumes the caller has verified user authorization
-    /// (e.g., via Account.is_signed in Solana programs).
-    ///
-    /// Process:
-    /// 1. CPI into matching engine to execute trade
-    /// 2. Applies trading fee to insurance fund
-    /// 3. Updates LP and user positions
-    /// 4. Aborts if either account becomes negative
-    /// 4. Updates LP and user positions
-    /// 5. Aborts if either account becomes negative
-    pub fn execute_trade(
-        &mut self,
-        lp_index: usize,
-        user_index: usize,
-        oracle_price: u64,
-        size: i128, // Positive = long, negative = short
-        
-    ) -> Result<()> {
-        // Get accounts
-        let lp = self.lps.get_mut(lp_index).ok_or(RiskError::LPNotFound)?;
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
+        // Validate account kinds
+        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
+            return Err(RiskError::AccountKindMismatch);
+        }
+        if self.accounts[user_idx as usize].kind != AccountKind::User {
+            return Err(RiskError::AccountKindMismatch);
+        }
 
-        // TODO: In production, CPI into matching engine program
+        // Call matching engine
+        let lp = &self.accounts[lp_idx as usize];
+        matcher.execute_match(
+            &lp.matcher_program,
+            &lp.matcher_context,
+            oracle_price,
+            size,
+        )?;
 
         // Calculate fee
         let notional = mul_u128(size.abs() as u128, oracle_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
+        // Need to handle both accounts - copy data first to avoid borrow issues
+        let user = &self.accounts[user_idx as usize];
+        let lp = &self.accounts[lp_idx as usize];
+
         // Calculate PNL impact from closing existing position
+        let mut user_pnl_delta = 0i128;
+        let mut lp_pnl_delta = 0i128;
+
         if user.position_size != 0 {
             let old_position = user.position_size;
             let old_entry = user.entry_price;
@@ -487,16 +900,20 @@ impl RiskEngine {
                     ((old_entry as i128 - oracle_price as i128) * close_size as i128) / 1_000_000
                 };
 
-                user.pnl_ledger = user.pnl_ledger.saturating_add(pnl);
-                lp.lp_pnl = lp.lp_pnl.saturating_sub(pnl);
+                user_pnl_delta = pnl;
+                lp_pnl_delta = -pnl;
             }
         }
 
-        // Update positions
+        // Calculate new positions
         let new_user_position = user.position_size.saturating_add(size);
-        let new_lp_position = lp.lp_position_size.saturating_sub(size);
+        let new_lp_position = lp.position_size.saturating_sub(size);
 
-        // Update entry prices (weighted average for increases)
+        // Calculate new entry prices
+        let mut new_user_entry = user.entry_price;
+        let mut new_lp_entry = lp.entry_price;
+
+        // Update user entry price
         if (user.position_size > 0 && size > 0) || (user.position_size < 0 && size < 0) {
             // Increasing position - weighted average entry
             let old_notional = mul_u128(user.position_size.abs() as u128, user.entry_price as u128);
@@ -505,23 +922,23 @@ impl RiskEngine {
             let total_size = user.position_size.abs().saturating_add(size.abs());
 
             if total_size != 0 {
-                user.entry_price = div_u128(total_notional, total_size as u128) as u64;
+                new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if user.position_size.abs() < size.abs() {
             // Flipping position
-            user.entry_price = oracle_price;
+            new_user_entry = oracle_price;
         }
 
-        // Similar for LP
-        if (lp.lp_position_size > 0 && new_lp_position > lp.lp_position_size) ||
-           (lp.lp_position_size < 0 && new_lp_position < lp.lp_position_size) {
-            let old_notional = mul_u128(lp.lp_position_size.abs() as u128, lp.lp_entry_price as u128);
+        // Update LP entry price
+        if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
+           (lp.position_size < 0 && new_lp_position < lp.position_size) {
+            let old_notional = mul_u128(lp.position_size.abs() as u128, lp.entry_price as u128);
             let new_notional = mul_u128(size.abs() as u128, oracle_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = lp.lp_position_size.abs().saturating_add(size.abs());
+            let total_size = lp.position_size.abs().saturating_add(size.abs());
 
             if total_size != 0 {
-                lp.lp_entry_price = div_u128(total_notional, total_size as u128) as u64;
+                new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         }
 
@@ -529,79 +946,111 @@ impl RiskEngine {
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, fee);
 
-        // Deduct fee from user
-        user.pnl_ledger = user.pnl_ledger.saturating_sub(fee as i128);
-
-        // Check neither account is negative
-        let user_collateral = add_u128(user.principal, clamp_pos_i128(user.pnl_ledger));
-        let lp_collateral = add_u128(lp.lp_capital, clamp_pos_i128(lp.lp_pnl));
-
-        if user_collateral == 0 && user.principal > 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-
-        if lp_collateral == 0 && lp.lp_capital > 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-
-        // Commit position updates
+        // Now update accounts (can safely get mutable refs separately)
+        let user = &mut self.accounts[user_idx as usize];
+        user.pnl = user.pnl.saturating_add(user_pnl_delta);
+        user.pnl = user.pnl.saturating_sub(fee as i128);
         user.position_size = new_user_position;
-        lp.lp_position_size = new_lp_position;
+        user.entry_price = new_user_entry;
+
+        let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
+        if user_collateral == 0 && user.capital > 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        let lp = &mut self.accounts[lp_idx as usize];
+        lp.pnl = lp.pnl.saturating_add(lp_pnl_delta);
+        lp.position_size = new_lp_position;
+        lp.entry_price = new_lp_entry;
+
+        let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
+        if lp_collateral == 0 && lp.capital > 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        // Update warmup slopes after PNL changes
+        self.update_warmup_slope(user_idx)?;
+        self.update_warmup_slope(lp_idx)?;
 
         Ok(())
     }
-}
 
-// ============================================================================
-// ADL (Auto-Deleveraging)
-// ============================================================================
+    // ========================================
+    // ADL (Auto-Deleveraging) - Scan-Based
+    // ========================================
 
-impl RiskEngine {
-    /// Apply ADL haircut to unwrapped PNL
-    ///
-    /// Invariants:
-    /// - Haircut is applied to PNL that isn't warmed up yet (< time T)
-    /// - Remaining losses are applied to insurance fund
-    /// - User principal is NEVER touched
+    /// Apply ADL haircut using two-pass bitmap scan
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
-        let mut remaining_loss = total_loss;
+        // Helper to calculate withdrawable PNL inline (can't call self.withdrawable_pnl in closures)
+        let effective_slot = if self.warmup_paused {
+            self.warmup_pause_slot
+        } else {
+            self.current_slot
+        };
 
-        // Phase 1: Haircut unwrapped PNL (youngest first)
-        // Calculate all haircuts first, then apply
-        let mut haircuts = Vec::new();
-        for (idx, user) in self.users.iter().enumerate() {
-            if remaining_loss == 0 {
-                break;
+        // Pass 1: Compute total unwrapped PNL across all accounts
+        let mut total_unwrapped = 0u128;
+
+        self.for_each_used(|_idx, account| {
+            if account.pnl > 0 {
+                let positive_pnl = account.pnl as u128;
+                let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
+
+                // Calculate withdrawable inline
+                let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
+                let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
+                let withdrawable = core::cmp::min(available_pnl, warmed_up_cap);
+
+                let unwrapped = positive_pnl
+                    .saturating_sub(withdrawable)
+                    .saturating_sub(account.reserved_pnl);
+                total_unwrapped = total_unwrapped.saturating_add(unwrapped);
             }
+        });
 
-            let positive_pnl = clamp_pos_i128(user.pnl_ledger);
-            let withdrawable = self.withdrawable_pnl(user);
+        // Pass 2: Apply proportional haircuts
+        let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
 
-            // Unwrapped PNL = positive PNL - withdrawable - reserved
-            let unwrapped = sub_u128(sub_u128(positive_pnl, withdrawable), user.reserved_pnl);
+        if loss_to_socialize > 0 && total_unwrapped > 0 {
+            self.for_each_used_mut(|_idx, account| {
+                if account.pnl > 0 {
+                    let positive_pnl = account.pnl as u128;
+                    let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
 
-            if unwrapped > 0 {
-                let haircut = core::cmp::min(unwrapped, remaining_loss);
-                haircuts.push((idx, haircut));
-                remaining_loss = sub_u128(remaining_loss, haircut);
-            }
+                    // Calculate withdrawable inline
+                    let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
+                    let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
+                    let withdrawable = core::cmp::min(available_pnl, warmed_up_cap);
+
+                    let unwrapped = positive_pnl
+                        .saturating_sub(withdrawable)
+                        .saturating_sub(account.reserved_pnl);
+
+                    if unwrapped > 0 {
+                        let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
+                        account.pnl = account.pnl.saturating_sub(haircut as i128);
+                    }
+                }
+            });
         }
 
-        // Apply haircuts
-        for (idx, haircut) in haircuts {
-            if let Some(user) = self.users.get_mut(idx) {
-                user.pnl_ledger = user.pnl_ledger.saturating_sub(haircut as i128);
-            }
-        }
+        // Handle remaining loss with insurance fund
+        let remaining_loss = total_loss.saturating_sub(loss_to_socialize);
 
-        // Phase 2: Apply remaining loss to insurance fund
         if remaining_loss > 0 {
             if self.insurance_fund.balance < remaining_loss {
-                // Insurance fund depleted - this is a crisis
+                // Insurance fund depleted - crisis mode
                 let insurance_used = self.insurance_fund.balance;
                 self.insurance_fund.balance = 0;
-                self.loss_accum = add_u128(self.loss_accum,
-                    sub_u128(remaining_loss, insurance_used));
+                self.loss_accum = add_u128(
+                    self.loss_accum,
+                    remaining_loss.saturating_sub(insurance_used)
+                );
+
+                // Enable withdrawal-only mode and pause warmup
+                self.withdrawal_only = true;
+                self.warmup_paused = true;
+                self.warmup_pause_slot = self.current_slot;
             } else {
                 self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, remaining_loss);
             }
@@ -609,36 +1058,66 @@ impl RiskEngine {
 
         Ok(())
     }
-}
 
-// ============================================================================
-// Liquidations
-// ============================================================================
+    /// Top up insurance fund to cover losses
+    pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool> {
+        // Add to vault
+        self.vault = add_u128(self.vault, amount);
 
-impl RiskEngine {
+        // Apply contribution to loss_accum first (if any)
+        if self.loss_accum > 0 {
+            let loss_coverage = core::cmp::min(amount, self.loss_accum);
+            self.loss_accum = sub_u128(self.loss_accum, loss_coverage);
+            let remaining = sub_u128(amount, loss_coverage);
+
+            // Add remaining to insurance fund balance
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
+
+            // Exit withdrawal-only mode if loss is fully covered
+            if self.loss_accum == 0 && self.withdrawal_only {
+                self.withdrawal_only = false;
+                self.withdrawal_mode_withdrawn = 0;
+                Ok(true) // Exited withdrawal-only mode
+            } else {
+                Ok(false) // Still in withdrawal-only mode
+            }
+        } else {
+            // No loss - just add to insurance fund
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
+            Ok(false)
+        }
+    }
+
+    // ========================================
+    // Liquidations
+    // ========================================
+
     /// Liquidate undercollateralized account
-    ///
-    /// Process:
-    /// 1. Check if account is above liquidation threshold
-    /// 2. Reduce position to bring account below threshold
-    /// 3. Split fee between insurance fund and liquidation keeper
-    pub fn liquidate_user(
+    pub fn liquidate_account(
         &mut self,
-        user_index: usize,
-        keeper_account: usize,
+        victim_idx: u16,
+        keeper_idx: u16,
         oracle_price: u64,
     ) -> Result<()> {
-        let user = self.users.get(user_index).ok_or(RiskError::UserNotFound)?;
+        // Validate indices
+        if !self.is_used(victim_idx as usize) || !self.is_used(keeper_idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Settle funding before checking margin
+        self.touch_account(victim_idx)?;
+
+        let victim = &self.accounts[victim_idx as usize];
 
         // Check if liquidation is needed
-        if self.is_above_maintenance_margin(user, oracle_price) {
+        if self.is_above_maintenance_margin(victim, oracle_price) {
             return Ok(()); // No liquidation needed
         }
 
-        let user = self.users.get_mut(user_index).ok_or(RiskError::UserNotFound)?;
+        let victim = &mut self.accounts[victim_idx as usize];
 
-        // Calculate liquidation size (reduce position to zero for simplicity)
-        let liquidation_size = user.position_size;
+        // Calculate liquidation size (reduce position to zero)
+        let liquidation_size = victim.position_size;
 
         if liquidation_size == 0 {
             return Ok(()); // No position to liquidate
@@ -656,14 +1135,14 @@ impl RiskEngine {
         let keeper_share = sub_u128(liquidation_fee, insurance_share);
 
         // Realize PNL from position closure
-        let pnl = if user.position_size > 0 {
-            ((oracle_price as i128 - user.entry_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+        let pnl = if victim.position_size > 0 {
+            ((oracle_price as i128 - victim.entry_price as i128) * liquidation_size.abs() as i128) / 1_000_000
         } else {
-            ((user.entry_price as i128 - oracle_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+            ((victim.entry_price as i128 - oracle_price as i128) * liquidation_size.abs() as i128) / 1_000_000
         };
 
-        user.pnl_ledger = user.pnl_ledger.saturating_add(pnl);
-        user.position_size = 0;
+        victim.pnl = victim.pnl.saturating_add(pnl);
+        victim.position_size = 0;
 
         // Apply fees
         self.insurance_fund.liquidation_revenue = add_u128(
@@ -673,103 +1152,40 @@ impl RiskEngine {
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, insurance_share);
 
         // Give keeper their share
-        if let Some(keeper) = self.users.get_mut(keeper_account) {
-            keeper.pnl_ledger = keeper.pnl_ledger.saturating_add(keeper_share as i128);
+        let keeper = &mut self.accounts[keeper_idx as usize];
+        keeper.pnl = keeper.pnl.saturating_add(keeper_share as i128);
+
+        // Update warmup slopes
+        self.update_warmup_slope(victim_idx)?;
+        if keeper_idx != victim_idx {
+            self.update_warmup_slope(keeper_idx)?;
         }
 
         Ok(())
     }
-}
 
-// ============================================================================
-// Initialization
-// ============================================================================
+    // ========================================
+    // Utilities
+    // ========================================
 
-impl RiskEngine {
-    /// Create a new risk engine
-    pub fn new(params: RiskParams) -> Self {
-        Self {
-            vault: 0,
-            insurance_fund: InsuranceFund {
-                balance: 0,
-                fee_revenue: 0,
-                liquidation_revenue: 0,
-            },
-            users: Vec::new(),
-            lps: Vec::new(),
-            params,
-            current_slot: 0,
-            fee_index: 0,
-            sum_vested_pos_pnl: 0,
-            loss_accum: 0,
-            fee_carry: 0,
-        }
-    }
+    /// Check conservation invariant (I2)
+    pub fn check_conservation(&self) -> bool {
+        let mut total_principal = 0u128;
+        let mut total_positive_pnl = 0u128;
 
-    /// Add a new user account
-    /// Add a new user account
-    pub fn add_user(&mut self, fee_payment: u128) -> Result<usize> {
-        if self.users.len() >= self.params.max_users as usize {
-            return Err(RiskError::Overflow); // Or new error
-        }
-        let multiplier = Self::account_fee_multiplier(self.params.max_users, self.users.len() as u64);
-        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
-        if fee_payment < required_fee {
-            return Err(RiskError::InsufficientBalance);
-        }
-        // Pay fee to insurance
-        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
-        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
-
-        let index = self.users.len();
-        self.users.push(UserAccount {
-            principal: 0,
-            pnl_ledger: 0,
-            reserved_pnl: 0,
-            warmup_state: Warmup {
-                started_at_slot: self.current_slot,
-                slope_per_step: self.params.warmup_period_slots as u128,
-            },
-            position_size: 0,
-            entry_price: 0,
-            fee_index_user: 0,
-            fee_accrued: 0,
-            vested_pos_snapshot: 0,
+        self.for_each_used(|_idx, account| {
+            total_principal = add_u128(total_principal, account.capital);
+            total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(account.pnl));
         });
-        Ok(index)
-    }
-    pub fn add_lp(&mut self, matching_engine_program: [u8; 32], matching_engine_context: [u8; 32], fee_payment: u128) -> Result<usize> {
-        if self.lps.len() >= self.params.max_lps as usize {
-            return Err(RiskError::Overflow);
-        }
-        let multiplier = Self::account_fee_multiplier(self.params.max_lps, self.lps.len() as u64);
-        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
-        if fee_payment < required_fee {
-            return Err(RiskError::InsufficientBalance);
-        }
-        // Pay fee to insurance
-        self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
-        self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
-        let index = self.lps.len();
-        self.lps.push(LPAccount {
-            matching_engine_program,
-            matching_engine_context,
-            lp_capital: 0,
-            lp_pnl: 0,
-            lp_reserved_pnl: 0,
-            lp_warmup_state: Warmup {
-                started_at_slot: self.current_slot,
-                slope_per_step: if self.params.warmup_period_slots > 0 {
-                    u128::MAX / (self.params.warmup_period_slots as u128)
-                } else {
-                    u128::MAX
-                },
-            },
-            lp_position_size: 0,
-            lp_entry_price: 0,
-        });
-        Ok(index)
+        let expected_vault = add_u128(
+            add_u128(total_principal, total_positive_pnl),
+            self.insurance_fund.balance
+        );
+
+        // Allow ±1000 units tolerance for rounding errors
+        self.vault >= expected_vault.saturating_sub(1000) &&
+        self.vault <= expected_vault.saturating_add(1000)
     }
 
     /// Advance to next slot (for testing warmup)
