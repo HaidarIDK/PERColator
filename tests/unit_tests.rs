@@ -817,3 +817,127 @@ fn test_funding_does_not_touch_principal() {
     // Principal must be unchanged
     assert_eq!(engine.users[user_idx].principal, initial_principal);
 }
+
+#[test]
+fn test_adl_protects_principal_during_warmup() {
+    // This test demonstrates the core protection mechanism:
+    // If oracle manipulation creates fake PNL, ADL will haircut it
+    // BEFORE it warms up and becomes withdrawable, protecting principal holders.
+
+    let mut engine = RiskEngine::new(default_params());
+    let attacker = engine.add_user(10000).unwrap();
+    let victim = engine.add_user(10000).unwrap();
+
+    // Both deposit principal
+    engine.deposit(attacker, 10_000).unwrap();
+    engine.deposit(victim, 10_000).unwrap();
+
+    let attacker_principal = engine.users[attacker].principal;
+    let victim_principal = engine.users[victim].principal;
+
+    // === Phase 1: Oracle Manipulation (time < T) ===
+    // Attacker manipulates oracle and creates fake $50k profit
+    // In reality this would come from trading, but we simulate the result
+    engine.users[attacker].pnl_ledger = 50_000;
+    engine.users[attacker].warmup_state.slope_per_step = 500; // Will take 100 slots to warm up
+
+    // Victim has corresponding loss
+    engine.users[victim].pnl_ledger = -50_000;
+
+    // Advance only 10 slots (very early in warmup period)
+    engine.advance_slot(10);
+
+    // At this point, very little PNL has warmed up
+    let warmed_up = engine.withdrawable_pnl(&engine.users[attacker]);
+    assert_eq!(warmed_up, 5_000); // 500 * 10 = 5,000
+
+    // Unwrapped (still warming) = 50k - 5k = 45k
+    let positive_pnl = 50_000u128;
+    let unwrapped_pnl = positive_pnl - warmed_up;
+    assert_eq!(unwrapped_pnl, 45_000);
+
+    // === Phase 2: Oracle Reverts, Loss Realized ===
+    // The manipulation is detected/reverts quickly, creating a $50k loss
+    // ADL is triggered to socialize this loss
+    // KEY: ADL runs BEFORE most PNL has warmed up
+
+    engine.apply_adl(50_000).unwrap();
+
+    // === Phase 3: Verify Protection ===
+
+    // Attacker's principal is NEVER touched (I1)
+    assert_eq!(engine.users[attacker].principal, attacker_principal,
+               "Attacker principal protected by I1");
+
+    // Victim's principal is NEVER touched (I1)
+    assert_eq!(engine.users[victim].principal, victim_principal,
+               "Victim principal protected by I1");
+
+    // ADL haircuts unwrapped PNL first (I4)
+    // We had 45k unwrapped, so all of it gets haircutted
+    // The remaining 5k loss goes to insurance fund
+    let remaining_pnl = engine.users[attacker].pnl_ledger;
+    assert_eq!(remaining_pnl, 5_000, "Unwrapped PNL haircutted, only early-warmed remains");
+
+    // === Phase 4: Try to Withdraw After Warmup ===
+
+    // Advance to full warmup completion
+    engine.advance_slot(190); // Total 200 slots
+
+    // Only the 5k that warmed up BEFORE ADL is still withdrawable
+    let warmed_after_adl = engine.withdrawable_pnl(&engine.users[attacker]);
+    assert_eq!(warmed_after_adl, 5_000, "Only early-warmed PNL is withdrawable");
+
+    // Attacker can withdraw principal + the small amount that warmed early
+    let total_withdrawable = attacker_principal + 5_000;
+    let withdraw_result = engine.withdraw(attacker, total_withdrawable);
+    assert!(withdraw_result.is_ok(), "Can withdraw principal + early-warmed PNL");
+
+    // === Conclusion ===
+    // The attack was MOSTLY FAILED: Attacker only extracted 5k of 50k fake profit
+    // The 45k that was still warming got haircutted by ADL.
+    // The insurance fund absorbed the remaining 5k loss.
+    //
+    // This demonstrates the core security property:
+    //   "ADL haircuts PNL that is still warming up, protecting principal holders.
+    //    The faster ADL runs after manipulation, the more effective the protection."
+    //
+    // If ADL had run at slot 0 (immediately), 100% would be haircutted.
+    // At slot 10, 90% was haircutted (45k of 50k).
+    // At slot 50, 50% would be haircutted.
+    // At slot 100+, 0% would be haircutted (all warmed up).
+}
+
+#[test]
+fn test_adl_haircuts_unwrapped_before_warmed() {
+    // Verify that ADL prioritizes unwrapped (young) PNL over warmed (old) PNL
+
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user(10000).unwrap();
+
+    engine.users[user_idx].principal = 10_000;
+    engine.users[user_idx].pnl_ledger = 10_000;
+    engine.users[user_idx].warmup_state.slope_per_step = 100;
+
+    // Advance time so half is warmed up
+    engine.advance_slot(50);
+
+    let warmed = engine.withdrawable_pnl(&engine.users[user_idx]);
+    assert_eq!(warmed, 5_000); // 100 * 50
+
+    let unwrapped = 10_000 - warmed;
+    assert_eq!(unwrapped, 5_000);
+
+    // Apply ADL of 3k (less than unwrapped)
+    engine.apply_adl(3_000).unwrap();
+
+    // Should take from unwrapped first
+    assert_eq!(engine.users[user_idx].pnl_ledger, 7_000);
+
+    // The 5k warmed PNL should still be withdrawable
+    // (Actually withdrawable = min(7k - 0, 5k) = 5k... wait)
+    // After ADL: pnl = 7k, warmed_cap = 5k
+    // withdrawable = min(7k, 5k) = 5k
+    let still_warmed = engine.withdrawable_pnl(&engine.users[user_idx]);
+    assert_eq!(still_warmed, 5_000, "Warmed PNL still withdrawable");
+}
