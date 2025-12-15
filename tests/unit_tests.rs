@@ -659,9 +659,9 @@ fn test_funding_partial_close() {
     let user_idx = engine.add_user(10000).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
-    engine.deposit(user_idx, 1_000_000).unwrap();
-    engine.accounts[lp_idx as usize].capital = 10_000_000;
-    engine.vault = 11_000_000;
+    engine.deposit(user_idx, 15_000_000).unwrap();
+    engine.accounts[lp_idx as usize].capital = 50_000_000;
+    engine.vault = 65_000_000;
 
     // Open long position of 2M base units
     let trade_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, 2_000_000);
@@ -701,9 +701,9 @@ fn test_funding_position_flip() {
     let user_idx = engine.add_user(10000).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
 
-    engine.deposit(user_idx, 1_000_000).unwrap();
-    engine.accounts[lp_idx as usize].capital = 10_000_000;
-    engine.vault = 11_000_000;
+    engine.deposit(user_idx, 10_000_000).unwrap();
+    engine.accounts[lp_idx as usize].capital = 20_000_000;
+    engine.vault = 30_000_000;
 
     // Open long
     engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, 1_000_000).unwrap();

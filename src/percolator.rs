@@ -965,9 +965,21 @@ impl RiskEngine {
         user.position_size = new_user_position;
         user.entry_price = new_user_entry;
 
-        let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
-        if user_collateral == 0 && user.capital > 0 {
-            return Err(RiskError::Undercollateralized);
+        // Check user maintenance margin requirement
+        if user.position_size != 0 {
+            let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
+            let position_value = mul_u128(
+                user.position_size.abs() as u128,
+                oracle_price as u128
+            ) / 1_000_000;
+            let margin_required = mul_u128(
+                position_value,
+                self.params.maintenance_margin_bps as u128
+            ) / 10_000;
+
+            if user_collateral <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
         }
 
         // Update LP account
@@ -975,9 +987,21 @@ impl RiskEngine {
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
 
-        let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
-        if lp_collateral == 0 && lp.capital > 0 {
-            return Err(RiskError::Undercollateralized);
+        // Check LP maintenance margin requirement
+        if lp.position_size != 0 {
+            let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
+            let position_value = mul_u128(
+                lp.position_size.abs() as u128,
+                oracle_price as u128
+            ) / 1_000_000;
+            let margin_required = mul_u128(
+                position_value,
+                self.params.maintenance_margin_bps as u128
+            ) / 10_000;
+
+            if lp_collateral <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
         }
 
         // Update warmup slopes after PNL changes
