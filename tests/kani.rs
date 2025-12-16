@@ -28,7 +28,7 @@ fn test_params() -> RiskParams {
         trading_fee_bps: 10,
         liquidation_fee_bps: 50,
         insurance_fee_share_bps: 5000,
-        max_accounts: 1000,
+        max_accounts: 64, // Match Kani's MAX_ACCOUNTS
         account_fee_bps: 10000,
         risk_reduction_threshold: 0,
     }
