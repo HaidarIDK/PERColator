@@ -1279,23 +1279,41 @@ impl RiskEngine {
             (victim.entry_price as i128).saturating_sub(oracle_price as i128)
         };
 
+        // Realize PNL from position closure (with overflow protection)
+        let price_diff = if victim.position_size > 0 {
+            (oracle_price as i128).saturating_sub(victim.entry_price as i128)
+        } else {
+            (victim.entry_price as i128).saturating_sub(oracle_price as i128)
+        };
+
         let pnl = price_diff
             .checked_mul(liquidation_size.abs())
             .ok_or(RiskError::Overflow)?
             .checked_div(1_000_000)
             .ok_or(RiskError::Overflow)?;
 
-        victim.pnl = victim.pnl.saturating_add(pnl);
+        // The realized PNL is new value in the system; it must be reflected in the vault
+        if pnl > 0 {
+            self.vault = self.vault.saturating_add(pnl as u128);
+        } else {
+            self.vault = self.vault.saturating_sub((-pnl) as u128);
+        }
+
+        // Victim's PNL is adjusted by the realized PNL and the fee they pay
+        victim.pnl = victim.pnl.saturating_add(pnl).saturating_sub(liquidation_fee as i128);
         victim.position_size = 0;
 
-        // Apply fees
+        // The fee is an internal transfer and does not affect the vault total
+        // The fee amount moves from the victim's PNL to the insurance fund and the keeper's PNL
+
+        // Insurance fund gets its share of the fee
         self.insurance_fund.liquidation_revenue = add_u128(
             self.insurance_fund.liquidation_revenue,
             insurance_share
         );
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, insurance_share);
 
-        // Give keeper their share
+        // Give keeper their share of the fee
         let keeper = &mut self.accounts[keeper_idx as usize];
         keeper.pnl = keeper.pnl.saturating_add(keeper_share as i128);
 

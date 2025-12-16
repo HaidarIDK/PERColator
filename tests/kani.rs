@@ -78,12 +78,11 @@ fn i2_deposit_preserves_conservation() {
     let amount: u128 = kani::any();
     kani::assume(amount < 10_000);
 
-    // Initial state conserves trivially
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation().is_ok());
 
     let _ = engine.deposit(user_idx, amount);
 
-    assert!(engine.check_conservation(),
+    assert!(engine.check_conservation().is_ok(),
             "I2: Deposit must preserve conservation");
 }
 
@@ -102,11 +101,11 @@ fn i2_withdraw_preserves_conservation() {
 
     let _ = engine.deposit(user_idx, deposit);
 
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation().is_ok());
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation(),
+    assert!(engine.check_conservation().is_ok(),
             "I2: Withdrawal must preserve conservation");
 }
 
@@ -1132,12 +1131,12 @@ fn i10_withdrawal_mode_preserves_conservation() {
     engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
-    assert!(engine.check_conservation(),
+    assert!(engine.check_conservation().is_ok(),
             "Conservation before withdrawal");
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation(),
+    assert!(engine.check_conservation().is_ok(),
             "I10: Withdrawal mode must preserve conservation");
 }
 
