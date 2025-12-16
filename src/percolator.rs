@@ -182,6 +182,10 @@ pub struct RiskParams {
     /// Actual fee = (account_fee_bps * capacity_multiplier) / 10000
     /// The multiplier increases as the system approaches max capacity
     pub account_fee_bps: u64,
+
+    /// Insurance fund threshold for entering risk-reduction-only mode
+    /// If insurance fund balance drops below this, risk-reduction mode activates
+    pub risk_reduction_threshold: u128,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -534,12 +538,15 @@ impl RiskEngine {
         }
     }
 
-    /// Exit risk-reduction-only mode if system is safe (loss fully covered)
+    /// Exit risk-reduction-only mode if system is safe (loss fully covered AND above threshold)
     pub fn exit_risk_reduction_only_mode_if_safe(&mut self) {
         if self.loss_accum == 0 {
-            self.risk_reduction_only = false;
-            self.risk_reduction_mode_withdrawn = 0;
-            self.warmup_paused = false;
+            // Check if insurance fund is back above configured threshold
+            if self.insurance_fund.balance >= self.params.risk_reduction_threshold {
+                self.risk_reduction_only = false;
+                self.risk_reduction_mode_withdrawn = 0;
+                self.warmup_paused = false;
+            }
         }
     }
 
@@ -561,7 +568,8 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Pay fee to insurance
+        // Pay fee to insurance (fee tokens are deposited into vault)
+        self.vault = add_u128(self.vault, required_fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
@@ -605,7 +613,8 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Pay fee to insurance
+        // Pay fee to insurance (fee tokens are deposited into vault)
+        self.vault = add_u128(self.vault, required_fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
@@ -716,7 +725,9 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        if funding_rate_bps_per_slot.abs() > 1_000_000 {
+        // Cap funding rate at 10000 bps (100%) per slot as sanity bound
+        // Real-world funding rates should be much smaller (typically < 1 bps/slot)
+        if funding_rate_bps_per_slot.abs() > 10_000 {
             return Err(RiskError::Overflow);
         }
 
@@ -966,13 +977,19 @@ impl RiskEngine {
             // If reducing position, realize PNL
             if (old_position > 0 && size < 0) || (old_position < 0 && size > 0) {
                 let close_size = core::cmp::min(old_position.abs(), size.abs());
-                let pnl = if old_position > 0 {
-                    // Closing long: (exit_price - entry_price) * size
-                    ((oracle_price as i128 - old_entry as i128) * close_size as i128) / 1_000_000
+                let price_diff = if old_position > 0 {
+                    // Closing long: (exit_price - entry_price)
+                    (oracle_price as i128).saturating_sub(old_entry as i128)
                 } else {
-                    // Closing short: (entry_price - exit_price) * size
-                    ((old_entry as i128 - oracle_price as i128) * close_size as i128) / 1_000_000
+                    // Closing short: (entry_price - exit_price)
+                    (old_entry as i128).saturating_sub(oracle_price as i128)
                 };
+
+                let pnl = price_diff
+                    .checked_mul(close_size)
+                    .ok_or(RiskError::Overflow)?
+                    .checked_div(1_000_000)
+                    .ok_or(RiskError::Overflow)?;
 
                 user_pnl_delta = pnl;
                 lp_pnl_delta = -pnl;
@@ -1147,7 +1164,14 @@ impl RiskEngine {
                 // Enter risk-reduction-only mode (freezes warmup)
                 self.enter_risk_reduction_only_mode();
             } else {
+                // Deduct from insurance fund
                 self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, remaining_loss);
+
+                // Check if we've dropped below configured threshold
+                if self.insurance_fund.balance < self.params.risk_reduction_threshold && !self.risk_reduction_only {
+                    // Enter risk-reduction-only mode at threshold
+                    self.enter_risk_reduction_only_mode();
+                }
             }
         }
 
@@ -1171,7 +1195,7 @@ impl RiskEngine {
             // Add remaining to insurance fund balance
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
 
-            // Exit risk-reduction-only mode if loss is fully covered
+            // Exit risk-reduction-only mode if loss is fully covered and above threshold
             let was_in_mode = self.risk_reduction_only;
             self.exit_risk_reduction_only_mode_if_safe();
             if was_in_mode && !self.risk_reduction_only {
@@ -1182,7 +1206,15 @@ impl RiskEngine {
         } else {
             // No loss - just add to insurance fund
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
-            Ok(false)
+
+            // Check if we can exit risk-reduction mode (may have been triggered by threshold, not loss)
+            let was_in_mode = self.risk_reduction_only;
+            self.exit_risk_reduction_only_mode_if_safe();
+            if was_in_mode && !self.risk_reduction_only {
+                Ok(true) // Exited risk-reduction-only mode
+            } else {
+                Ok(false)
+            }
         }
     }
 
@@ -1240,12 +1272,18 @@ impl RiskEngine {
         ) / 10_000;
         let keeper_share = sub_u128(liquidation_fee, insurance_share);
 
-        // Realize PNL from position closure
-        let pnl = if victim.position_size > 0 {
-            ((oracle_price as i128 - victim.entry_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+        // Realize PNL from position closure (with overflow protection)
+        let price_diff = if victim.position_size > 0 {
+            (oracle_price as i128).saturating_sub(victim.entry_price as i128)
         } else {
-            ((victim.entry_price as i128 - oracle_price as i128) * liquidation_size.abs() as i128) / 1_000_000
+            (victim.entry_price as i128).saturating_sub(oracle_price as i128)
         };
+
+        let pnl = price_diff
+            .checked_mul(liquidation_size.abs())
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)?;
 
         victim.pnl = victim.pnl.saturating_add(pnl);
         victim.position_size = 0;
@@ -1275,23 +1313,35 @@ impl RiskEngine {
     // ========================================
 
     /// Check conservation invariant (I2)
+    ///
+    /// Conservation formula: vault = sum(capital) + sum(pnl) + insurance_fund.balance
+    ///
+    /// This is exact because:
+    /// - Deposits add to both vault and capital
+    /// - Withdrawals subtract from both vault and capital
+    /// - Trading PNL is zero-sum between counterparties
+    /// - Trading fees transfer from user PNL to insurance fund (net zero)
+    /// - ADL transfers from user PNL to cover losses (net zero within system)
     pub fn check_conservation(&self) -> bool {
-        let mut total_principal = 0u128;
-        let mut total_positive_pnl = 0u128;
+        let mut total_capital = 0u128;
+        let mut net_pnl: i128 = 0;
 
         self.for_each_used(|_idx, account| {
-            total_principal = add_u128(total_principal, account.capital);
-            total_positive_pnl = add_u128(total_positive_pnl, clamp_pos_i128(account.pnl));
+            total_capital = add_u128(total_capital, account.capital);
+            net_pnl = net_pnl.saturating_add(account.pnl);
         });
 
-        let expected_vault = add_u128(
-            add_u128(total_principal, total_positive_pnl),
-            self.insurance_fund.balance
-        );
+        // expected_vault = total_capital + net_pnl + insurance_fund.balance
+        // Since net_pnl can be negative, we handle this carefully
+        let base = add_u128(total_capital, self.insurance_fund.balance);
 
-        // Allow ±1000 units tolerance for rounding errors
-        self.vault >= expected_vault.saturating_sub(1000) &&
-        self.vault <= expected_vault.saturating_add(1000)
+        let expected_vault = if net_pnl >= 0 {
+            add_u128(base, net_pnl as u128)
+        } else {
+            base.saturating_sub((-net_pnl) as u128)
+        };
+
+        self.vault == expected_vault
     }
 
     /// Advance to next slot (for testing warmup)

@@ -16,28 +16,31 @@ fn default_params() -> RiskParams {
         insurance_fee_share_bps: 5000, // 50% to insurance
         max_accounts: 1000,
         account_fee_bps: 10000, // 1%
+        risk_reduction_threshold: 0, // Default: only trigger on full depletion
     }
 }
 
 #[test]
 fn test_deposit_and_withdraw() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
-    let user_idx = engine.add_user(1).unwrap();
+    // Account creation fee goes to insurance fund (and vault)
+    let fee = 1; // First account fee with default params
+    let user_idx = engine.add_user(fee).unwrap();
 
     // Deposit
     engine.deposit(user_idx, 1000).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 1000);
-    assert_eq!(engine.vault, 1000);
+    assert_eq!(engine.vault, 1000 + fee); // +fee from account creation
 
     // Withdraw partial
     engine.withdraw(user_idx, 400).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 600);
-    assert_eq!(engine.vault, 600);
+    assert_eq!(engine.vault, 600 + fee);
 
     // Withdraw rest
     engine.withdraw(user_idx, 600).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 0);
-    assert_eq!(engine.vault, 0);
+    assert_eq!(engine.vault, fee); // Insurance fee remains
 }
 
 #[test]
@@ -162,12 +165,13 @@ fn test_conservation_simple() {
     engine.deposit(user2, 2000).unwrap();
     assert!(engine.check_conservation());
 
-    // User1 gets positive PNL
+    // PNL is zero-sum: user1 gains 500, user2 loses 500
+    // (vault unchanged since this is internal redistribution)
     engine.accounts[user1 as usize].pnl = 500;
-    engine.vault += 500;
+    engine.accounts[user2 as usize].pnl = -500;
     assert!(engine.check_conservation());
 
-    // Withdraw
+    // Withdraw from user1's capital
     engine.withdraw(user1, 500).unwrap();
     assert!(engine.check_conservation());
 }
@@ -1290,6 +1294,7 @@ fn test_warmup_freezes_in_risk_mode() {
 #[test]
 fn test_risk_mode_deposit_withdrawals_work() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
+    let fee = 1; // Account creation fee
     let user = engine.add_user(100).unwrap();
 
     // User deposit 1000
@@ -1304,7 +1309,7 @@ fn test_risk_mode_deposit_withdrawals_work() {
     assert!(result.is_ok(), "Withdrawals of capital should work in risk mode");
 
     assert_eq!(engine.accounts[user as usize].capital, 800);
-    assert_eq!(engine.vault, 800);
+    assert_eq!(engine.vault, 800 + fee); // +fee from account creation
 }
 
 // Test C: In risk mode, pending PNL cannot be withdrawn (because warmup is frozen)
@@ -1618,19 +1623,25 @@ fn test_lp_liquidation() {
 
 #[test]
 fn test_lp_withdraw() {
-    // CRITICAL: Tests that lp_withdraw() works correctly
+    // Tests that LP withdrawal works correctly
     let mut engine = Box::new(RiskEngine::new(default_params()));
+    let fee = 1; // Account creation fee
 
-    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], fee).unwrap();
 
     // LP deposits capital
     engine.deposit(lp_idx, 10_000).unwrap();
+    // vault = 10,000 + fee = 10,001
 
-    // Fund insurance fund to allow warmup (warmup rate is limited by insurance fund balance)
-    engine.insurance_fund.balance = 1_000_000;
+    // LP earns PNL from counterparty (need zero-sum setup)
+    // Create a user to be the counterparty
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(user_idx, 5_000).unwrap();
+    // vault = 10,001 + 1 + 5000 = 15,002
 
-    // LP earns some PNL
+    // Zero-sum PNL: LP gains 5000, user loses 5000
     engine.accounts[lp_idx as usize].pnl = 5_000;
+    engine.accounts[user_idx as usize].pnl = -5_000;
 
     // Set warmup slope so PnL can warm up (warmup_period_slots = 100 from default_params)
     engine.accounts[lp_idx as usize].warmup_slope_per_step = 5_000 / 100; // 50 per slot
@@ -1640,12 +1651,12 @@ fn test_lp_withdraw() {
     engine.current_slot = 100; // Full warmup (100 slots × 50 = 5000)
 
     // withdraw converts warmed PNL to capital, then withdraws
-    // After conversion: capital = 10,000 + 5,000 = 15,000
-    // But vault only has 10,000 (from deposit), so can only withdraw up to 10,000
+    // After conversion: LP capital = 10,000 + 5,000 = 15,000
     let result = engine.withdraw(lp_idx, 10_000);
     assert!(result.is_ok(), "LP withdrawal should succeed: {:?}", result);
 
-    assert_eq!(engine.vault, 0, "Vault should be empty after withdrawal");
+    // vault started at 15,002, withdrew 10,000 -> 5,002
+    assert_eq!(engine.vault, 5_002, "Vault after LP withdrawal");
     assert_eq!(engine.accounts[lp_idx as usize].capital, 5_000, "LP should have 5,000 capital remaining (from converted PNL)");
     assert_eq!(engine.accounts[lp_idx as usize].pnl, 0, "PNL should be converted to capital");
 }
@@ -1769,4 +1780,42 @@ fn test_lp_capital_never_reduced_by_adl() {
     
     // Only PNL should be affected
     assert!(engine.accounts[lp_idx as usize].pnl < 5_000, "LP PNL should be haircutted");
+}
+
+#[test]
+fn test_risk_reduction_threshold() {
+    // Test that risk-reduction mode triggers at configured threshold
+    let mut params = default_params();
+    params.risk_reduction_threshold = 5_000; // Trigger when insurance < 5k
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user = engine.add_user(100).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Setup: insurance fund has 10k, which is above threshold
+    engine.insurance_fund.balance = 10_000;
+    assert!(!engine.risk_reduction_only);
+
+    // Apply ADL with 3k loss - should bring insurance to 7k (still above 5k threshold)
+    engine.apply_adl(3_000).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 7_000);
+    assert!(!engine.risk_reduction_only, "Should not trigger yet (7k > 5k)");
+
+    // Apply ADL with 3k loss - should bring insurance to 4k (below 5k threshold)
+    engine.apply_adl(3_000).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 4_000);
+    assert!(engine.risk_reduction_only, "Should trigger now (4k < 5k)");
+    assert!(engine.warmup_paused, "Warmup should be frozen");
+
+    // Top up to 4.5k - still below threshold, should stay in risk mode
+    engine.top_up_insurance_fund(500).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 4_500);
+    assert!(engine.risk_reduction_only, "Should stay in risk mode (4.5k < 5k)");
+
+    // Top up to 5k - exactly at threshold, should exit
+    engine.top_up_insurance_fund(500).unwrap();
+    assert_eq!(engine.insurance_fund.balance, 5_000);
+    assert!(!engine.risk_reduction_only, "Should exit risk mode (5k >= 5k)");
+    assert!(!engine.warmup_paused, "Warmup should unfreeze");
 }

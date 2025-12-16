@@ -16,6 +16,7 @@ fn default_params() -> RiskParams {
         insurance_fee_share_bps: 5000,    // 50% to insurance
         max_accounts: 1000,
         account_fee_bps: 10000,           // 1%
+        risk_reduction_threshold: 0,      // Default: only trigger on full depletion
     }
 }
 
