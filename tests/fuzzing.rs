@@ -104,14 +104,14 @@ proptest! {
             let _ = engine.deposit(user_idx, amount);
         }
 
-        prop_assert!(engine.check_conservation().is_ok()););
+        prop_assert!(engine.check_conservation());
 
         // Apply withdrawals
         for amount in withdrawals {
             let _ = engine.withdraw(user_idx, amount);
         }
 
-        prop_assert!(engine.check_conservation().is_ok()););
+        prop_assert!(engine.check_conservation());
     }
 }
 
@@ -372,7 +372,7 @@ proptest! {
             }
         }
 
-        prop_assert!(engine.check_conservation().is_ok());,
+        prop_assert!(engine.check_conservation(),
                      "Conservation should hold after multi-user deposits");
     }
 }

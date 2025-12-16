@@ -78,11 +78,11 @@ fn i2_deposit_preserves_conservation() {
     let amount: u128 = kani::any();
     kani::assume(amount < 10_000);
 
-    assert!(engine.check_conservation().is_ok());
+    assert!(engine.check_conservation());
 
     let _ = engine.deposit(user_idx, amount);
 
-    assert!(engine.check_conservation().is_ok(),
+    assert!(engine.check_conservation(),
             "I2: Deposit must preserve conservation");
 }
 
@@ -101,11 +101,11 @@ fn i2_withdraw_preserves_conservation() {
 
     let _ = engine.deposit(user_idx, deposit);
 
-    assert!(engine.check_conservation().is_ok());
+    assert!(engine.check_conservation());
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation().is_ok(),
+    assert!(engine.check_conservation(),
             "I2: Withdrawal must preserve conservation");
 }
 
@@ -546,6 +546,7 @@ fn funding_p1_settlement_idempotent() {
 
     // Arbitrary position and PNL
     let position: i128 = kani::any();
+    kani::assume(position != i128::MIN);
     kani::assume(position.abs() < 1_000_000);
 
     let pnl: i128 = kani::any();
@@ -556,6 +557,7 @@ fn funding_p1_settlement_idempotent() {
 
     // Set arbitrary funding index
     let index: i128 = kani::any();
+    kani::assume(index != i128::MIN);
     kani::assume(index.abs() < 1_000_000_000);
     engine.funding_index_qpb_e6 = index;
 
@@ -589,6 +591,7 @@ fn funding_p2_never_touches_principal() {
     kani::assume(principal < 1_000_000);
 
     let position: i128 = kani::any();
+    kani::assume(position != i128::MIN);
     kani::assume(position.abs() < 1_000_000);
 
     engine.accounts[user_idx as usize].capital = principal;
@@ -596,6 +599,7 @@ fn funding_p2_never_touches_principal() {
 
     // Accrue arbitrary funding
     let funding_delta: i128 = kani::any();
+    kani::assume(funding_delta != i128::MIN);
     kani::assume(funding_delta.abs() < 1_000_000_000);
     engine.funding_index_qpb_e6 = funding_delta;
 
@@ -633,6 +637,7 @@ fn funding_p3_zero_sum_between_opposite_positions() {
 
     // Accrue funding
     let delta: i128 = kani::any();
+    kani::assume(delta != i128::MIN);
     kani::assume(delta.abs() < 1_000_000);
     engine.funding_index_qpb_e6 = delta;
 
@@ -666,6 +671,7 @@ fn funding_p4_settle_before_position_change() {
 
     // Period 1: accrue funding with initial position
     let delta1: i128 = kani::any();
+    kani::assume(delta1 != i128::MIN);
     kani::assume(delta1.abs() < 1_000);
     engine.funding_index_qpb_e6 = delta1;
 
@@ -681,6 +687,7 @@ fn funding_p4_settle_before_position_change() {
 
     // Period 2: more funding
     let delta2: i128 = kani::any();
+    kani::assume(delta2 != i128::MIN);
     kani::assume(delta2.abs() < 1_000);
     engine.funding_index_qpb_e6 = delta1 + delta2;
 
@@ -706,6 +713,7 @@ fn funding_p5_bounded_operations_no_overflow() {
     kani::assume(price > 1_000_000 && price < 1_000_000_000); // $1 to $1000
 
     let rate: i64 = kani::any();
+    kani::assume(rate != i64::MIN);
     kani::assume(rate.abs() < 1000); // ±1000 bps = ±10%
 
     let dt: u64 = kani::any();
@@ -734,11 +742,13 @@ fn funding_zero_position_no_change() {
     engine.accounts[user_idx as usize].position_size = 0; // Zero position
 
     let pnl_before: i128 = kani::any();
+    kani::assume(pnl_before != i128::MIN); // Avoid abs() overflow
     kani::assume(pnl_before.abs() < 1_000_000);
     engine.accounts[user_idx as usize].pnl = pnl_before;
 
     // Accrue arbitrary funding
     let delta: i128 = kani::any();
+    kani::assume(delta != i128::MIN); // Avoid abs() overflow
     kani::assume(delta.abs() < 1_000_000_000);
     engine.funding_index_qpb_e6 = delta;
 
@@ -955,6 +965,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
     let position: i128 = kani::any();
     let increase: i128 = kani::any();
 
+    kani::assume(position != i128::MIN);
     kani::assume(position.abs() < 5_000);
     kani::assume(increase > 0 && increase < 2_000);
 
@@ -1131,12 +1142,12 @@ fn i10_withdrawal_mode_preserves_conservation() {
     engine.risk_reduction_only = true;
     engine.loss_accum = loss;
 
-    assert!(engine.check_conservation().is_ok(),
+    assert!(engine.check_conservation(),
             "Conservation before withdrawal");
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation().is_ok(),
+    assert!(engine.check_conservation(),
             "I10: Withdrawal mode must preserve conservation");
 }
 

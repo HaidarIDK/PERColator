@@ -341,6 +341,16 @@ fn clamp_neg_i128(val: i128) -> u128 {
     if val < 0 { (-val) as u128 } else { 0 }
 }
 
+/// Saturating absolute value for i128 (handles i128::MIN without overflow)
+#[inline]
+fn saturating_abs_i128(val: i128) -> i128 {
+    if val == i128::MIN {
+        i128::MAX
+    } else {
+        val.abs()
+    }
+}
+
 // ============================================================================
 // Matching Engine Trait
 // ============================================================================
@@ -884,7 +894,7 @@ impl RiskEngine {
         // Step 4: If account has position, must maintain initial margin
         if account.position_size != 0 {
             let position_notional = mul_u128(
-                account.position_size.abs() as u128,
+                saturating_abs_i128(account.position_size) as u128,
                 account.entry_price as u128
             ) / 1_000_000;
 
@@ -920,7 +930,7 @@ impl RiskEngine {
 
         // Calculate position value at current price
         let position_value = mul_u128(
-            account.position_size.abs() as u128,
+            saturating_abs_i128(account.position_size) as u128,
             oracle_price as u128
         ) / 1_000_000;
 
@@ -953,8 +963,8 @@ impl RiskEngine {
         let new_user_pos = old_user_pos.saturating_add(size);
         let new_lp_pos = old_lp_pos.saturating_sub(size);
 
-        let user_inc = new_user_pos.abs() > old_user_pos.abs();
-        let lp_inc = new_lp_pos.abs() > old_lp_pos.abs();
+        let user_inc = saturating_abs_i128(new_user_pos) > saturating_abs_i128(old_user_pos);
+        let lp_inc = saturating_abs_i128(new_lp_pos) > saturating_abs_i128(old_lp_pos);
 
         if user_inc || lp_inc {
             self.enforce_op(OpClass::RiskIncrease)?; // Blocked in risk mode
@@ -989,7 +999,7 @@ impl RiskEngine {
         let exec_size = execution.size;
 
         // Calculate fee based on actual execution
-        let notional = mul_u128(exec_size.abs() as u128, exec_price as u128) / 1_000_000;
+        let notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
         // Use split_at_mut to access both accounts without copying
@@ -1011,7 +1021,7 @@ impl RiskEngine {
 
             // If reducing position, realize PNL at execution price
             if (old_position > 0 && exec_size < 0) || (old_position < 0 && exec_size > 0) {
-                let close_size = core::cmp::min(old_position.abs(), exec_size.abs());
+                let close_size = core::cmp::min(saturating_abs_i128(old_position), saturating_abs_i128(exec_size));
                 let price_diff = if old_position > 0 {
                     // Closing long: (exit_price - entry_price)
                     (exec_price as i128).saturating_sub(old_entry as i128)
@@ -1042,15 +1052,15 @@ impl RiskEngine {
         // Update user entry price
         if (user.position_size > 0 && exec_size > 0) || (user.position_size < 0 && exec_size < 0) {
             // Increasing position - weighted average entry at execution price
-            let old_notional = mul_u128(user.position_size.abs() as u128, user.entry_price as u128);
-            let new_notional = mul_u128(exec_size.abs() as u128, exec_price as u128);
+            let old_notional = mul_u128(saturating_abs_i128(user.position_size) as u128, user.entry_price as u128);
+            let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = user.position_size.abs().saturating_add(exec_size.abs());
+            let total_size = saturating_abs_i128(user.position_size).saturating_add(saturating_abs_i128(exec_size));
 
             if total_size != 0 {
                 new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
-        } else if user.position_size.abs() < exec_size.abs() {
+        } else if saturating_abs_i128(user.position_size) < saturating_abs_i128(exec_size) {
             // Flipping position - new entry at execution price
             new_user_entry = exec_price;
         }
@@ -1058,10 +1068,10 @@ impl RiskEngine {
         // Update LP entry price
         if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
            (lp.position_size < 0 && new_lp_position < lp.position_size) {
-            let old_notional = mul_u128(lp.position_size.abs() as u128, lp.entry_price as u128);
-            let new_notional = mul_u128(exec_size.abs() as u128, exec_price as u128);
+            let old_notional = mul_u128(saturating_abs_i128(lp.position_size) as u128, lp.entry_price as u128);
+            let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = lp.position_size.abs().saturating_add(exec_size.abs());
+            let total_size = saturating_abs_i128(lp.position_size).saturating_add(saturating_abs_i128(exec_size));
 
             if total_size != 0 {
                 new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
@@ -1082,7 +1092,7 @@ impl RiskEngine {
         if user.position_size != 0 {
             let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
             let position_value = mul_u128(
-                user.position_size.abs() as u128,
+                saturating_abs_i128(user.position_size) as u128,
                 oracle_price as u128
             ) / 1_000_000;
             let margin_required = mul_u128(
@@ -1104,7 +1114,7 @@ impl RiskEngine {
         if lp.position_size != 0 {
             let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
             let position_value = mul_u128(
-                lp.position_size.abs() as u128,
+                saturating_abs_i128(lp.position_size) as u128,
                 oracle_price as u128
             ) / 1_000_000;
             let margin_required = mul_u128(
@@ -1297,7 +1307,7 @@ impl RiskEngine {
         }
 
         // Calculate liquidation fee
-        let notional = mul_u128(liquidation_size.abs() as u128, oracle_price as u128) / 1_000_000;
+        let notional = mul_u128(saturating_abs_i128(liquidation_size) as u128, oracle_price as u128) / 1_000_000;
         let liquidation_fee = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
 
         // Split fee between insurance and keeper
@@ -1322,7 +1332,7 @@ impl RiskEngine {
         };
 
         let pnl = price_diff
-            .checked_mul(liquidation_size.abs())
+            .checked_mul(saturating_abs_i128(liquidation_size))
             .ok_or(RiskError::Overflow)?
             .checked_div(1_000_000)
             .ok_or(RiskError::Overflow)?;
