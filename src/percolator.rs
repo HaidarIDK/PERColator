@@ -60,6 +60,9 @@ pub enum AccountKind {
 pub struct Account {
     pub kind: AccountKind,
 
+    /// Unique account ID (monotonically increasing, never recycled)
+    pub account_id: u64,
+
     // ========================================
     // Capital & PNL (universal)
     // ========================================
@@ -128,6 +131,7 @@ impl Account {
 fn empty_account() -> Account {
     Account {
         kind: AccountKind::User,
+        account_id: 0,
         capital: 0,
         pnl: 0,
         reserved_pnl: 0,
@@ -236,6 +240,9 @@ pub struct RiskEngine {
     /// Number of used accounts (O(1) counter, fixes H2: fee bypass TOCTOU)
     pub num_used_accounts: u16,
 
+    /// Next account ID to assign (monotonically increasing, never recycled)
+    pub next_account_id: u64,
+
     /// Freelist head (u16::MAX = none)
     pub free_head: u16,
 
@@ -338,6 +345,15 @@ fn clamp_neg_i128(val: i128) -> u128 {
 // Matching Engine Trait
 // ============================================================================
 
+/// Result of a successful trade execution from the matching engine
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeExecution {
+    /// Actual execution price (may differ from oracle/requested price)
+    pub price: u64,
+    /// Actual executed size (may be partial fill)
+    pub size: i128,
+}
+
 /// Trait for pluggable matching engines
 ///
 /// Implementers can provide custom order matching logic via CPI.
@@ -349,11 +365,12 @@ pub trait MatchingEngine {
     /// # Arguments
     /// * `lp_program` - The LP's matching engine program ID
     /// * `lp_context` - The LP's matching engine context account
+    /// * `lp_account_id` - Unique ID of the LP account (never recycled)
     /// * `oracle_price` - Current oracle price for reference
     /// * `size` - Requested position size (positive = long, negative = short)
     ///
     /// # Returns
-    /// * `Ok(())` if the matching engine approves the trade
+    /// * `Ok(TradeExecution)` with actual executed price and size
     /// * `Err(RiskError)` if the trade is rejected
     ///
     /// # Safety
@@ -363,12 +380,14 @@ pub trait MatchingEngine {
         &self,
         lp_program: &[u8; 32],
         lp_context: &[u8; 32],
+        lp_account_id: u64,
         oracle_price: u64,
         size: i128,
-    ) -> Result<()>;
+    ) -> Result<TradeExecution>;
 }
 
 /// No-op matching engine (for testing)
+/// Returns the requested price and size as-is
 pub struct NoOpMatcher;
 
 impl MatchingEngine for NoOpMatcher {
@@ -376,11 +395,15 @@ impl MatchingEngine for NoOpMatcher {
         &self,
         _lp_program: &[u8; 32],
         _lp_context: &[u8; 32],
-        _oracle_price: u64,
-        _size: i128,
-    ) -> Result<()> {
-        // Always approve trades (no actual matching logic)
-        Ok(())
+        _lp_account_id: u64,
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<TradeExecution> {
+        // Return requested price/size unchanged (no actual matching logic)
+        Ok(TradeExecution {
+            price: oracle_price,
+            size,
+        })
     }
 }
 
@@ -409,6 +432,7 @@ impl RiskEngine {
             warmup_pause_slot: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
+            next_account_id: 0,
             free_head: 0,
             next_free: [0; MAX_ACCOUNTS],
             accounts: [empty_account(); MAX_ACCOUNTS],
@@ -573,12 +597,15 @@ impl RiskEngine {
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
-        // Allocate slot
+        // Allocate slot and assign unique ID
         let idx = self.alloc_slot()?;
+        let account_id = self.next_account_id;
+        self.next_account_id = self.next_account_id.saturating_add(1);
 
         // Initialize account
         self.accounts[idx as usize] = Account {
             kind: AccountKind::User,
+            account_id,
             capital: 0,
             pnl: 0,
             reserved_pnl: 0,
@@ -618,12 +645,15 @@ impl RiskEngine {
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
-        // Allocate slot
+        // Allocate slot and assign unique ID
         let idx = self.alloc_slot()?;
+        let account_id = self.next_account_id;
+        self.next_account_id = self.next_account_id.saturating_add(1);
 
         // Initialize account
         self.accounts[idx as usize] = Account {
             kind: AccountKind::LP,
+            account_id,
             capital: 0,
             pnl: 0,
             reserved_pnl: 0,
@@ -944,17 +974,22 @@ impl RiskEngine {
             return Err(RiskError::AccountKindMismatch);
         }
 
-        // Call matching engine
+        // Call matching engine with LP account ID
         let lp = &self.accounts[lp_idx as usize];
-        matcher.execute_match(
+        let execution = matcher.execute_match(
             &lp.matcher_program,
             &lp.matcher_context,
+            lp.account_id,
             oracle_price,
             size,
         )?;
 
-        // Calculate fee
-        let notional = mul_u128(size.abs() as u128, oracle_price as u128) / 1_000_000;
+        // Use executed price and size from matching engine
+        let exec_price = execution.price;
+        let exec_size = execution.size;
+
+        // Calculate fee based on actual execution
+        let notional = mul_u128(exec_size.abs() as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
         // Use split_at_mut to access both accounts without copying
@@ -974,15 +1009,15 @@ impl RiskEngine {
             let old_position = user.position_size;
             let old_entry = user.entry_price;
 
-            // If reducing position, realize PNL
-            if (old_position > 0 && size < 0) || (old_position < 0 && size > 0) {
-                let close_size = core::cmp::min(old_position.abs(), size.abs());
+            // If reducing position, realize PNL at execution price
+            if (old_position > 0 && exec_size < 0) || (old_position < 0 && exec_size > 0) {
+                let close_size = core::cmp::min(old_position.abs(), exec_size.abs());
                 let price_diff = if old_position > 0 {
                     // Closing long: (exit_price - entry_price)
-                    (oracle_price as i128).saturating_sub(old_entry as i128)
+                    (exec_price as i128).saturating_sub(old_entry as i128)
                 } else {
                     // Closing short: (entry_price - exit_price)
-                    (old_entry as i128).saturating_sub(oracle_price as i128)
+                    (old_entry as i128).saturating_sub(exec_price as i128)
                 };
 
                 let pnl = price_diff
@@ -996,37 +1031,37 @@ impl RiskEngine {
             }
         }
 
-        // Calculate new positions
-        let new_user_position = user.position_size.saturating_add(size);
-        let new_lp_position = lp.position_size.saturating_sub(size);
+        // Calculate new positions using executed size
+        let new_user_position = user.position_size.saturating_add(exec_size);
+        let new_lp_position = lp.position_size.saturating_sub(exec_size);
 
-        // Calculate new entry prices
+        // Calculate new entry prices using execution price
         let mut new_user_entry = user.entry_price;
         let mut new_lp_entry = lp.entry_price;
 
         // Update user entry price
-        if (user.position_size > 0 && size > 0) || (user.position_size < 0 && size < 0) {
-            // Increasing position - weighted average entry
+        if (user.position_size > 0 && exec_size > 0) || (user.position_size < 0 && exec_size < 0) {
+            // Increasing position - weighted average entry at execution price
             let old_notional = mul_u128(user.position_size.abs() as u128, user.entry_price as u128);
-            let new_notional = mul_u128(size.abs() as u128, oracle_price as u128);
+            let new_notional = mul_u128(exec_size.abs() as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = user.position_size.abs().saturating_add(size.abs());
+            let total_size = user.position_size.abs().saturating_add(exec_size.abs());
 
             if total_size != 0 {
                 new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
-        } else if user.position_size.abs() < size.abs() {
-            // Flipping position
-            new_user_entry = oracle_price;
+        } else if user.position_size.abs() < exec_size.abs() {
+            // Flipping position - new entry at execution price
+            new_user_entry = exec_price;
         }
 
         // Update LP entry price
         if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
            (lp.position_size < 0 && new_lp_position < lp.position_size) {
             let old_notional = mul_u128(lp.position_size.abs() as u128, lp.entry_price as u128);
-            let new_notional = mul_u128(size.abs() as u128, oracle_price as u128);
+            let new_notional = mul_u128(exec_size.abs() as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = lp.position_size.abs().saturating_add(size.abs());
+            let total_size = lp.position_size.abs().saturating_add(exec_size.abs());
 
             if total_size != 0 {
                 new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;

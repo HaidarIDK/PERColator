@@ -29,11 +29,15 @@ impl MatchingEngine for AMMatcher {
         &self,
         _matching_engine_program: &[u8; 32],
         _matching_engine_context: &[u8; 32],
-        _oracle_price: u64,
-        _size: i128,
-    ) -> Result<()> {
-        // AMM always provides liquidity
-        Ok(())
+        _lp_account_id: u64,
+        oracle_price: u64,
+        size: i128,
+    ) -> Result<TradeExecution> {
+        // AMM always provides liquidity at requested price/size
+        Ok(TradeExecution {
+            price: oracle_price,
+            size,
+        })
     }
 }
 
