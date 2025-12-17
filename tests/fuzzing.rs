@@ -20,8 +20,6 @@ fn default_params() -> RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
-        liquidation_fee_bps: 50,
-        insurance_fee_share_bps: 5000,
         max_accounts: 1000,
         account_fee_bps: 10000,
         risk_reduction_threshold: 0,
@@ -295,35 +293,6 @@ proptest! {
         if engine.insurance_fund.fee_revenue > insurance_before {
             prop_assert!(engine.insurance_fund.fee_revenue > insurance_before);
         }
-    }
-}
-
-// Test that liquidation always reduces position
-proptest! {
-    #[test]
-    fn fuzz_liquidation_reduces_position(
-        principal in 100u128..10_000,
-        position in 10_000i128..100_000,
-        entry_price in price_strategy(),
-        oracle_price in price_strategy()
-    ) {
-        let mut engine = Box::new(RiskEngine::new(default_params()));
-        let user_idx = engine.add_user(1).unwrap();
-        let keeper_idx = engine.add_user(1).unwrap();
-
-        engine.deposit(user_idx, principal).unwrap();
-        engine.accounts[user_idx as usize].position_size = position;
-        engine.accounts[user_idx as usize].entry_price = entry_price;
-
-        let position_before = engine.accounts[user_idx as usize].position_size.abs();
-
-        let _ = engine.liquidate_account(user_idx, keeper_idx, oracle_price);
-
-        let position_after = engine.accounts[user_idx as usize].position_size.abs();
-
-        // If liquidation happened, position should be reduced
-        prop_assert!(position_after <= position_before,
-                     "Liquidation should reduce position size");
     }
 }
 
