@@ -17,10 +17,30 @@ Oracle manipulation allows attackers to create artificial profits. PNL warmup en
 | ID | Property |
 |----|----------|
 | **I1** | Account capital is NEVER reduced by ADL or socialization |
-| **I2** | Conservation: `vault == sum(capital) + sum(pnl) + insurance_fund.balance` |
+| **I2** | Conservation: `vault + loss_accum == sum(capital) + sum(pnl) + insurance_fund.balance` |
 | **I4** | ADL haircuts unwrapped PNL before insurance fund |
 | **I5** | PNL warmup is deterministic and monotonically increasing |
 | **I7** | Account isolation - operations on one account don't affect others |
+
+### Warmup Budget Invariant
+
+Warmup converts PnL into principal with sign:
+- **Positive PnL** can increase capital (profits become withdrawable principal)
+- **Negative PnL** can decrease capital (losses paid from principal, up to available capital)
+
+A global budget prevents warmed profits from exceeding paid losses plus spendable insurance:
+
+```
+W⁺ ≤ W⁻ + max(0, I - I_min)
+```
+
+**Definitions:**
+- `W⁺` = `warmed_pos_total` - cumulative positive PnL converted to capital
+- `W⁻` = `warmed_neg_total` - cumulative negative PnL paid from capital
+- `I` = `insurance_fund.balance` - current insurance fund balance
+- `I_min` = `risk_reduction_threshold` - minimum insurance floor
+
+**Rationale:** This invariant prevents "profit maturation / withdrawal" from outrunning realized loss payments. Without this constraint, an attacker could create artificial profits via oracle manipulation, wait for warmup, and withdraw before corresponding losses are paid - effectively extracting value that doesn't exist in the vault.
 
 ### Key Operations
 
@@ -44,8 +64,10 @@ Oracle manipulation allows attackers to create artificial profits. PNL warmup en
 The conservation formula is exact (no tolerance):
 
 ```
-vault = sum(capital) + sum(pnl) + insurance_fund.balance
+vault + loss_accum = sum(capital) + sum(pnl) + insurance_fund.balance
 ```
+
+Where `loss_accum` tracks unrecoverable losses when insurance is depleted.
 
 This holds because:
 - Deposits/withdrawals adjust both vault and capital
