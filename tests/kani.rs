@@ -1192,6 +1192,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
 
     engine.accounts[user_idx as usize].capital = principal;
     engine.vault = principal;
+    engine.insurance_fund.balance = 0; // Reset insurance to match vault = total_capital
 
     // Enter withdrawal mode
     engine.risk_reduction_only = true;
