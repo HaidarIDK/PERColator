@@ -1189,19 +1189,19 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     engine.accounts[lp as usize].capital = 50_000;
     engine.vault = 60_000;
 
-    // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 1_000;
+    // Set insurance fund balance (must stay > 0 to avoid force_realize_losses trigger)
+    engine.insurance_fund.balance = 5_000;
 
     // User opens long position
     let matcher = NoOpMatcher;
     engine.execute_trade(&matcher, lp, user, 1_000_000, 5_000).unwrap();
     assert_eq!(engine.accounts[user as usize].position_size, 5_000);
 
-    // Trigger withdrawal-only mode
-    engine.apply_adl(2_000).unwrap();
+    // Manually enter risk-reduction-only mode (simulating some trigger)
+    engine.enter_risk_reduction_only_mode();
     assert!(engine.risk_reduction_only);
 
-    // User can CLOSE position (reducing from 5000 to 0)
+    // User can CLOSE position (reducing from 5000 to 0) in risk mode
     let result = engine.execute_trade(&matcher, lp, user, 1_000_000, -5_000);
     assert!(result.is_ok(), "Closing position should be allowed");
     assert_eq!(engine.accounts[user as usize].position_size, 0);

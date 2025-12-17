@@ -17,10 +17,12 @@ Oracle manipulation allows attackers to create artificial profits. PNL warmup en
 | ID | Property |
 |----|----------|
 | **I1** | Account capital is NEVER reduced by ADL or socialization |
-| **I2** | Conservation: `vault + loss_accum == sum(capital) + sum(pnl) + insurance_fund.balance` |
+| **I2** | Conservation: `vault + loss_accum == sum(capital) + sum(pnl) + insurance + rounding_surplus` |
 | **I4** | ADL haircuts unwrapped PNL before insurance fund |
 | **I5** | PNL warmup is deterministic and monotonically increasing |
 | **I7** | Account isolation - operations on one account don't affect others |
+| **I8** | Insurance floor: insurance spending never reduces `insurance_fund.balance` below `I_min` |
+| **I9** | Threshold unstick: if `I <= I_min`, running the scan reduces total open interest to zero and forces loss payment from capital before ADL |
 
 ### Warmup Budget Invariant
 
@@ -38,7 +40,10 @@ W⁺ ≤ W⁻ + max(0, I - I_min)
 - `W⁺` = `warmed_pos_total` - cumulative positive PnL converted to capital
 - `W⁻` = `warmed_neg_total` - cumulative negative PnL paid from capital
 - `I` = `insurance_fund.balance` - current insurance fund balance
-- `I_min` = `risk_reduction_threshold` - minimum insurance floor
+- `I_min` = `risk_reduction_threshold` - minimum insurance floor (protected)
+- `max(0, I - I_min)` = spendable portion of insurance above the protected floor
+
+**Enforcement:** The invariant is enforced at the moment PnL would be converted into capital (warmup settlement), and losses are settled before gains.
 
 **Rationale:** This invariant prevents "profit maturation / withdrawal" from outrunning realized loss payments. Without this constraint, an attacker could create artificial profits via oracle manipulation, wait for warmup, and withdraw before corresponding losses are paid - effectively extracting value that doesn't exist in the vault.
 
@@ -46,16 +51,20 @@ W⁺ ≤ W⁻ + max(0, I - I_min)
 
 **Trading:** Zero-sum PNL between user and LP. Fees go to insurance fund.
 
-**ADL (Auto-Deleveraging):** When losses exceed insurance capacity:
+**ADL (Auto-Deleveraging):** When losses must be covered:
 1. Haircut unwrapped (young) PNL proportionally across all accounts
-2. Use insurance fund for remaining losses
-3. If insurance depleted, enter risk-reduction-only mode
+2. Spend insurance only above the protected floor: `max(0, I - I_min)`
+3. Any remaining loss is added to `loss_accum`
 
-**Risk-Reduction-Only Mode:** Triggered when insurance fund depleted or below threshold:
+Insurance spending is capped: the engine will only spend `max(0, I - I_min)` to cover losses. Insurance at or below `I_min` is treated as a protected floor.
+
+**Risk-Reduction-Only Mode:** Triggered when insurance fund at or below threshold:
 - Warmup frozen (no more PNL vests)
 - Risk-increasing trades blocked
 - Capital withdrawals and position closing allowed
 - Exit via insurance fund top-up
+
+**Forced Loss Realization Scan (Threshold Unstick):** When `insurance_fund.balance <= I_min`, the engine can perform an atomic scan that settles all open positions at the oracle price and forces negative PnL to be paid from capital (up to available capital). Any unpaid remainder is socialized via ADL (unwrapped first, then spendable insurance above floor, then `loss_accum`). This prevents profit maturation/withdrawal from outrunning realized loss payments.
 
 **Funding:** O(1) cumulative index pattern. Settled lazily before any account operation.
 
@@ -64,16 +73,19 @@ W⁺ ≤ W⁻ + max(0, I - I_min)
 The conservation formula is exact (no tolerance):
 
 ```
-vault + loss_accum = sum(capital) + sum(pnl) + insurance_fund.balance
+vault + loss_accum = sum(capital) + sum(pnl) + insurance_fund.balance + rounding_surplus
 ```
 
-Where `loss_accum` tracks unrecoverable losses when insurance is depleted.
+Where:
+- `loss_accum` tracks uncovered losses after consuming unwrapped PnL and all spendable insurance above the floor
+- `rounding_surplus` tracks value in vault unclaimed due to integer division rounding during position settlement
 
 This holds because:
 - Deposits/withdrawals adjust both vault and capital
 - Trading PNL is zero-sum between counterparties
 - Fees transfer from user PNL to insurance (net zero)
 - ADL redistributes PNL (net zero)
+- Rounding slippage from position settlement is tracked explicitly
 
 ## Running Tests
 

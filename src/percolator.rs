@@ -209,6 +209,11 @@ pub struct RiskEngine {
     /// Loss accumulator for socialization
     pub loss_accum: u128,
 
+    /// Rounding surplus from position settlement (negative mark_pnl rounding)
+    /// This tracks value in the vault that isn't claimed by any account due to
+    /// integer division rounding during position settlement.
+    pub rounding_surplus: u128,
+
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PnL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
     pub risk_reduction_only: bool,
 
@@ -437,6 +442,7 @@ impl RiskEngine {
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
             loss_accum: 0,
+            rounding_surplus: 0,
             risk_reduction_only: false,
             risk_reduction_mode_withdrawn: 0,
             warmup_paused: false,
@@ -950,6 +956,12 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
+        // Auto-trigger force_realize_losses when insurance is at/below threshold
+        // This unsticks the exchange by forcing losers to pay from capital
+        if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
+            self.force_realize_losses(oracle_price)?;
+        }
+
         // Check if trade increases risk (absolute exposure for either party)
         let old_user_pos = self.accounts[user_idx as usize].position_size;
         let old_lp_pos = self.accounts[lp_idx as usize].position_size;
@@ -1424,21 +1436,17 @@ impl RiskEngine {
             }
         }
 
-        // Compensate for integer division rounding slippage to maintain conservation.
+        // Compensate for integer division rounding slippage.
         // Due to truncation toward zero, sum(mark_pnl) may not be exactly zero even
-        // though positions are zero-sum. This creates a discrepancy:
-        // - If total_mark_pnl > 0: accounts claim more profit than they should (phantom profit)
+        // though positions are zero-sum. Handle both directions:
+        // - If total_mark_pnl > 0: accounts claim more profit than exists (phantom profit)
         //   → treat as additional loss to be socialized
-        // - If total_mark_pnl < 0: accounts claim less than they should (phantom loss)
-        //   → the extra value goes to insurance to maintain conservation
+        // - If total_mark_pnl < 0: accounts claim less than exists (vault surplus)
+        //   → track in rounding_surplus (does not mint insurance)
         if total_mark_pnl > 0 {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
-            // Rounding created phantom losses - credit to insurance to maintain conservation
-            self.insurance_fund.balance = add_u128(
-                self.insurance_fund.balance,
-                (-total_mark_pnl) as u128,
-            );
+            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
         }
 
         // Second pass: settle warmup for all used accounts before ADL
@@ -1559,15 +1567,12 @@ impl RiskEngine {
             }
         }
 
-        // Compensate for integer division rounding
+        // Compensate for integer division rounding slippage
         if total_mark_pnl > 0 {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
-            // Rounding created phantom losses - credit to insurance
-            self.insurance_fund.balance = add_u128(
-                self.insurance_fund.balance,
-                (-total_mark_pnl) as u128,
-            );
+            // Track vault surplus from rounding (does not mint insurance)
+            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
         }
 
         // Socialize any unpaid losses via ADL waterfall
@@ -1643,9 +1648,14 @@ impl RiskEngine {
             net_pnl = net_pnl.saturating_add(account.pnl);
         });
 
-        // expected = total_capital + net_pnl + insurance_fund.balance
-        // actual = vault + loss_accum (loss_accum is value that "left" the system)
+        // Conservation formula:
+        // vault + loss_accum = sum(capital) + sum(pnl) + insurance + rounding_surplus
+        //
+        // Where:
+        // - loss_accum: value that "left" the system (unrecoverable losses)
+        // - rounding_surplus: value in vault unclaimed due to integer division rounding
         let base = add_u128(total_capital, self.insurance_fund.balance);
+        let base = add_u128(base, self.rounding_surplus);
 
         let expected = if net_pnl >= 0 {
             add_u128(base, net_pnl as u128)
