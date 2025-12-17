@@ -170,7 +170,7 @@ fn test_withdraw_with_warmed_up_pnl() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
-    // Budget = warmed_neg_total + insurance_spendable() = 0 + 500 = 500
+    // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 500 = 500
     engine.insurance_fund.balance = 500;
 
     engine.deposit(user_idx, 1000).unwrap();
@@ -803,7 +803,7 @@ fn test_adl_protects_principal_during_warmup() {
     engine.deposit(victim, 10_000).unwrap();
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
-    // Budget = warmed_neg_total + insurance_spendable() = 0 + 10000 = 10000
+    // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 10000 = 10000
     engine.insurance_fund.balance = 10_000;
 
     let attacker_principal = engine.accounts[attacker as usize].capital;
@@ -1314,7 +1314,7 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
     let user = engine.add_user(100).unwrap();
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
-    // Budget = warmed_neg_total + insurance_spendable() = 0 + 100 = 100
+    // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 100 = 100
     engine.insurance_fund.balance = 100;
 
     // User.pnl=+1000, slope=10, started_at_slot=0
@@ -1577,7 +1577,7 @@ fn test_lp_withdraw() {
     // vault = 10,001 + 1 + 5000 = 15,002
 
     // Add insurance to provide warmup budget for converting LP's positive PnL to capital
-    // Budget = warmed_neg_total + insurance_spendable() = 0 + 5000 = 5000
+    // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 5000 = 5000
     engine.insurance_fund.balance = 5_000;
 
     // Zero-sum PNL: LP gains 5000, user loses 5000
@@ -2136,7 +2136,7 @@ fn test_warmup_budget_losses_create_budget_for_profits() {
     assert_eq!(engine.warmed_pos_total, 500, "Winner should have used warmup budget");
 
     // Invariant should hold with equality
-    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable(),
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable_raw(),
             "Warmup budget invariant violated");
 }
 
@@ -2168,7 +2168,7 @@ fn test_warmup_budget_insurance_allows_profits_without_losses() {
     assert_eq!(engine.accounts[user as usize].pnl, 300, "PnL should decrease by 200");
 
     // Invariant holds
-    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable(),
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable_raw(),
             "Warmup budget invariant violated");
 }
 
@@ -2491,8 +2491,8 @@ fn test_force_realize_losses_invariant_holds() {
     // Force realize at a price that causes small loss
     engine.force_realize_losses(1_990_000).unwrap();
 
-    // Check invariant: warmed_pos_total <= warmed_neg_total + insurance_spendable()
-    let spendable = engine.insurance_spendable();
+    // Check invariant: warmed_pos_total <= warmed_neg_total + insurance_spendable_raw()
+    let spendable = engine.insurance_spendable_raw();
     assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(spendable),
             "Warmup budget invariant violated after force_realize_losses: W+={}, W-={}, spendable={}",
             engine.warmed_pos_total, engine.warmed_neg_total, spendable);
@@ -2500,5 +2500,166 @@ fn test_force_realize_losses_invariant_holds() {
     // Conservation should hold
     assert!(engine.check_conservation(),
             "Conservation violated after force_realize_losses");
+}
+
+// ============================================================================
+// Warmup Insurance Reserved Tests (Plan Step 9)
+// ============================================================================
+
+/// Test 1: Invariant stays true after spending insurance
+/// This catches the exact bug where ADL could spend reserved insurance.
+#[test]
+fn test_reserved_invariant_after_adl_spending() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // Floor at 100
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: floor=100, insurance=200 (raw spendable = 100)
+    engine.insurance_fund.balance = 200;
+
+    // User has positive PnL that can warm immediately
+    engine.accounts[user_idx as usize].pnl = 100;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+
+    // Settle warmup - should warm 100 and reserve 100
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+
+    assert_eq!(engine.warmed_pos_total, 100, "Should warm 100");
+    assert_eq!(engine.warmup_insurance_reserved, 100, "Should reserve 100");
+    assert_eq!(engine.insurance_spendable_unreserved(), 0, "Unreserved should be 0");
+
+    // Apply ADL with 50 loss - since unreserved = 0, can't spend insurance
+    engine.apply_adl(50).unwrap();
+
+    // Insurance should remain 200 (cannot spend reserved)
+    assert_eq!(engine.insurance_fund.balance, 200,
+               "Insurance should remain 200 - reserved portion protected");
+
+    // loss_accum should increase by 50
+    assert_eq!(engine.loss_accum, 50,
+               "Loss should go to loss_accum since reserved can't be spent");
+
+    // Invariant should hold: W+ <= W- + raw
+    let raw = engine.insurance_spendable_raw();
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw),
+            "Stable invariant W+ <= W- + raw should hold");
+}
+
+/// Test 2: ADL can spend unreserved insurance
+#[test]
+fn test_adl_spends_unreserved_insurance() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // Floor at 100
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: floor=100, insurance=200 (raw spendable = 100)
+    engine.insurance_fund.balance = 200;
+
+    // User has positive PnL
+    engine.accounts[user_idx as usize].pnl = 40;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+
+    // Warm only 40 from insurance (leaves 60 unreserved)
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+
+    assert_eq!(engine.warmup_insurance_reserved, 40, "Should reserve 40");
+    assert_eq!(engine.insurance_spendable_unreserved(), 60, "Unreserved should be 60");
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Apply ADL with 30 loss - should spend from unreserved
+    engine.apply_adl(30).unwrap();
+
+    // Insurance should decrease by 30
+    assert_eq!(engine.insurance_fund.balance, insurance_before - 30,
+               "Insurance should decrease by 30 (spent from unreserved)");
+
+    // loss_accum should be 0 (fully covered by insurance)
+    assert_eq!(engine.loss_accum, 0, "No loss_accum since insurance covered it");
+
+    // Reserved should be unchanged
+    assert_eq!(engine.warmup_insurance_reserved, 40, "Reserved unchanged");
+}
+
+/// Test 3: No insurance minting on negative rounding
+#[test]
+fn test_no_insurance_minting_on_rounding() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup accounts with positions that will cause rounding
+    engine.deposit(lp_idx, 10_000).unwrap();
+    engine.deposit(user_idx, 10_000).unwrap();
+
+    // Create opposing positions
+    engine.accounts[lp_idx as usize].position_size = -100;
+    engine.accounts[user_idx as usize].position_size = 100;
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Call panic_settle_all - may have rounding
+    engine.panic_settle_all(1_000_000).unwrap();
+
+    // Insurance should not increase (no minting from rounding)
+    assert!(engine.insurance_fund.balance <= insurance_before,
+            "Insurance should not increase from rounding: before={}, after={}",
+            insurance_before, engine.insurance_fund.balance);
+
+    assert!(engine.check_conservation(), "Conservation violated");
+}
+
+/// Test 4: Reserved never decreases (monotone counter)
+#[test]
+fn test_reserved_monotone_non_decreasing() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup
+    engine.insurance_fund.balance = 500;
+    engine.vault = 500;
+
+    engine.deposit(lp_idx, 10_000).unwrap();
+    engine.deposit(user_idx, 1_000).unwrap();
+
+    // Warm some profits
+    engine.accounts[user_idx as usize].pnl = 50;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+    let reserved_after_warmup = engine.warmup_insurance_reserved;
+    assert!(reserved_after_warmup > 0, "Should have reserved some insurance");
+
+    // Run ADL - reserved should not decrease
+    engine.apply_adl(10).unwrap();
+    assert!(engine.warmup_insurance_reserved >= reserved_after_warmup,
+            "Reserved should not decrease after ADL");
+
+    // Run panic_settle with positions
+    engine.accounts[lp_idx as usize].position_size = -100;
+    engine.accounts[user_idx as usize].position_size = 100;
+    engine.panic_settle_all(1_000_000).unwrap();
+    assert!(engine.warmup_insurance_reserved >= reserved_after_warmup,
+            "Reserved should not decrease after panic_settle");
+
+    // Force realize losses (need to drain insurance first)
+    engine.insurance_fund.balance = 100; // At floor
+    let _ = engine.force_realize_losses(1_000_000);
+    assert!(engine.warmup_insurance_reserved >= reserved_after_warmup,
+            "Reserved should not decrease after force_realize_losses");
 }
 

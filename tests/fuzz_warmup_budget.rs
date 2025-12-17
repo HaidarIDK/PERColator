@@ -119,9 +119,6 @@ fn fuzz_warmup_budget_invariant() {
         }
         engine.insurance_fund.balance = new_insurance;
 
-        // Track if we've done an ADL-triggering operation
-        let mut insurance_may_be_spent = false;
-
         // For 200 steps
         for step in 0..200 {
             let action = rng.usize(0, 5);
@@ -165,28 +162,34 @@ fn fuzz_warmup_budget_invariant() {
                 }
                 5 => {
                     // panic_settle_all(random oracle price) - ignore errors
-                    // This can trigger ADL which spends insurance
+                    // This can trigger ADL which spends unreserved insurance
                     let oracle_price = rng.u64(1_000_000, 10_000_000);
                     let _ = engine.panic_settle_all(oracle_price);
-                    insurance_may_be_spent = true;
                 }
                 _ => {}
             }
 
-            // After each step, check warmup budget invariant
-            // Only check if insurance hasn't been spent by ADL, since ADL can
-            // spend insurance that was previously "committed" to the warmup budget
-            if !insurance_may_be_spent {
-                let spendable = engine.insurance_spendable();
-                assert!(
-                    engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(spendable),
-                    "Seed {}, Step {}: Warmup budget invariant violated!\n\
-                     W+={}, W-={}, spendable={}\n\
-                     W+ <= W- + spendable should hold",
-                    seed, step,
-                    engine.warmed_pos_total, engine.warmed_neg_total, spendable
-                );
-            }
+            // After each step, check stable warmup budget invariant
+            // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
+            let raw = engine.insurance_spendable_raw();
+            assert!(
+                engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw),
+                "Seed {}, Step {}: Warmup budget invariant violated!\n\
+                 W+={}, W-={}, raw={}, reserved={}\n\
+                 W+ <= W- + raw should hold",
+                seed, step,
+                engine.warmed_pos_total, engine.warmed_neg_total, raw,
+                engine.warmup_insurance_reserved
+            );
+
+            // Also verify reserved never exceeds raw spendable
+            assert!(
+                engine.warmup_insurance_reserved <= raw,
+                "Seed {}, Step {}: Reserved exceeds raw spendable!\n\
+                 reserved={}, raw={}",
+                seed, step,
+                engine.warmup_insurance_reserved, raw
+            );
 
             // Always check conservation
             assert!(engine.check_conservation(),

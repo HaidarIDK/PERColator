@@ -30,11 +30,19 @@ Warmup converts PnL into principal with sign:
 - **Positive PnL** can increase capital (profits become withdrawable principal)
 - **Negative PnL** can decrease capital (losses paid from principal, up to available capital)
 
-A global budget prevents warmed profits from exceeding paid losses plus unreserved spendable insurance:
+Two related invariants govern warmup:
 
+**Stable Invariant** (always holds):
 ```
-W⁺ ≤ W⁻ + max(0, I - I_min) - R
+W⁺ ≤ W⁻ + max(0, I - I_min)
 ```
+
+**Budget Constraint** (limits future warmups):
+```
+Budget = W⁻ + S - W⁺ ≥ 0
+```
+
+where `S = max(0, I - I_min) - R` (saturating) = unreserved spendable insurance.
 
 **Definitions:**
 - `W⁺` = `warmed_pos_total` - cumulative positive PnL converted to capital
@@ -44,7 +52,7 @@ W⁺ ≤ W⁻ + max(0, I - I_min) - R
 - `R` = `warmup_insurance_reserved` - insurance above the floor committed to backing warmed profits (monotone counter)
 - `S` = `max(0, I - I_min) - R` (saturating) = unreserved spendable insurance
 
-`R` reserves part of the spendable insurance above the floor to back already-warmed profits, so the invariant remains true even if insurance is later spent on losses.
+`R` reserves part of the spendable insurance above the floor to back already-warmed profits. ADL can only spend unreserved insurance (`S`), leaving reserved insurance intact to back warmed profits.
 
 **Enforcement:** The invariant is enforced at the moment PnL would be converted into capital (warmup settlement), and losses are settled before gains.
 

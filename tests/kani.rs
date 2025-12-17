@@ -1857,9 +1857,9 @@ fn warmup_budget_a_invariant_holds_after_settlement() {
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF: Warmup budget invariant must hold
-    let spendable = engine.insurance_spendable();
-    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(spendable),
-            "WB-A: W+ <= W- + spendable must hold after settlement");
+    let raw = engine.insurance_spendable_raw();
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw),
+            "WB-A: W+ <= W- + raw_spendable must hold after settlement");
 }
 
 // Proof B: Settling negative PNL cannot increase warmed_pos_total
@@ -1990,13 +1990,17 @@ fn warmup_budget_d_paused_settlement_time_invariant() {
     engine.warmup_paused = true;
     engine.warmup_pause_slot = pause_slot;
 
-    // Compute vested amount at slot1
+    // Compute vested amount at slot1 (inline calculation)
     engine.current_slot = settle_slot1;
-    let vested1 = engine.vested_warmup(&engine.accounts[user_idx as usize]);
+    let effective_slot1 = core::cmp::min(engine.current_slot, engine.warmup_pause_slot);
+    let elapsed1 = effective_slot1.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
+    let vested1 = engine.accounts[user_idx as usize].warmup_slope_per_step.saturating_mul(elapsed1 as u128);
 
-    // Compute vested amount at later slot2
+    // Compute vested amount at later slot2 (inline calculation)
     engine.current_slot = settle_slot2;
-    let vested2 = engine.vested_warmup(&engine.accounts[user_idx as usize]);
+    let effective_slot2 = core::cmp::min(engine.current_slot, engine.warmup_pause_slot);
+    let elapsed2 = effective_slot2.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
+    let vested2 = engine.accounts[user_idx as usize].warmup_slope_per_step.saturating_mul(elapsed2 as u128);
 
     // PROOF: Vested amount should not change when warmup is paused
     // (both should be capped at pause_slot)

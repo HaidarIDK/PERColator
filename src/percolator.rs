@@ -237,6 +237,9 @@ pub struct RiskEngine {
     /// Cumulative negative PnL paid from capital (W-)
     pub warmed_neg_total: u128,
 
+    /// Insurance above the floor that has been committed to backing warmed profits (monotone)
+    pub warmup_insurance_reserved: u128,
+
     // ========================================
     // Slab Management
     // ========================================
@@ -449,6 +452,7 @@ impl RiskEngine {
             warmup_pause_slot: 0,
             warmed_pos_total: 0,
             warmed_neg_total: 0,
+            warmup_insurance_reserved: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1176,9 +1180,9 @@ impl RiskEngine {
             .saturating_sub(account.reserved_pnl)
     }
 
-    /// Returns insurance balance above the floor (spendable amount)
+    /// Returns insurance balance above the floor (raw spendable, before reservations)
     #[inline]
-    pub fn insurance_spendable(&self) -> u128 {
+    pub fn insurance_spendable_raw(&self) -> u128 {
         let floor = self.params.risk_reduction_threshold;
         if self.insurance_fund.balance > floor {
             self.insurance_fund.balance - floor
@@ -1187,11 +1191,18 @@ impl RiskEngine {
         }
     }
 
-    /// Returns remaining warmup budget for converting positive PnL to capital
-    /// Budget = max(0, warmed_neg_total + spendable_insurance - warmed_pos_total)
+    /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
     #[inline]
-    fn warmup_budget_remaining(&self) -> u128 {
-        let rhs = self.warmed_neg_total.saturating_add(self.insurance_spendable());
+    pub fn insurance_spendable_unreserved(&self) -> u128 {
+        self.insurance_spendable_raw().saturating_sub(self.warmup_insurance_reserved)
+    }
+
+    /// Returns remaining warmup budget for converting positive PnL to capital
+    /// Budget = max(0, warmed_neg_total + unreserved_spendable_insurance - warmed_pos_total)
+    #[inline]
+    pub fn warmup_budget_remaining(&self) -> u128 {
+        let rhs = self.warmed_neg_total
+            .saturating_add(self.insurance_spendable_unreserved());
         rhs.saturating_sub(self.warmed_pos_total)
     }
 
@@ -1202,7 +1213,7 @@ impl RiskEngine {
     /// - Positive PnL: increases capital (profits become principal, clamped by budget)
     ///
     /// The warmup budget invariant ensures:
-    ///   warmed_pos_total <= warmed_neg_total + insurance_spendable()
+    ///   warmed_pos_total <= warmed_neg_total + insurance_spendable_unreserved()
     pub fn settle_warmup_to_capital(&mut self, idx: u16) -> Result<()> {
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
@@ -1236,7 +1247,10 @@ impl RiskEngine {
             }
         }
 
-        // 3.3 Settle gains with budget clamp (positive PnL → increase capital)
+        // 3.3 Compute budget from losses (how much positive PnL can warm without insurance)
+        let losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
+
+        // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
             let positive_pnl = pnl as u128;
@@ -1248,6 +1262,17 @@ impl RiskEngine {
                 let x = core::cmp::min(cap, core::cmp::min(avail, budget));
 
                 if x > 0 {
+                    // Portion of x that is not covered by matured-loss budget must be backed by insurance.
+                    // Reserve that insurance so it cannot later be spent in ADL.
+                    let covered_by_losses = core::cmp::min(x, losses_budget);
+                    let needs_insurance = x - covered_by_losses;
+
+                    if needs_insurance > 0 {
+                        // Reserve from unreserved spendable insurance (must be available by construction of x)
+                        self.warmup_insurance_reserved =
+                            self.warmup_insurance_reserved.saturating_add(needs_insurance);
+                    }
+
                     self.accounts[idx as usize].pnl =
                         self.accounts[idx as usize].pnl.saturating_sub(x as i128);
                     self.accounts[idx as usize].capital =
@@ -1257,18 +1282,25 @@ impl RiskEngine {
             }
         }
 
-        // 3.4 Update start slot deterministically
+        // 3.5 Update start slot deterministically
         if !self.warmup_paused {
             self.accounts[idx as usize].warmup_started_at_slot = self.current_slot;
         }
         // If paused, leave warmup_started_at_slot unchanged
 
-        // 3.5 Hard invariant assert in debug/kani
+        // 3.6 Hard invariant assert in debug/kani
+        // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
+        // Also: reserved ≤ raw_spendable (can't reserve more than exists)
         #[cfg(any(test, kani))]
         {
+            let raw = self.insurance_spendable_raw();
             debug_assert!(
-                self.warmed_pos_total <= self.warmed_neg_total.saturating_add(self.insurance_spendable()),
-                "Warmup budget invariant violated"
+                self.warmed_pos_total <= self.warmed_neg_total.saturating_add(raw),
+                "Warmup budget invariant violated: W+ > W- + raw"
+            );
+            debug_assert!(
+                self.warmup_insurance_reserved <= raw,
+                "Reserved exceeds raw spendable"
             );
         }
 
@@ -1335,8 +1367,8 @@ impl RiskEngine {
         let remaining_loss = total_loss.saturating_sub(loss_to_socialize);
 
         if remaining_loss > 0 {
-            // Insurance can only spend above the floor (risk_reduction_threshold)
-            let spendable = self.insurance_spendable();
+            // Insurance can only spend unreserved amount above the floor
+            let spendable = self.insurance_spendable_unreserved();
             let spend = core::cmp::min(remaining_loss, spendable);
 
             // Deduct from insurance fund
@@ -1459,7 +1491,7 @@ impl RiskEngine {
                 w &= w - 1;
 
                 // settle_warmup_to_capital handles the budget invariant
-                let _ = self.settle_warmup_to_capital(idx as u16);
+                self.settle_warmup_to_capital(idx as u16)?;
             }
         }
 
@@ -1486,6 +1518,9 @@ impl RiskEngine {
     /// 5. Does NOT warm any positive PnL (keeps it young, subject to ADL)
     /// 6. Unpaid losses (capital exhausted) go through apply_adl waterfall
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
+        // Force realize is a risk-reducing operation
+        self.enforce_op(OpClass::RiskReduce)?;
+
         // Gate: only allowed when insurance is at or below floor
         if self.insurance_fund.balance > self.params.risk_reduction_threshold {
             return Err(RiskError::Unauthorized);
