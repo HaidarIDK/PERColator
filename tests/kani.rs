@@ -330,6 +330,7 @@ fn i8_collateral_with_negative_pnl() {
 // ============================================================================
 
 // Previously slow - now fast with 8 accounts
+// Fixed: Properly set warmup state to ensure all PnL is unwrapped
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -348,18 +349,29 @@ fn i4_adl_haircuts_unwrapped_first() {
 
     engine.accounts[user_idx as usize].capital = principal;
     engine.accounts[user_idx as usize].pnl = pnl;
-    engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+
+    // Properly set warmup state so ALL PnL is unwrapped:
+    // - current_slot = 0: no time has passed
+    // - warmup_started_at_slot = 0: warmup starts now
+    // - warmup_paused = false: not paused
+    // - warmup_slope_per_step = 0: nothing vests per slot
+    // This ensures withdrawable_pnl = 0, so all pnl is "unwrapped"
+    engine.current_slot = 0;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
+    engine.warmup_paused = false;
+
     engine.insurance_fund.balance = 100_000;
+    engine.vault = principal + 100_000;
 
     let pnl_before = engine.accounts[user_idx as usize].pnl;
     let insurance_before = engine.insurance_fund.balance;
 
     let _ = engine.apply_adl(loss);
 
-    // If there was enough unwrapped PNL, insurance shouldn't be touched
-    let unwrapped_pnl = pnl as u128; // At slot 0, nothing is warmed up
-
-    if loss <= unwrapped_pnl {
+    // With slope=0 and slot=0, withdrawable=0, so all PnL is unwrapped
+    // If loss <= unwrapped PNL, insurance should be untouched
+    if loss <= pnl as u128 {
         assert!(engine.insurance_fund.balance == insurance_before,
                 "I4: ADL should haircut PNL before touching insurance");
         assert!(engine.accounts[user_idx as usize].pnl == pnl_before - (loss as i128),
@@ -867,37 +879,52 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 // ============================================================================
 
 // Previously slow - now fast with 8 accounts
+/// I10: Risk mode triggers when insurance at floor and losses exceed available
+///
+/// Updated for floor-based semantics:
+/// - Insurance is NOT drained below floor
+/// - Risk mode triggers when insurance at/below floor OR uncovered losses exist
+/// - loss_accum > 0 when losses exceed (unwrapped + unreserved_spendable)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
-    // When insurance fund is depleted and loss_accum > 0,
-    // risk_reduction_only mode should be activated
-
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+fn i10_risk_mode_triggers_at_floor() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
     let user_idx = engine.add_user(1).unwrap();
 
     let insurance: u128 = kani::any();
     let loss: u128 = kani::any();
+    let pnl: i128 = kani::any();
 
-    kani::assume(insurance < 10_000);
-    kani::assume(loss < 20_000);
-    kani::assume(loss > insurance); // Loss exceeds insurance
+    let floor = engine.params.risk_reduction_threshold;
+
+    // Insurance above floor but not by much
+    kani::assume(insurance > floor && insurance < floor + 5_000);
+    kani::assume(loss > 0 && loss < 20_000);
+    // PnL is non-positive so no unwrapped to haircut
+    kani::assume(pnl <= 0 && pnl > -5_000);
 
     engine.insurance_fund.balance = insurance;
     engine.accounts[user_idx as usize].capital = 10_000;
-    engine.accounts[user_idx as usize].pnl = 1_000; // Some PNL
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0; // No warmup
+    engine.vault = 10_000 + insurance;
+
+    // Calculate unreserved spendable (no reserved since no warmup)
+    let unreserved_spendable = insurance.saturating_sub(floor);
 
     let _ = engine.apply_adl(loss);
 
-    // If loss > insurance, should enter withdrawal mode
-    if loss > insurance {
+    // If loss exceeds what we can cover, should enter risk mode with loss_accum
+    if loss > unreserved_spendable {
         assert!(engine.risk_reduction_only,
-                "I10: Withdrawal mode must activate when insurance depleted");
+                "I10: Risk mode must activate when losses exceed coverage");
+        // Insurance should be at floor, not zero
+        assert!(engine.insurance_fund.balance >= floor,
+                "I10: Insurance must not drop below floor");
+        // Excess loss goes to loss_accum
         assert!(engine.loss_accum > 0,
-                "I10: loss_accum must be > 0 when insurance depleted");
-        assert!(engine.insurance_fund.balance == 0,
-                "I10: Insurance fund must be fully depleted");
+                "I10: loss_accum must be > 0 for uncovered losses");
     }
 }
 
@@ -2214,15 +2241,66 @@ fn audit_multiple_settlements_when_paused_idempotent() {
             "AUDIT PROOF FAILED: State changed between second and third settlement");
 }
 
-/// Proof: Reserved insurance is protected in apply_adl
+/// Proof R1: ADL never spends reserved insurance
 ///
-/// Proves that when warmup_insurance_reserved > 0 and apply_adl is called
-/// with remaining loss > 0 and total_unwrapped = 0, the insurance balance
-/// after spending is >= floor + reserved.
+/// This is the critical proof that reserved insurance is protected.
+/// Setup: floor > 0, insurance = floor + reserved + extra, all accounts pnl <= 0
+/// (so total_unwrapped == 0 deterministically), then apply ADL.
+/// Prove: insurance.balance >= floor + reserved after ADL
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn audit_reserved_insurance_protected_in_adl() {
+fn proof_r1_adl_never_spends_reserved() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Symbolic inputs for setting up reserved insurance
+    let reserved: u128 = kani::any();
+    let extra: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    let floor = engine.params.risk_reduction_threshold;
+
+    // Bounded assumptions
+    kani::assume(reserved > 0 && reserved < 1_000);
+    kani::assume(extra > 0 && extra < 1_000);
+    kani::assume(loss > 0 && loss < 5_000);
+
+    // Set up insurance = floor + reserved + extra
+    let insurance = floor + reserved + extra;
+    engine.insurance_fund.balance = insurance;
+    engine.warmup_insurance_reserved = reserved;
+
+    // Set up account with NO positive PnL (pnl <= 0)
+    // This ensures total_unwrapped == 0 deterministically
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[user_idx as usize].pnl = 0; // No unwrapped PnL to haircut
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
+
+    engine.vault = 10_000 + insurance;
+
+    // Apply ADL - with no unwrapped PnL, it must use insurance
+    let _ = engine.apply_adl(loss);
+
+    // PROOF R1: Insurance must be >= floor + reserved
+    // ADL can only spend the "extra" portion, not the reserved portion
+    assert!(engine.insurance_fund.balance >= floor + reserved,
+            "R1 FAILED: ADL spent reserved insurance!");
+
+    // Corollary: reserved should not decrease
+    assert!(engine.warmup_insurance_reserved >= reserved,
+            "R1 FAILED: Reserved decreased after ADL");
+}
+
+/// Proof R2: Reserved never exceeds raw spendable and is monotonically non-decreasing
+///
+/// After settle_warmup_to_capital:
+/// - reserved <= raw_spendable
+/// - reserved_after >= reserved_before
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_r2_reserved_bounded_and_monotone() {
     let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
     let user_idx = engine.add_user(1).unwrap();
 
@@ -2231,15 +2309,15 @@ fn audit_reserved_insurance_protected_in_adl() {
     let pnl: i128 = kani::any();
     let slope: u128 = kani::any();
     let insurance: u128 = kani::any();
-    let loss: u128 = kani::any();
     let slots: u64 = kani::any();
+
+    let floor = engine.params.risk_reduction_threshold;
 
     // Bounded assumptions
     kani::assume(capital > 100 && capital < 10_000);
     kani::assume(pnl > 50 && pnl < 5_000); // Positive PnL to warm
     kani::assume(slope > 10 && slope < 1000);
-    kani::assume(insurance > 200 && insurance < 10_000);
-    kani::assume(loss > 0 && loss < 5_000);
+    kani::assume(insurance > floor + 100 && insurance < 10_000);
     kani::assume(slots > 1 && slots < 100);
 
     // Setup
@@ -2251,34 +2329,96 @@ fn audit_reserved_insurance_protected_in_adl() {
     engine.vault = capital + insurance;
     engine.current_slot = slots;
 
-    // Settle warmup to reserve insurance
+    let reserved_before = engine.warmup_insurance_reserved;
+
+    // First settle
     let _ = engine.settle_warmup_to_capital(user_idx);
 
-    let floor = engine.params.risk_reduction_threshold;
-    let reserved = engine.warmup_insurance_reserved;
+    let reserved_after_first = engine.warmup_insurance_reserved;
+    let raw_spendable = engine.insurance_spendable_raw();
 
-    // Apply ADL
-    let _ = engine.apply_adl(loss);
+    // PROOF R2a: Reserved <= raw spendable
+    assert!(reserved_after_first <= raw_spendable,
+            "R2 FAILED: Reserved exceeds raw spendable");
 
-    // PROOF: Insurance must be >= floor + reserved (allowing 1 for rounding)
-    let min_protected = floor.saturating_add(reserved);
-    assert!(engine.insurance_fund.balance >= min_protected.saturating_sub(1),
-            "AUDIT PROOF FAILED: Insurance fell below floor + reserved after ADL");
+    // PROOF R2b: Reserved is monotonically non-decreasing
+    assert!(reserved_after_first >= reserved_before,
+            "R2 FAILED: Reserved decreased after settle");
 
-    // PROOF: Reserved should not decrease
-    assert!(engine.warmup_insurance_reserved >= reserved,
-            "AUDIT PROOF FAILED: Reserved decreased after ADL");
+    // Second settle (should be idempotent when paused, but let's check monotonicity)
+    engine.current_slot = slots + 10;
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // Reserved should not decrease
+    assert!(engine.warmup_insurance_reserved >= reserved_after_first,
+            "R2 FAILED: Reserved decreased on second settle");
 }
 
-/// Proof: Conservation check is bounded by MAX_ROUNDING_SLACK
+/// Proof PS5: panic_settle_all does not increase insurance (no minting from rounding)
+///
+/// Given trading_fee_bps = 0 (no fees), insurance should not increase after panic_settle.
+/// The only way insurance decreases is through ADL spending.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_ps5_panic_settle_no_insurance_minting() {
+    // Use params with zero trading fees
+    let mut params = test_params();
+    params.trading_fee_bps = 0;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Symbolic inputs
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    let insurance: u128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(user_capital > 100 && user_capital < 5_000);
+    kani::assume(lp_capital > 100 && lp_capital < 5_000);
+    kani::assume(position > 0 && position < 1_000);
+    kani::assume(entry_price > 100_000 && entry_price < 5_000_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 5_000_000);
+    kani::assume(insurance > 0 && insurance < 10_000);
+
+    // Setup opposing positions
+    engine.accounts[user_idx as usize].capital = user_capital;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+
+    engine.accounts[lp_idx as usize].capital = lp_capital;
+    engine.accounts[lp_idx as usize].position_size = -position;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+
+    engine.insurance_fund.balance = insurance;
+    engine.vault = user_capital + lp_capital + insurance;
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Panic settle
+    let _ = engine.panic_settle_all(oracle_price);
+
+    // PROOF PS5: Insurance should not increase (may decrease due to ADL)
+    assert!(engine.insurance_fund.balance <= insurance_before,
+            "PS5 FAILED: Insurance increased after panic_settle (minting bug)");
+}
+
+/// Proof C1: Conservation slack is bounded after panic_settle_all
 ///
 /// Proves that after panic_settle_all:
 /// 1. vault + loss_accum >= expected (no under-collateralization)
 /// 2. slack = (vault + loss_accum) - expected <= MAX_ROUNDING_SLACK (bounded dust)
+///
+/// This is the critical conservation proof with bounded slack.
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn audit_conservation_bounded_slack() {
+fn proof_c1_conservation_bounded_slack_panic_settle() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
@@ -2335,13 +2475,82 @@ fn audit_conservation_bounded_slack() {
     // PROOF 2: Slack is bounded
     let slack = actual - expected;
     assert!(slack <= MAX_ROUNDING_SLACK,
-            "AUDIT PROOF FAILED: Slack exceeds MAX_ROUNDING_SLACK");
+            "C1 FAILED: Slack exceeds MAX_ROUNDING_SLACK after panic_settle");
 
     // PROOF 3: Positions are closed
     assert!(engine.accounts[user_idx as usize].position_size == 0,
-            "AUDIT PROOF FAILED: User position not closed");
+            "C1 FAILED: User position not closed");
     assert!(engine.accounts[lp_idx as usize].position_size == 0,
-            "AUDIT PROOF FAILED: LP position not closed");
+            "C1 FAILED: LP position not closed");
+}
+
+/// Proof C1b: Conservation slack is bounded after force_realize_losses
+///
+/// Same as C1 but for force_realize_losses.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_c1_conservation_bounded_slack_force_realize() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Symbolic inputs
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+
+    let floor = engine.params.risk_reduction_threshold;
+
+    // Bounded assumptions
+    kani::assume(user_capital > 100 && user_capital < 5_000);
+    kani::assume(lp_capital > 100 && lp_capital < 5_000);
+    kani::assume(position > 0 && position < 1_000);
+    kani::assume(entry_price > 100_000 && entry_price < 5_000_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 5_000_000);
+
+    // Setup opposing positions
+    engine.accounts[user_idx as usize].capital = user_capital;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+
+    engine.accounts[lp_idx as usize].capital = lp_capital;
+    engine.accounts[lp_idx as usize].position_size = -position;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+
+    // Set insurance at floor to allow force_realize
+    engine.insurance_fund.balance = floor;
+    engine.vault = user_capital + lp_capital + floor;
+
+    // Force realize
+    let _ = engine.force_realize_losses(oracle_price);
+
+    // Compute expected value
+    let total_capital = engine.accounts[user_idx as usize].capital
+        + engine.accounts[lp_idx as usize].capital;
+    let user_pnl = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl = engine.accounts[lp_idx as usize].pnl;
+    let net_pnl = user_pnl.saturating_add(lp_pnl);
+
+    let base = total_capital + engine.insurance_fund.balance;
+    let expected = if net_pnl >= 0 {
+        base + (net_pnl as u128)
+    } else {
+        base.saturating_sub((-net_pnl) as u128)
+    };
+
+    let actual = engine.vault + engine.loss_accum;
+
+    // PROOF 1: No under-collateralization
+    assert!(actual >= expected,
+            "C1b FAILED: Vault under-collateralized after force_realize");
+
+    // PROOF 2: Slack is bounded
+    let slack = actual - expected;
+    assert!(slack <= MAX_ROUNDING_SLACK,
+            "C1b FAILED: Slack exceeds MAX_ROUNDING_SLACK after force_realize");
 }
 
 /// Proof: force_realize_losses updates warmup_started_at_slot

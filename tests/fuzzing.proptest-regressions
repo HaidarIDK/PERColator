@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 615b201a84a05de53e1068d074ba1e108f4eb48b64c0df88c0dc86d9d76bda4b # shrinks to user_capital = 1000, lp_capital = 1000, position = 1, entry_price = 100000, oracle_price = 100000
+cc c4626f4a64610bdf73ea8e2814e03a84bdfd43c0930297d4cad766b608bde810 # shrinks to user_capital = 1000, lp_capital = 1000, position = 1, entry_price = 100000, oracle_price = 100000, insurance = 3

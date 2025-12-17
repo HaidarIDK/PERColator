@@ -83,16 +83,33 @@ This prevents later `settle_warmup_to_capital()` calls from "re-paying" based on
 
 ### Kani Proofs (`tests/kani.rs`)
 
-**9 audit proofs added** (compile successfully)
+**Critical proofs added** (compile successfully)
+
+#### Core Proofs (R1, R2, C1, PS5)
+
+| Proof | Description | Status |
+|-------|-------------|--------|
+| `proof_r1_adl_never_spends_reserved` | ADL cannot spend reserved insurance (pnl=0, floor+reserved protected) | ✅ ADDED |
+| `proof_r2_reserved_bounded_and_monotone` | Reserved <= raw_spendable, monotonically non-decreasing | ✅ ADDED |
+| `proof_c1_conservation_bounded_slack_panic_settle` | Conservation slack bounded after panic_settle | ✅ ADDED |
+| `proof_c1_conservation_bounded_slack_force_realize` | Conservation slack bounded after force_realize | ✅ ADDED |
+| `proof_ps5_panic_settle_no_insurance_minting` | Insurance cannot increase from rounding | ✅ ADDED |
+
+#### Idempotence Proofs
 
 | Proof | Description | Status |
 |-------|-------------|--------|
 | `audit_settle_idempotent_when_paused` | Settlement is idempotent when paused | ✅ ADDED |
 | `audit_warmup_started_at_updated_to_effective_slot` | Slot updated correctly | ✅ ADDED |
 | `audit_multiple_settlements_when_paused_idempotent` | Multiple settlements idempotent | ✅ ADDED |
-| `audit_reserved_insurance_protected_in_adl` | Reserved insurance >= floor + reserved after ADL | ✅ ADDED |
-| `audit_conservation_bounded_slack` | Slack <= MAX_ROUNDING_SLACK after panic_settle | ✅ ADDED |
 | `audit_force_realize_updates_warmup_start` | force_realize updates warmup_started_at_slot | ✅ ADDED |
+
+#### Fixed Proofs
+
+| Proof | Description | Status |
+|-------|-------------|--------|
+| `i4_adl_haircuts_unwrapped_first` | Fixed: properly sets warmup state (slot=0, slope=0) | ✅ FIXED |
+| `i10_risk_mode_triggers_at_floor` | Fixed: expects insurance >= floor, not == 0 | ✅ FIXED |
 
 ## Overall Conclusion
 
