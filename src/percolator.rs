@@ -36,6 +36,12 @@ pub const MAX_ACCOUNTS: usize = 4096;
 // Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 
+/// Maximum allowed rounding slack in conservation check.
+/// Each integer division can lose at most 1 unit of quote currency.
+/// With MAX_ACCOUNTS positions, worst-case rounding loss is MAX_ACCOUNTS units.
+/// This bounds how much "dust" can accumulate in the vault from truncation.
+pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+
 // ============================================================================
 // Core Data Structures
 // ============================================================================
@@ -1592,6 +1598,13 @@ impl RiskEngine {
                     }
                 }
                 // Positive PnL is left as-is (young, subject to ADL, warmup frozen)
+
+                // Update warmup start marker to effective_slot to prevent later
+                // settle_warmup_to_capital() from "re-paying" based on old elapsed time.
+                // Since we called enter_risk_reduction_only_mode(), warmup is paused,
+                // so effective_slot = warmup_pause_slot.
+                let effective_slot = core::cmp::min(self.current_slot, self.warmup_pause_slot);
+                account.warmup_started_at_slot = effective_slot;
             }
         }
 
@@ -1665,6 +1678,13 @@ impl RiskEngine {
     /// - ADL transfers from user PNL to cover losses (net zero within system)
     /// - loss_accum represents value that was "lost" from the vault (clamped negative PNL
     ///   that couldn't be socialized), so vault + loss_accum = original value
+    ///
+    /// # Rounding Slack
+    ///
+    /// We allow `actual >= expected` because integer division truncation can leave
+    /// small amounts of "dust" unclaimed in the vault. This is bounded by
+    /// `MAX_ROUNDING_SLACK` (one unit per account worst-case) to prevent unbounded
+    /// drift and catch accidental minting bugs.
     pub fn check_conservation(&self) -> bool {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
@@ -1682,6 +1702,7 @@ impl RiskEngine {
         //
         // Note: We use >= because negative rounding slippage leaves
         // unclaimed value in the vault. This is safe: vault has at least what's owed.
+        // The slack is bounded by MAX_ROUNDING_SLACK to catch accidental minting.
         let base = add_u128(total_capital, self.insurance_fund.balance);
 
         let expected = if net_pnl >= 0 {
@@ -1693,7 +1714,9 @@ impl RiskEngine {
         // vault + loss_accum should be at least expected (may be more due to rounding)
         let actual = add_u128(self.vault, self.loss_accum);
 
-        actual >= expected
+        // Check: actual >= expected AND slack is bounded
+        // This prevents both under-collateralization AND unbounded dust accumulation
+        actual >= expected && actual.saturating_sub(expected) <= MAX_ROUNDING_SLACK
     }
 
     /// Advance to next slot (for testing warmup)

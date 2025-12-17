@@ -2214,3 +2214,204 @@ fn audit_multiple_settlements_when_paused_idempotent() {
             "AUDIT PROOF FAILED: State changed between second and third settlement");
 }
 
+/// Proof: Reserved insurance is protected in apply_adl
+///
+/// Proves that when warmup_insurance_reserved > 0 and apply_adl is called
+/// with remaining loss > 0 and total_unwrapped = 0, the insurance balance
+/// after spending is >= floor + reserved.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_reserved_insurance_protected_in_adl() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Symbolic inputs
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let loss: u128 = kani::any();
+    let slots: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 100 && capital < 10_000);
+    kani::assume(pnl > 50 && pnl < 5_000); // Positive PnL to warm
+    kani::assume(slope > 10 && slope < 1000);
+    kani::assume(insurance > 200 && insurance < 10_000);
+    kani::assume(loss > 0 && loss < 5_000);
+    kani::assume(slots > 1 && slots < 100);
+
+    // Setup
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.insurance_fund.balance = insurance;
+    engine.vault = capital + insurance;
+    engine.current_slot = slots;
+
+    // Settle warmup to reserve insurance
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    let floor = engine.params.risk_reduction_threshold;
+    let reserved = engine.warmup_insurance_reserved;
+
+    // Apply ADL
+    let _ = engine.apply_adl(loss);
+
+    // PROOF: Insurance must be >= floor + reserved (allowing 1 for rounding)
+    let min_protected = floor.saturating_add(reserved);
+    assert!(engine.insurance_fund.balance >= min_protected.saturating_sub(1),
+            "AUDIT PROOF FAILED: Insurance fell below floor + reserved after ADL");
+
+    // PROOF: Reserved should not decrease
+    assert!(engine.warmup_insurance_reserved >= reserved,
+            "AUDIT PROOF FAILED: Reserved decreased after ADL");
+}
+
+/// Proof: Conservation check is bounded by MAX_ROUNDING_SLACK
+///
+/// Proves that after panic_settle_all:
+/// 1. vault + loss_accum >= expected (no under-collateralization)
+/// 2. slack = (vault + loss_accum) - expected <= MAX_ROUNDING_SLACK (bounded dust)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_conservation_bounded_slack() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Symbolic inputs
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+
+    // Bounded assumptions (small for Kani tractability)
+    kani::assume(user_capital > 100 && user_capital < 5_000);
+    kani::assume(lp_capital > 100 && lp_capital < 5_000);
+    kani::assume(position > 0 && position < 1_000);
+    kani::assume(entry_price > 100_000 && entry_price < 5_000_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 5_000_000);
+
+    // Setup opposing positions
+    engine.accounts[user_idx as usize].capital = user_capital;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+
+    engine.accounts[lp_idx as usize].capital = lp_capital;
+    engine.accounts[lp_idx as usize].position_size = -position;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+
+    // Conservation-consistent vault
+    engine.vault = user_capital + lp_capital;
+
+    // Panic settle
+    let _ = engine.panic_settle_all(oracle_price);
+
+    // Compute expected value
+    let total_capital = engine.accounts[user_idx as usize].capital
+        + engine.accounts[lp_idx as usize].capital;
+    let user_pnl = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl = engine.accounts[lp_idx as usize].pnl;
+    let net_pnl = user_pnl.saturating_add(lp_pnl);
+
+    let base = total_capital + engine.insurance_fund.balance;
+    let expected = if net_pnl >= 0 {
+        base + (net_pnl as u128)
+    } else {
+        base.saturating_sub((-net_pnl) as u128)
+    };
+
+    let actual = engine.vault + engine.loss_accum;
+
+    // PROOF 1: No under-collateralization
+    assert!(actual >= expected,
+            "AUDIT PROOF FAILED: Vault under-collateralized after panic_settle");
+
+    // PROOF 2: Slack is bounded
+    let slack = actual - expected;
+    assert!(slack <= MAX_ROUNDING_SLACK,
+            "AUDIT PROOF FAILED: Slack exceeds MAX_ROUNDING_SLACK");
+
+    // PROOF 3: Positions are closed
+    assert!(engine.accounts[user_idx as usize].position_size == 0,
+            "AUDIT PROOF FAILED: User position not closed");
+    assert!(engine.accounts[lp_idx as usize].position_size == 0,
+            "AUDIT PROOF FAILED: LP position not closed");
+}
+
+/// Proof: force_realize_losses updates warmup_started_at_slot
+///
+/// Proves that after force_realize_losses(), all accounts with positions
+/// have their warmup_started_at_slot updated to the effective_slot,
+/// preventing later settle calls from "re-paying" based on old elapsed time.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_force_realize_updates_warmup_start() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Symbolic inputs
+    let capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    let old_warmup_start: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 1000 && capital < 50_000);
+    kani::assume(position > 0 && position < 1_000);
+    kani::assume(entry_price > 100_000 && entry_price < 3_000_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 3_000_000);
+    kani::assume(old_warmup_start < 50);
+    kani::assume(current_slot > 50 && current_slot < 200);
+
+    // Setup with old warmup start
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].position_size = position;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = old_warmup_start;
+
+    engine.accounts[lp_idx as usize].capital = capital;
+    engine.accounts[lp_idx as usize].position_size = -position;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+    engine.accounts[lp_idx as usize].warmup_started_at_slot = old_warmup_start;
+
+    // Set insurance at floor
+    let floor = engine.params.risk_reduction_threshold;
+    engine.insurance_fund.balance = floor;
+    engine.vault = capital * 2 + floor;
+    engine.current_slot = current_slot;
+
+    // Force realize
+    let _ = engine.force_realize_losses(oracle_price);
+
+    // After force_realize, warmup is paused and effective_slot = warmup_pause_slot
+    let effective_slot = engine.warmup_pause_slot;
+
+    // PROOF: Both accounts should have updated warmup_started_at_slot
+    assert!(engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
+            "AUDIT PROOF FAILED: User warmup_started_at_slot not updated");
+    assert!(engine.accounts[lp_idx as usize].warmup_started_at_slot == effective_slot,
+            "AUDIT PROOF FAILED: LP warmup_started_at_slot not updated");
+
+    // PROOF: Subsequent settle should be idempotent (no change)
+    let capital_before = engine.accounts[user_idx as usize].capital;
+    let pnl_before = engine.accounts[user_idx as usize].pnl;
+
+    engine.current_slot = current_slot + 100; // Advance time
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    assert!(engine.accounts[user_idx as usize].capital == capital_before,
+            "AUDIT PROOF FAILED: Capital changed after settle post-force_realize");
+    assert!(engine.accounts[user_idx as usize].pnl == pnl_before,
+            "AUDIT PROOF FAILED: PnL changed after settle post-force_realize");
+}
+

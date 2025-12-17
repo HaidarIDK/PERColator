@@ -2966,3 +2966,196 @@ fn test_audit_c_insurance_floor_plus_reserved_protected() {
             engine.insurance_fund.balance, min_protected);
 }
 
+/// Test: Conservation slack is bounded by MAX_ROUNDING_SLACK
+///
+/// Verifies that check_conservation() not only checks actual >= expected,
+/// but also that the slack (actual - expected) is bounded to prevent
+/// unbounded dust accumulation or accidental minting.
+#[test]
+fn test_audit_conservation_slack_bounded() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Create many accounts with positions that will cause rounding
+    let mut user_indices = Vec::new();
+    for i in 0..100 {
+        let user_idx = engine.add_user(1).unwrap();
+        user_indices.push(user_idx);
+        engine.deposit(user_idx, 1000 + i as u128).unwrap();
+
+        // Create positions with rounding-prone values
+        engine.accounts[user_idx as usize].position_size = (100 + i) as i128;
+        engine.accounts[user_idx as usize].entry_price = 1_000_003 + i as u64;
+    }
+
+    // Create an LP to take the other side
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    engine.deposit(lp_idx, 1_000_000).unwrap();
+
+    // Set LP position to net out user positions
+    let total_user_pos: i128 = user_indices.iter()
+        .map(|&idx| engine.accounts[idx as usize].position_size)
+        .sum();
+    engine.accounts[lp_idx as usize].position_size = -total_user_pos;
+    engine.accounts[lp_idx as usize].entry_price = 1_000_000;
+
+    // Conservation should hold before
+    assert!(engine.check_conservation(), "Conservation before panic_settle");
+
+    // Panic settle at a price that causes rounding
+    engine.panic_settle_all(1_500_007).unwrap();
+
+    // Conservation should still hold (bounded slack)
+    assert!(engine.check_conservation(),
+            "Conservation violated after panic_settle - slack may exceed MAX_ROUNDING_SLACK");
+
+    // Verify all positions closed
+    for &idx in &user_indices {
+        assert_eq!(engine.accounts[idx as usize].position_size, 0);
+    }
+    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
+}
+
+/// Test: Conservation check detects excessive slack
+///
+/// Verifies that if someone tries to "mint" value by inflating the vault,
+/// the bounded check will catch it.
+#[test]
+fn test_audit_conservation_detects_excessive_slack() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    engine.deposit(user_idx, 10_000).unwrap();
+
+    // Conservation should hold normally
+    assert!(engine.check_conservation(), "Normal conservation");
+
+    // Artificially inflate vault beyond MAX_ROUNDING_SLACK
+    // This simulates a minting bug
+    engine.vault = engine.vault + percolator::MAX_ROUNDING_SLACK + 10;
+
+    // Conservation should now FAIL due to excessive slack
+    assert!(!engine.check_conservation(),
+            "Conservation should fail when slack exceeds MAX_ROUNDING_SLACK");
+}
+
+/// Test: force_realize_losses updates warmup_started_at_slot to prevent re-pay
+///
+/// Verifies that after force_realize_losses() processes an account, the
+/// warmup_started_at_slot is updated so that a subsequent call to
+/// settle_warmup_to_capital() doesn't "re-pay" based on old elapsed time.
+#[test]
+fn test_audit_force_realize_prevents_warmup_repay() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Floor
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let loser_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup loser with a position that will have negative PnL
+    engine.deposit(loser_idx, 10_000).unwrap();
+    engine.deposit(lp_idx, 100_000).unwrap();
+
+    // Loser has a long position at high price (will lose when we settle at lower price)
+    engine.accounts[loser_idx as usize].position_size = 1000;
+    engine.accounts[loser_idx as usize].entry_price = 2_000_000; // $2
+
+    // LP has opposite position
+    engine.accounts[lp_idx as usize].position_size = -1000;
+    engine.accounts[lp_idx as usize].entry_price = 2_000_000;
+
+    // Set warmup started way in the past (slot 0)
+    engine.accounts[loser_idx as usize].warmup_started_at_slot = 0;
+    engine.accounts[loser_idx as usize].warmup_slope_per_step = 100; // High slope
+
+    // Set insurance at floor to enable force_realize
+    engine.insurance_fund.balance = 1000;
+
+    // Adjust vault for conservation
+    let total_capital = engine.accounts[loser_idx as usize].capital
+        + engine.accounts[lp_idx as usize].capital;
+    engine.vault = total_capital + engine.insurance_fund.balance;
+
+    // Move to slot 100 (100 elapsed slots since warmup_started_at = 0)
+    engine.current_slot = 100;
+
+    // Force realize at lower price (loser takes a loss)
+    engine.force_realize_losses(1_000_000).unwrap(); // $1 price
+
+    // Record state after force_realize
+    let capital_after_force = engine.accounts[loser_idx as usize].capital;
+    let pnl_after_force = engine.accounts[loser_idx as usize].pnl;
+    let warmed_neg_after_force = engine.warmed_neg_total;
+
+    // Verify warmup_started_at_slot was updated to effective_slot
+    // Since we're paused (entered risk mode), effective_slot = warmup_pause_slot
+    assert_eq!(engine.accounts[loser_idx as usize].warmup_started_at_slot,
+               engine.warmup_pause_slot,
+               "warmup_started_at_slot should be updated to effective_slot");
+
+    // Now call settle_warmup_to_capital - it should NOT change anything
+    // because warmup_started_at_slot was updated, so elapsed = 0
+    engine.current_slot = 200; // Advance time further
+    engine.settle_warmup_to_capital(loser_idx).unwrap();
+
+    // CRITICAL: State should be unchanged (no "re-payment" based on old elapsed)
+    assert_eq!(engine.accounts[loser_idx as usize].capital, capital_after_force,
+               "Capital should not change after settle - warmup_started_at was updated");
+    assert_eq!(engine.accounts[loser_idx as usize].pnl, pnl_after_force,
+               "PnL should not change after settle - warmup_started_at was updated");
+    assert_eq!(engine.warmed_neg_total, warmed_neg_after_force,
+               "warmed_neg_total should not change - no additional settlement");
+}
+
+/// Test: force_realize_losses updates warmup for ALL processed accounts
+#[test]
+fn test_audit_force_realize_updates_all_accounts_warmup() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Create multiple accounts
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 10_000).unwrap();
+    engine.deposit(lp_idx, 100_000).unwrap();
+
+    // Both users have positions
+    engine.accounts[user1 as usize].position_size = 500;
+    engine.accounts[user1 as usize].entry_price = 2_000_000;
+    engine.accounts[user1 as usize].warmup_started_at_slot = 0;
+
+    engine.accounts[user2 as usize].position_size = 500;
+    engine.accounts[user2 as usize].entry_price = 2_000_000;
+    engine.accounts[user2 as usize].warmup_started_at_slot = 5;
+
+    engine.accounts[lp_idx as usize].position_size = -1000;
+    engine.accounts[lp_idx as usize].entry_price = 2_000_000;
+    engine.accounts[lp_idx as usize].warmup_started_at_slot = 10;
+
+    // Set insurance at floor
+    engine.insurance_fund.balance = 1000;
+    let total_capital = engine.accounts[user1 as usize].capital
+        + engine.accounts[user2 as usize].capital
+        + engine.accounts[lp_idx as usize].capital;
+    engine.vault = total_capital + 1000;
+
+    engine.current_slot = 100;
+
+    // Force realize
+    engine.force_realize_losses(1_000_000).unwrap();
+
+    // All accounts with positions should have updated warmup_started_at_slot
+    let effective = engine.warmup_pause_slot;
+    assert_eq!(engine.accounts[user1 as usize].warmup_started_at_slot, effective,
+               "User1 warmup_started_at_slot should be updated");
+    assert_eq!(engine.accounts[user2 as usize].warmup_started_at_slot, effective,
+               "User2 warmup_started_at_slot should be updated");
+    assert_eq!(engine.accounts[lp_idx as usize].warmup_started_at_slot, effective,
+               "LP warmup_started_at_slot should be updated");
+}
+
