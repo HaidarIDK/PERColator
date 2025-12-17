@@ -2360,7 +2360,7 @@ fn proof_ps5_panic_settle_no_insurance_minting() {
     let mut params = test_params();
     params.trading_fee_bps = 0;
 
-    let mut engine = Box::new(RiskEngine::new(params));
+    let mut engine = RiskEngine::new(params);
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
