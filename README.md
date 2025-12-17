@@ -30,10 +30,10 @@ Warmup converts PnL into principal with sign:
 - **Positive PnL** can increase capital (profits become withdrawable principal)
 - **Negative PnL** can decrease capital (losses paid from principal, up to available capital)
 
-A global budget prevents warmed profits from exceeding paid losses plus spendable insurance:
+A global budget prevents warmed profits from exceeding paid losses plus unreserved spendable insurance:
 
 ```
-W⁺ ≤ W⁻ + max(0, I - I_min)
+W⁺ ≤ W⁻ + max(0, I - I_min) - R
 ```
 
 **Definitions:**
@@ -41,7 +41,10 @@ W⁺ ≤ W⁻ + max(0, I - I_min)
 - `W⁻` = `warmed_neg_total` - cumulative negative PnL paid from capital
 - `I` = `insurance_fund.balance` - current insurance fund balance
 - `I_min` = `risk_reduction_threshold` - minimum insurance floor (protected)
-- `max(0, I - I_min)` = spendable portion of insurance above the protected floor
+- `R` = `warmup_insurance_reserved` - insurance above the floor committed to backing warmed profits (monotone counter)
+- `S` = `max(0, I - I_min) - R` (saturating) = unreserved spendable insurance
+
+`R` reserves part of the spendable insurance above the floor to back already-warmed profits, so the invariant remains true even if insurance is later spent on losses.
 
 **Enforcement:** The invariant is enforced at the moment PnL would be converted into capital (warmup settlement), and losses are settled before gains.
 
@@ -53,10 +56,10 @@ W⁺ ≤ W⁻ + max(0, I - I_min)
 
 **ADL (Auto-Deleveraging):** When losses must be covered:
 1. Haircut unwrapped (young) PNL proportionally across all accounts
-2. Spend insurance only above the protected floor: `max(0, I - I_min)`
+2. Spend only unreserved insurance above the protected floor: `max(0, I - I_min) - R`
 3. Any remaining loss is added to `loss_accum`
 
-Insurance spending is capped: the engine will only spend `max(0, I - I_min)` to cover losses. Insurance at or below `I_min` is treated as a protected floor.
+Insurance spending is capped: the engine will only spend unreserved insurance above `I_min` to cover losses. Reserved insurance (`R`) backs already-warmed profits and cannot be spent by ADL.
 
 **Risk-Reduction-Only Mode:** Triggered when insurance fund at or below threshold:
 - Warmup frozen (no more PNL vests)
