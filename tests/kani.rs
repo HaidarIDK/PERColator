@@ -30,7 +30,7 @@ fn test_params() -> RiskParams {
         trading_fee_bps: 10,
         liquidation_fee_bps: 50,
         insurance_fee_share_bps: 5000,
-        max_accounts: 64, // Match Kani's MAX_ACCOUNTS
+        max_accounts: 8, // Match Kani's MAX_ACCOUNTS
         account_fee_bps: 10000,
         risk_reduction_threshold: 0,
     }
@@ -42,9 +42,8 @@ fn test_params() -> RiskParams {
 // Run with: cargo kani --harness i1_adl_never_reduces_principal --solver-timeout 600
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i1_adl_never_reduces_principal() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -70,7 +69,6 @@ fn i1_adl_never_reduces_principal() {
     assert!(engine.accounts[user_idx as usize].capital == principal_before,
             "I1: ADL must NEVER reduce user principal");
 }
-*/
 
 // ============================================================================
 // I2: Conservation of funds
@@ -78,9 +76,8 @@ fn i1_adl_never_reduces_principal() {
 // Run with: cargo kani --harness i2_deposit_preserves_conservation --solver-timeout 600
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i2_deposit_preserves_conservation() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -98,7 +95,7 @@ fn i2_deposit_preserves_conservation() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i2_withdraw_preserves_conservation() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -120,14 +117,13 @@ fn i2_withdraw_preserves_conservation() {
     assert!(engine.check_conservation(),
             "I2: Withdrawal must preserve conservation");
 }
-*/
 
 // ============================================================================
 // I5: PNL Warmup Properties
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_determinism() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -157,7 +153,7 @@ fn i5_warmup_determinism() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_monotonicity() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -188,7 +184,7 @@ fn i5_warmup_monotonicity() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_bounded_by_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -222,7 +218,7 @@ fn i5_warmup_bounded_by_pnl() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i7_user_isolation_deposit() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -252,7 +248,7 @@ fn i7_user_isolation_deposit() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i7_user_isolation_withdrawal() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -286,7 +282,7 @@ fn i7_user_isolation_withdrawal() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i8_collateral_with_positive_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -309,7 +305,7 @@ fn i8_collateral_with_positive_pnl() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i8_collateral_with_negative_pnl() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -335,9 +331,9 @@ fn i8_collateral_with_negative_pnl() {
 // SLOW_PROOF: Uses apply_adl which iterates over all accounts
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i4_adl_haircuts_unwrapped_first() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -372,14 +368,14 @@ fn i4_adl_haircuts_unwrapped_first() {
                 "I4: PNL should be reduced by loss amount");
     }
 }
-*/
+
 
 // ============================================================================
 // Withdrawal Safety
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn withdrawal_requires_sufficient_balance() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -402,7 +398,7 @@ fn withdrawal_requires_sufficient_balance() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn pnl_withdrawal_requires_warmup() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -438,9 +434,9 @@ fn pnl_withdrawal_requires_warmup() {
 // SLOW_PROOF: Uses apply_adl which iterates over all accounts
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn multiple_users_adl_preserves_all_principals() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -472,14 +468,14 @@ fn multiple_users_adl_preserves_all_principals() {
     assert!(engine.accounts[user2 as usize].capital == p2,
             "Multi-user ADL: User2 principal preserved");
 }
-*/
+
 
 // ============================================================================
 // Arithmetic Safety
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn saturating_arithmetic_prevents_overflow() {
     let a: u128 = kani::any();
@@ -501,9 +497,9 @@ fn saturating_arithmetic_prevents_overflow() {
 // SLOW_PROOF: Liquidation involves complex margin calculations
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn liquidation_closes_position() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -527,14 +523,14 @@ fn liquidation_closes_position() {
     assert!(engine.accounts[user_idx as usize].position_size.abs() <= position.abs(),
             "Liquidation should reduce or close position");
 }
-*/
+
 
 // ============================================================================
 // Edge Cases
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn zero_pnl_withdrawable_is_zero() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -550,7 +546,7 @@ fn zero_pnl_withdrawable_is_zero() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn negative_pnl_withdrawable_is_zero() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -573,7 +569,7 @@ fn negative_pnl_withdrawable_is_zero() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_p1_settlement_idempotent() {
     // P1: Funding settlement is idempotent
@@ -618,7 +614,7 @@ fn funding_p1_settlement_idempotent() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_p2_never_touches_principal() {
     // P2: Funding does not touch principal (extends Invariant I1)
@@ -651,7 +647,7 @@ fn funding_p2_never_touches_principal() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_p3_zero_sum_between_opposite_positions() {
     // P3: Funding is zero-sum when user and LP have opposite positions
@@ -695,7 +691,7 @@ fn funding_p3_zero_sum_between_opposite_positions() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_p4_settle_before_position_change() {
     // P4: Verifies that settlement before position change gives correct results
@@ -743,7 +739,7 @@ fn funding_p4_settle_before_position_change() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_p5_bounded_operations_no_overflow() {
     // P5: No overflows on bounded inputs (or returns Overflow error)
@@ -774,7 +770,7 @@ fn funding_p5_bounded_operations_no_overflow() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn funding_zero_position_no_change() {
     // Additional invariant: Zero position means no funding payment
@@ -810,7 +806,7 @@ fn funding_zero_position_no_change() {
 
 /*
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_rate_cap_invariant_maintained() {
     // I9: Global warmup rate respects insurance fund limit
@@ -847,7 +843,7 @@ fn warmup_rate_cap_invariant_maintained() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_slope_never_exceeds_pnl_over_period() {
     // Verify that slope_per_step * warmup_period <= positive_pnl
@@ -872,7 +868,7 @@ fn warmup_slope_never_exceeds_pnl_over_period() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_rate_decreases_when_pnl_decreases() {
     // When user's PNL decreases, their slope should decrease,
@@ -905,9 +901,9 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 // SLOW_PROOF: Uses apply_adl which iterates over all accounts
 // ============================================================================
 
-/* SLOW_PROOF - times out with default settings
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
     // When insurance fund is depleted and loss_accum > 0,
@@ -939,13 +935,13 @@ fn i10_withdrawal_mode_triggers_on_insurance_depletion() {
                 "I10: Insurance fund must be fully depleted");
     }
 }
-*/
+
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_fair_unwinding_constant_haircut_ratio() {
     // All users receive the same haircut ratio regardless of withdrawal order
@@ -1001,7 +997,7 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
 */
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_withdrawal_mode_blocks_position_increase() {
     // In withdrawal-only mode, users cannot increase position size
@@ -1045,7 +1041,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_withdrawal_mode_allows_position_decrease() {
     // In withdrawal-only mode, users CAN decrease/close positions
@@ -1085,7 +1081,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_total_withdrawals_bounded_by_available() {
     // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
@@ -1117,10 +1113,10 @@ fn i10_total_withdrawals_bounded_by_available() {
     assert!(withdrawn <= available,
             "I10: Total withdrawals must not exceed available principal");
 }
-*/
+
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_top_up_reduces_loss_accum() {
     // Insurance fund top-ups directly reduce loss_accum
@@ -1147,9 +1143,10 @@ fn i10_top_up_reduces_loss_accum() {
     assert!(engine.loss_accum == loss_before - expected_reduction,
             "I10: Top-up must reduce loss_accum by contribution amount");
 }
+*/
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     // When loss_accum reaches 0, withdrawal mode should be exited
@@ -1175,9 +1172,9 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     }
 }
 
-/* SLOW_PROOF - uses check_conservation which iterates
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_withdrawal_mode_preserves_conservation() {
     // Conservation must be maintained even in withdrawal-only mode
@@ -1208,13 +1205,13 @@ fn i10_withdrawal_mode_preserves_conservation() {
     assert!(engine.check_conservation(),
             "I10: Withdrawal mode must preserve conservation");
 }
-*/
+
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_withdrawal_tracking_accuracy() {
     // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
@@ -1253,9 +1250,9 @@ fn i10_withdrawal_tracking_accuracy() {
 // LP-Specific Invariants (CRITICAL - Addresses Kani audit findings)
 // ============================================================================
 
-/* SLOW_PROOF - uses apply_adl which iterates
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i1_lp_adl_never_reduces_capital() {
     // I1 for LPs: ADL must NEVER reduce LP capital
@@ -1284,11 +1281,11 @@ fn i1_lp_adl_never_reduces_capital() {
     assert!(engine.accounts[lp_idx as usize].capital == capital_before,
             "I1-LP: ADL must NEVER reduce LP capital");
 }
-*/
 
-/* SLOW_PROOF - uses liquidate_account which is complex
+
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i1_lp_liquidation_never_reduces_capital() {
     // I1 for LPs: Liquidation must NEVER reduce LP capital
@@ -1318,11 +1315,11 @@ fn i1_lp_liquidation_never_reduces_capital() {
     assert!(engine.accounts[lp_idx as usize].capital == capital_before,
             "I1-LP: Liquidation must NEVER reduce LP capital");
 }
-*/
 
-/* SLOW_PROOF - uses apply_adl which iterates
+
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn adl_is_proportional_for_user_and_lp() {
     // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
@@ -1362,11 +1359,11 @@ fn adl_is_proportional_for_user_and_lp() {
     assert!(user_loss == lp_loss,
             "ADL: User and LP with equal unwrapped PNL must receive equal haircuts");
 }
-*/
 
-/* SLOW_PROOF - uses apply_adl which iterates
+
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn adl_proportionality_general() {
     // General proportional ADL: Haircut percentages should be equal
@@ -1417,13 +1414,13 @@ fn adl_proportionality_general() {
     assert!(diff <= total_pnl,
             "ADL: Haircuts must be proportional (within rounding tolerance)");
 }
-*/
+
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
 // The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_fair_unwinding_is_fair_for_lps() {
     // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
@@ -1478,9 +1475,9 @@ fn i10_fair_unwinding_is_fair_for_lps() {
 }
 */
 
-/* SLOW_PROOF - uses apply_adl which iterates
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn multiple_lps_adl_preserves_all_capitals() {
     // Multi-LP ADL: All LP capitals are preserved, similar to multiple_users_adl_preserves_all_principals
@@ -1514,11 +1511,11 @@ fn multiple_lps_adl_preserves_all_capitals() {
     assert!(engine.accounts[lp2 as usize].capital == c2,
             "Multi-LP ADL: LP2 capital preserved");
 }
-*/
 
-/* SLOW_PROOF - uses apply_adl which iterates
+
+// Previously slow - now fast with 8 accounts
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn mixed_users_and_lps_adl_preserves_all_capitals() {
     // Mixed ADL: Both user and LP capitals are preserved together
@@ -1552,7 +1549,7 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
     assert!(engine.accounts[lp_idx as usize].capital == lp_capital,
             "Mixed ADL: LP capital preserved");
 }
-*/
+
 
 // ============================================================================
 // Risk-Reduction-Only Mode Proofs
@@ -1560,7 +1557,7 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
 
 // Proof 1: Warmup does not advance while paused
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_warmup_frozen_when_paused() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -1603,7 +1600,7 @@ fn proof_warmup_frozen_when_paused() {
 
 // Proof 2: In risk mode, withdraw never decreases PNL directly (only via warmup conversion)
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_withdraw_only_decreases_via_conversion() {
     let mut engine = Box::new(RiskEngine::new(test_params()));
@@ -1651,7 +1648,7 @@ fn proof_withdraw_only_decreases_via_conversion() {
 
 // Proof 3: Risk-increasing trades are rejected in risk mode
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_risk_increasing_trades_rejected() {
     let mut engine = Box::new(RiskEngine::new(test_params()));

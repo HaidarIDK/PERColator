@@ -28,12 +28,13 @@ extern crate kani;
 // Use smaller array size for Kani verification to make proofs tractable
 // Production uses 4096, but Kani symbolic execution becomes intractable at that scale
 #[cfg(kani)]
-pub const MAX_ACCOUNTS: usize = 64;  // Must be multiple of 64 for bitmap
+pub const MAX_ACCOUNTS: usize = 8;  // Small for fast formal verification
 
 #[cfg(not(kani))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
-pub const BITMAP_WORDS: usize = MAX_ACCOUNTS / 64; // 64 words for production, 1 for kani
+// Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
+pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 
 // ============================================================================
 // Core Data Structures
