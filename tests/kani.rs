@@ -29,7 +29,7 @@ fn test_params() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 8, // Match Kani's MAX_ACCOUNTS
-        account_fee_bps: 10000,
+        account_fee_bps: 0, // Zero fees to avoid vault/insurance mutations during add_user/add_lp
         risk_reduction_threshold: 0,
     }
 }
@@ -44,7 +44,7 @@ fn test_params() -> RiskParams {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i1_adl_never_reduces_principal() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     // Set arbitrary but bounded values (reduced bounds for tractability)
@@ -78,7 +78,7 @@ fn i1_adl_never_reduces_principal() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i2_deposit_preserves_conservation() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let amount: u128 = kani::any();
@@ -96,7 +96,7 @@ fn i2_deposit_preserves_conservation() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i2_withdraw_preserves_conservation() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let deposit: u128 = kani::any();
@@ -124,7 +124,7 @@ fn i2_withdraw_preserves_conservation() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_determinism() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -154,7 +154,7 @@ fn i5_warmup_determinism() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_monotonicity() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -185,7 +185,7 @@ fn i5_warmup_monotonicity() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i5_warmup_bounded_by_pnl() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -219,7 +219,7 @@ fn i5_warmup_bounded_by_pnl() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i7_user_isolation_deposit() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -249,7 +249,7 @@ fn i7_user_isolation_deposit() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i7_user_isolation_withdrawal() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -283,7 +283,7 @@ fn i7_user_isolation_withdrawal() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i8_collateral_with_positive_pnl() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -306,7 +306,7 @@ fn i8_collateral_with_positive_pnl() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i8_collateral_with_negative_pnl() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -335,7 +335,7 @@ fn i8_collateral_with_negative_pnl() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i4_adl_haircuts_unwrapped_first() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -388,7 +388,7 @@ fn i4_adl_haircuts_unwrapped_first() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn withdrawal_requires_sufficient_balance() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -411,7 +411,7 @@ fn withdrawal_requires_sufficient_balance() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn pnl_withdrawal_requires_warmup() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -449,7 +449,7 @@ fn pnl_withdrawal_requires_warmup() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn multiple_users_adl_preserves_all_principals() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
 
@@ -510,7 +510,7 @@ fn saturating_arithmetic_prevents_overflow() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn zero_pnl_withdrawable_is_zero() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     engine.accounts[user_idx as usize].pnl = 0;
@@ -526,7 +526,7 @@ fn zero_pnl_withdrawable_is_zero() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn negative_pnl_withdrawable_is_zero() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -552,7 +552,7 @@ fn funding_p1_settlement_idempotent() {
     // P1: Funding settlement is idempotent
     // After settling once, settling again with unchanged global index does nothing
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     // Arbitrary position and PNL
@@ -596,7 +596,7 @@ fn funding_p1_settlement_idempotent() {
 fn funding_p2_never_touches_principal() {
     // P2: Funding does not touch principal (extends Invariant I1)
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -629,7 +629,7 @@ fn funding_p2_never_touches_principal() {
 fn funding_p3_zero_sum_between_opposite_positions() {
     // P3: Funding is zero-sum when user and LP have opposite positions
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -673,7 +673,7 @@ fn funding_p3_zero_sum_between_opposite_positions() {
 fn funding_p4_settle_before_position_change() {
     // P4: Verifies that settlement before position change gives correct results
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let initial_pos: i128 = kani::any();
@@ -721,7 +721,7 @@ fn funding_p4_settle_before_position_change() {
 fn funding_p5_bounded_operations_no_overflow() {
     // P5: No overflows on bounded inputs (or returns Overflow error)
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
 
     // Bounded inputs
     let price: u64 = kani::any();
@@ -752,7 +752,7 @@ fn funding_p5_bounded_operations_no_overflow() {
 fn funding_zero_position_no_change() {
     // Additional invariant: Zero position means no funding payment
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     engine.accounts[user_idx as usize].position_size = 0; // Zero position
@@ -789,7 +789,7 @@ fn warmup_rate_cap_invariant_maintained() {
     // I9: Global warmup rate respects insurance fund limit
     // Invariant: total_warmup_rate * (T/2) <= insurance_fund * max_warmup_rate_fraction_bps / 10_000
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
 
     // Set insurance fund to symbolic value
     let insurance: u128 = kani::any();
@@ -826,7 +826,7 @@ fn warmup_slope_never_exceeds_pnl_over_period() {
     // Verify that slope_per_step * warmup_period <= positive_pnl
     // (Users can't warm up more than they have)
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     engine.insurance_fund.balance = 1_000_000; // Large enough to not be limiting factor
 
     let user_idx = engine.add_user(1).unwrap();
@@ -851,7 +851,7 @@ fn warmup_rate_decreases_when_pnl_decreases() {
     // When user's PNL decreases, their slope should decrease,
     // freeing up capacity for other users
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     engine.insurance_fund.balance = 1_000_000;
 
     let user_idx = engine.add_user(1).unwrap();
@@ -889,7 +889,7 @@ fn warmup_rate_decreases_when_pnl_decreases() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn i10_risk_mode_triggers_at_floor() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     let insurance: u128 = kani::any();
@@ -938,7 +938,7 @@ fn i10_risk_mode_triggers_at_floor() {
 fn i10_fair_unwinding_constant_haircut_ratio() {
     // All users receive the same haircut ratio regardless of withdrawal order
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
 
     // Add two users with different principals
     let user1 = engine.add_user(1).unwrap();
@@ -994,7 +994,7 @@ fn i10_fair_unwinding_constant_haircut_ratio() {
 fn i10_withdrawal_mode_blocks_position_increase() {
     // In withdrawal-only mode, users cannot increase position size
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1038,7 +1038,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
 fn i10_withdrawal_mode_allows_position_decrease() {
     // In withdrawal-only mode, users CAN decrease/close positions
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1078,7 +1078,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
 fn i10_total_withdrawals_bounded_by_available() {
     // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1113,7 +1113,7 @@ fn i10_total_withdrawals_bounded_by_available() {
 fn i10_top_up_reduces_loss_accum() {
     // Insurance fund top-ups directly reduce loss_accum
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
 
     let loss: u128 = kani::any();
     let top_up: u128 = kani::any();
@@ -1143,7 +1143,7 @@ fn i10_top_up_reduces_loss_accum() {
 fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
     // When loss_accum reaches 0, withdrawal mode should be exited
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
 
     let loss: u128 = kani::any();
     kani::assume(loss > 0 && loss < 10_000);
@@ -1171,7 +1171,7 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
 fn i10_withdrawal_mode_preserves_conservation() {
     // Conservation must be maintained even in withdrawal-only mode
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1209,7 +1209,7 @@ fn i10_withdrawal_mode_preserves_conservation() {
 fn i10_withdrawal_tracking_accuracy() {
     // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let principal: u128 = kani::any();
@@ -1251,7 +1251,7 @@ fn i1_lp_adl_never_reduces_capital() {
     // I1 for LPs: ADL must NEVER reduce LP capital
     // This is the LP equivalent of i1_adl_never_reduces_principal
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     // Set arbitrary but bounded values
@@ -1284,7 +1284,7 @@ fn adl_is_proportional_for_user_and_lp() {
     // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
     // should receive equal haircuts
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1328,7 +1328,7 @@ fn adl_proportionality_general() {
     // General proportional ADL: Haircut percentages should be equal
     // even when PNL amounts differ
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1385,7 +1385,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
     // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
     // This extends i10_fair_unwinding_constant_haircut_ratio to include LPs
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1441,7 +1441,7 @@ fn i10_fair_unwinding_is_fair_for_lps() {
 fn multiple_lps_adl_preserves_all_capitals() {
     // Multi-LP ADL: All LP capitals are preserved, similar to multiple_users_adl_preserves_all_principals
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let lp1 = engine.add_lp([1u8; 32], [1u8; 32], 1).unwrap();
     let lp2 = engine.add_lp([2u8; 32], [2u8; 32], 1).unwrap();
 
@@ -1479,7 +1479,7 @@ fn multiple_lps_adl_preserves_all_capitals() {
 fn mixed_users_and_lps_adl_preserves_all_capitals() {
     // Mixed ADL: Both user and LP capitals are preserved together
 
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1519,7 +1519,7 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_warmup_frozen_when_paused() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let pnl: i128 = kani::any();
@@ -1562,7 +1562,7 @@ fn proof_warmup_frozen_when_paused() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_withdraw_only_decreases_via_conversion() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let capital: u128 = kani::any();
@@ -1610,7 +1610,7 @@ fn proof_withdraw_only_decreases_via_conversion() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_risk_increasing_trades_rejected() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1654,7 +1654,7 @@ fn proof_risk_increasing_trades_rejected() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn panic_settle_closes_all_positions() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1698,7 +1698,7 @@ fn panic_settle_closes_all_positions() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn panic_settle_clamps_negative_pnl() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1745,7 +1745,7 @@ fn panic_settle_clamps_negative_pnl() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn panic_settle_enters_risk_mode() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
     let oracle_price: u64 = kani::any();
@@ -1778,7 +1778,7 @@ fn panic_settle_enters_risk_mode() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn panic_settle_preserves_conservation() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -1840,7 +1840,7 @@ fn test_params_with_floor() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 8,
-        account_fee_bps: 10000,
+        account_fee_bps: 0, // Zero fees to avoid vault/insurance mutations during add_user/add_lp
         risk_reduction_threshold: 1000, // Non-zero floor
     }
 }
@@ -1850,7 +1850,7 @@ fn test_params_with_floor() -> RiskParams {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_budget_a_invariant_holds_after_settlement() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     let capital: u128 = kani::any();
@@ -1894,7 +1894,7 @@ fn warmup_budget_a_invariant_holds_after_settlement() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_budget_b_negative_settlement_no_increase_pos() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     let capital: u128 = kani::any();
@@ -1930,11 +1930,12 @@ fn warmup_budget_b_negative_settlement_no_increase_pos() {
 }
 
 // Proof C: Settling positive PNL cannot exceed available budget
+// This is the key safety property: Δwarmed_pos ≤ budget_before
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_budget_c_positive_settlement_bounded_by_budget() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     let capital: u128 = kani::any();
@@ -1961,25 +1962,18 @@ fn warmup_budget_c_positive_settlement_bounded_by_budget() {
     engine.insurance_fund.balance = insurance;
     engine.vault = capital + insurance + (pnl as u128);
 
+    // Record state BEFORE settlement
+    let warmed_pos_before = engine.warmed_pos_total;
     let budget_before = engine.warmup_budget_remaining();
-    let warmed_neg_before = engine.warmed_neg_total;
 
     // Settle warmup
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF: The increase in warmed_pos_total must not exceed available budget
-    // Since warmed_neg_total doesn't change (positive PNL), this means:
-    // warmed_pos_total_after - warmed_pos_total_before <= budget_before
-    let budget_after = engine.warmup_budget_remaining();
-
-    // Budget should decrease or stay same after settling positive PNL
-    // (it decreases when we use insurance spendable, stays same if limited by losses)
-    assert!(budget_after <= budget_before.saturating_add(1), // Allow for rounding
-            "WB-C: Budget should not increase after settling positive PNL");
-
-    // Alternative check: warmed_neg_total should stay the same
-    assert!(engine.warmed_neg_total == warmed_neg_before,
-            "WB-C: warmed_neg_total should not change when settling positive PNL");
+    // This is the exact safety property: delta <= budget_before
+    let delta = engine.warmed_pos_total.saturating_sub(warmed_pos_before);
+    assert!(delta <= budget_before,
+            "WB-C: Δwarmed_pos must not exceed budget_before");
 }
 
 // Proof D: In warmup-paused mode, settlement result is unchanged by time
@@ -1987,7 +1981,7 @@ fn warmup_budget_c_positive_settlement_bounded_by_budget() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn warmup_budget_d_paused_settlement_time_invariant() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     let capital: u128 = kani::any();
@@ -2060,7 +2054,7 @@ fn warmup_budget_d_paused_settlement_time_invariant() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn audit_settle_idempotent_when_paused() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     // Symbolic inputs
@@ -2129,7 +2123,7 @@ fn audit_settle_idempotent_when_paused() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn audit_warmup_started_at_updated_to_effective_slot() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     // Symbolic inputs
@@ -2177,7 +2171,7 @@ fn audit_warmup_started_at_updated_to_effective_slot() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn audit_multiple_settlements_when_paused_idempotent() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     // Symbolic inputs
@@ -2251,7 +2245,7 @@ fn audit_multiple_settlements_when_paused_idempotent() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_r1_adl_never_spends_reserved() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     // Symbolic inputs for setting up reserved insurance
@@ -2301,7 +2295,7 @@ fn proof_r1_adl_never_spends_reserved() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_r2_reserved_bounded_and_monotone() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
 
     // Symbolic inputs
@@ -2419,7 +2413,7 @@ fn proof_ps5_panic_settle_no_insurance_minting() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_c1_conservation_bounded_slack_panic_settle() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -2491,7 +2485,7 @@ fn proof_c1_conservation_bounded_slack_panic_settle() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_c1_conservation_bounded_slack_force_realize() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
@@ -2562,7 +2556,7 @@ fn proof_c1_conservation_bounded_slack_force_realize() {
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn audit_force_realize_updates_warmup_start() {
-    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(1).unwrap();
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
