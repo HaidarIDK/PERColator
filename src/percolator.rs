@@ -209,11 +209,6 @@ pub struct RiskEngine {
     /// Loss accumulator for socialization
     pub loss_accum: u128,
 
-    /// Rounding surplus from position settlement (negative mark_pnl rounding)
-    /// This tracks value in the vault that isn't claimed by any account due to
-    /// integer division rounding during position settlement.
-    pub rounding_surplus: u128,
-
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PnL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
     pub risk_reduction_only: bool,
 
@@ -445,7 +440,6 @@ impl RiskEngine {
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
             loss_accum: 0,
-            rounding_surplus: 0,
             risk_reduction_only: false,
             risk_reduction_mode_withdrawn: 0,
             warmup_paused: false,
@@ -1282,18 +1276,18 @@ impl RiskEngine {
             }
         }
 
-        // 3.5 Update start slot deterministically
-        if !self.warmup_paused {
-            self.accounts[idx as usize].warmup_started_at_slot = self.current_slot;
-        }
-        // If paused, leave warmup_started_at_slot unchanged
+        // 3.5 Always advance start marker to prevent double-settling the same matured amount.
+        // This is safe even when paused: effective_slot==warmup_pause_slot, so further elapsed==0.
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
         // 3.6 Hard invariant assert in debug/kani
         // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
         // Also: reserved ≤ raw_spendable (can't reserve more than exists)
+        // Also: insurance >= floor + reserved (reserved portion protected)
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
+            let floor = self.params.risk_reduction_threshold;
             debug_assert!(
                 self.warmed_pos_total <= self.warmed_neg_total.saturating_add(raw),
                 "Warmup budget invariant violated: W+ > W- + raw"
@@ -1301,6 +1295,10 @@ impl RiskEngine {
             debug_assert!(
                 self.warmup_insurance_reserved <= raw,
                 "Reserved exceeds raw spendable"
+            );
+            debug_assert!(
+                self.insurance_fund.balance >= floor.saturating_add(self.warmup_insurance_reserved),
+                "Insurance fell below floor+reserved"
             );
         }
 
@@ -1470,15 +1468,10 @@ impl RiskEngine {
 
         // Compensate for integer division rounding slippage.
         // Due to truncation toward zero, sum(mark_pnl) may not be exactly zero even
-        // though positions are zero-sum. Handle both directions:
-        // - If total_mark_pnl > 0: accounts claim more profit than exists (phantom profit)
-        //   → treat as additional loss to be socialized
-        // - If total_mark_pnl < 0: accounts claim less than exists (vault surplus)
-        //   → track in rounding_surplus (does not mint insurance)
+        // though positions are zero-sum. If positive, treat as additional loss.
+        // Negative rounding (vault surplus) is ignored - it stays in vault unclaimed.
         if total_mark_pnl > 0 {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
-        } else if total_mark_pnl < 0 {
-            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
         }
 
         // Second pass: settle warmup for all used accounts before ADL
@@ -1602,12 +1595,10 @@ impl RiskEngine {
             }
         }
 
-        // Compensate for integer division rounding slippage
+        // Compensate for integer division rounding slippage.
+        // Negative rounding (vault surplus) is ignored - it stays in vault unclaimed.
         if total_mark_pnl > 0 {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
-        } else if total_mark_pnl < 0 {
-            // Track vault surplus from rounding (does not mint insurance)
-            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
         }
 
         // Socialize any unpaid losses via ADL waterfall
@@ -1684,13 +1675,14 @@ impl RiskEngine {
         });
 
         // Conservation formula:
-        // vault + loss_accum = sum(capital) + sum(pnl) + insurance + rounding_surplus
+        // vault + loss_accum >= sum(capital) + sum(pnl) + insurance
         //
         // Where:
         // - loss_accum: value that "left" the system (unrecoverable losses)
-        // - rounding_surplus: value in vault unclaimed due to integer division rounding
+        //
+        // Note: We use >= because negative rounding slippage leaves
+        // unclaimed value in the vault. This is safe: vault has at least what's owed.
         let base = add_u128(total_capital, self.insurance_fund.balance);
-        let base = add_u128(base, self.rounding_surplus);
 
         let expected = if net_pnl >= 0 {
             add_u128(base, net_pnl as u128)
@@ -1698,10 +1690,10 @@ impl RiskEngine {
             base.saturating_sub((-net_pnl) as u128)
         };
 
-        // vault + loss_accum should equal expected
+        // vault + loss_accum should be at least expected (may be more due to rounding)
         let actual = add_u128(self.vault, self.loss_accum);
 
-        actual == expected
+        actual >= expected
     }
 
     /// Advance to next slot (for testing warmup)

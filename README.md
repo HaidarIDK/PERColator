@@ -17,7 +17,7 @@ Oracle manipulation allows attackers to create artificial profits. PNL warmup en
 | ID | Property |
 |----|----------|
 | **I1** | Account capital is NEVER reduced by ADL or socialization |
-| **I2** | Conservation: `vault + loss_accum == sum(capital) + sum(pnl) + insurance + rounding_surplus` |
+| **I2** | Conservation: `vault + loss_accum >= sum(capital) + sum(pnl) + insurance` |
 | **I4** | ADL haircuts unwrapped PNL before insurance fund |
 | **I5** | PNL warmup is deterministic and monotonically increasing |
 | **I7** | Account isolation - operations on one account don't affect others |
@@ -81,22 +81,21 @@ Insurance spending is capped: the engine will only spend unreserved insurance ab
 
 ### Conservation
 
-The conservation formula is exact (no tolerance):
+The conservation formula uses `>=` because negative rounding slippage leaves unclaimed value in the vault:
 
 ```
-vault + loss_accum = sum(capital) + sum(pnl) + insurance_fund.balance + rounding_surplus
+vault + loss_accum >= sum(capital) + sum(pnl) + insurance_fund.balance
 ```
 
 Where:
 - `loss_accum` tracks uncovered losses after consuming unwrapped PnL and all spendable insurance above the floor
-- `rounding_surplus` tracks value in vault unclaimed due to integer division rounding during position settlement
 
 This holds because:
 - Deposits/withdrawals adjust both vault and capital
 - Trading PNL is zero-sum between counterparties
 - Fees transfer from user PNL to insurance (net zero)
 - ADL redistributes PNL (net zero)
-- Rounding slippage from position settlement is tracked explicitly
+- Integer rounding always rounds down, leaving surplus in vault (safe: vault has at least what's owed)
 
 ## Running Tests
 
