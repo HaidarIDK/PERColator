@@ -641,3 +641,266 @@ proptest! {
                        "Zero position should not pay funding");
     }
 }
+
+// ============================================================================
+// AUDIT-MANDATED FUZZ TESTS
+// These fuzz tests verify critical invariants identified in the security audit.
+// ============================================================================
+
+/// Helper to create params with a non-zero insurance floor
+fn params_with_floor() -> RiskParams {
+    RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 1000,
+        account_fee_bps: 10000,
+        risk_reduction_threshold: 100, // Non-zero floor
+    }
+}
+
+// Fuzz Test A: settle_warmup_to_capital is idempotent when paused
+proptest! {
+    #[test]
+    fn fuzz_audit_settle_idempotent_when_paused(
+        capital in 100u128..100_000,
+        pnl in 1i128..10_000,
+        slope in 1u128..1000,
+        pause_slot in 1u64..100,
+        settle_slot in 100u64..500
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_with_floor()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        // Setup with positive PnL and warmup
+        engine.insurance_fund.balance = 100_000;
+        engine.vault = 100_000;
+        engine.deposit(user_idx, capital).unwrap();
+        engine.accounts[user_idx as usize].pnl = pnl;
+        engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+        // Pause warmup
+        engine.warmup_paused = true;
+        engine.warmup_pause_slot = pause_slot;
+        engine.current_slot = settle_slot;
+
+        // First settlement
+        let _ = engine.settle_warmup_to_capital(user_idx);
+        let state1 = (
+            engine.accounts[user_idx as usize].capital,
+            engine.accounts[user_idx as usize].pnl,
+            engine.warmed_pos_total,
+            engine.warmed_neg_total,
+        );
+
+        // Second settlement - must be idempotent
+        let _ = engine.settle_warmup_to_capital(user_idx);
+        let state2 = (
+            engine.accounts[user_idx as usize].capital,
+            engine.accounts[user_idx as usize].pnl,
+            engine.warmed_pos_total,
+            engine.warmed_neg_total,
+        );
+
+        prop_assert_eq!(state1, state2,
+                        "Settlement should be idempotent when paused: state1={:?}, state2={:?}",
+                        state1, state2);
+
+        // Also verify warmup_started_at_slot was updated
+        let effective_slot = core::cmp::min(settle_slot, pause_slot);
+        prop_assert_eq!(engine.accounts[user_idx as usize].warmup_started_at_slot, effective_slot,
+                        "warmup_started_at_slot should be updated to effective_slot");
+    }
+}
+
+// Fuzz Test B: Warmup budget invariant always holds
+proptest! {
+    #[test]
+    fn fuzz_audit_warmup_budget_invariant(
+        capital in 1000u128..100_000,
+        pnl in -50_000i128..50_000,
+        slope in 1u128..1000,
+        insurance in 100u128..10_000,
+        slots in 1u64..200
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_with_floor()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        // Setup
+        engine.insurance_fund.balance = insurance;
+        engine.vault = insurance;
+        engine.deposit(user_idx, capital).unwrap();
+        engine.accounts[user_idx as usize].pnl = pnl;
+        engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+        engine.current_slot = slots;
+
+        // Settle warmup
+        let _ = engine.settle_warmup_to_capital(user_idx);
+
+        // Check warmup budget invariant: W+ <= W- + raw_spendable
+        let raw_spendable = engine.insurance_spendable_raw();
+        prop_assert!(
+            engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw_spendable),
+            "Warmup budget invariant violated: W+={} > W-={} + raw_spendable={}",
+            engine.warmed_pos_total, engine.warmed_neg_total, raw_spendable
+        );
+
+        // Check reserved <= raw_spendable
+        prop_assert!(
+            engine.warmup_insurance_reserved <= raw_spendable,
+            "Reserved {} exceeds raw_spendable {}",
+            engine.warmup_insurance_reserved, raw_spendable
+        );
+    }
+}
+
+// Fuzz Test C: Conservation holds after panic_settle_all
+proptest! {
+    #[test]
+    fn fuzz_audit_conservation_after_panic_settle(
+        user_capital in 1000u128..100_000,
+        lp_capital in 1000u128..100_000,
+        position in 1i128..10_000,
+        entry_price in 100_000u64..10_000_000,
+        oracle_price in 100_000u64..10_000_000,
+        insurance in 0u128..10_000
+    ) {
+        let mut engine = Box::new(RiskEngine::new(default_params()));
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+        // Setup opposing positions
+        engine.deposit(user_idx, user_capital).unwrap();
+        engine.deposit(lp_idx, lp_capital).unwrap();
+
+        engine.accounts[user_idx as usize].position_size = position;
+        engine.accounts[user_idx as usize].entry_price = entry_price;
+        engine.accounts[lp_idx as usize].position_size = -position;
+        engine.accounts[lp_idx as usize].entry_price = entry_price;
+
+        // Adjust insurance and vault together to maintain conservation
+        // Conservation: vault = sum(capital) + sum(pnl) + insurance
+        // PnL is 0, so vault = capitals + insurance
+        let total_capital = user_capital + lp_capital;
+        engine.insurance_fund.balance = insurance;
+        engine.vault = total_capital + insurance;
+
+        // Verify conservation before
+        prop_assert!(engine.check_conservation(),
+                     "Conservation should hold before panic_settle");
+
+        // Panic settle
+        let _ = engine.panic_settle_all(oracle_price);
+
+        // Conservation must hold after (using >= for rounding)
+        prop_assert!(engine.check_conservation(),
+                     "Conservation should hold after panic_settle_all");
+
+        // All positions should be closed
+        prop_assert_eq!(engine.accounts[user_idx as usize].position_size, 0,
+                        "User position should be closed");
+        prop_assert_eq!(engine.accounts[lp_idx as usize].position_size, 0,
+                        "LP position should be closed");
+    }
+}
+
+// Fuzz Test D: Reserved insurance is protected in ADL
+proptest! {
+    #[test]
+    fn fuzz_audit_reserved_insurance_protected_in_adl(
+        capital in 1000u128..100_000,
+        pnl in 100i128..5000,
+        slope in 100u128..10000,
+        insurance in 200u128..10_000,
+        loss in 100u128..20_000,
+        slots in 1u64..100
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_with_floor()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        // Setup with insurance above floor
+        engine.insurance_fund.balance = insurance;
+        engine.vault = insurance;
+        engine.deposit(user_idx, capital).unwrap();
+        engine.accounts[user_idx as usize].pnl = pnl;
+        engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+        engine.current_slot = slots;
+
+        // Settle to reserve some insurance
+        let _ = engine.settle_warmup_to_capital(user_idx);
+        let reserved = engine.warmup_insurance_reserved;
+        let floor = engine.params.risk_reduction_threshold;
+
+        // Apply ADL
+        let insurance_before = engine.insurance_fund.balance;
+        let _ = engine.apply_adl(loss);
+        let insurance_after = engine.insurance_fund.balance;
+
+        // Insurance should never drop below floor + reserved
+        let min_protected = floor.saturating_add(reserved);
+        prop_assert!(
+            insurance_after >= min_protected.saturating_sub(1), // Allow 1 for rounding
+            "Insurance {} dropped below floor+reserved={} after ADL (was {}, reserved={})",
+            insurance_after, min_protected, insurance_before, reserved
+        );
+
+        // Reserved should not decrease
+        prop_assert!(
+            engine.warmup_insurance_reserved >= reserved,
+            "Reserved decreased from {} to {} after ADL",
+            reserved, engine.warmup_insurance_reserved
+        );
+    }
+}
+
+// Fuzz Test E: force_realize_losses maintains warmup budget invariant
+proptest! {
+    #[test]
+    fn fuzz_audit_force_realize_maintains_invariant(
+        user_capital in 1000u128..50_000,
+        lp_capital in 1000u128..50_000,
+        position in 1i128..5_000,
+        entry_price in 100_000u64..5_000_000,
+        oracle_price in 100_000u64..5_000_000
+    ) {
+        let mut params = params_with_floor();
+        params.risk_reduction_threshold = 1000;
+
+        let mut engine = Box::new(RiskEngine::new(params));
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+        // Setup deposits first
+        engine.deposit(user_idx, user_capital).unwrap();
+        engine.deposit(lp_idx, lp_capital).unwrap();
+
+        // Set insurance to floor (triggers force_realize) and adjust vault
+        let total_capital = user_capital + lp_capital;
+        engine.insurance_fund.balance = 1000;
+        engine.vault = total_capital + 1000;
+
+        engine.accounts[user_idx as usize].position_size = position;
+        engine.accounts[user_idx as usize].entry_price = entry_price;
+        engine.accounts[lp_idx as usize].position_size = -position;
+        engine.accounts[lp_idx as usize].entry_price = entry_price;
+
+        // Force realize losses
+        let _ = engine.force_realize_losses(oracle_price);
+
+        // Check warmup budget invariant
+        let raw_spendable = engine.insurance_spendable_raw();
+        prop_assert!(
+            engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw_spendable),
+            "Warmup budget invariant violated after force_realize: W+={} > W-={} + raw={}",
+            engine.warmed_pos_total, engine.warmed_neg_total, raw_spendable
+        );
+
+        // Conservation should hold
+        prop_assert!(engine.check_conservation(),
+                     "Conservation violated after force_realize_losses");
+    }
+}

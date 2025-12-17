@@ -2663,3 +2663,306 @@ fn test_reserved_monotone_non_decreasing() {
             "Reserved should not decrease after force_realize_losses");
 }
 
+// ============================================================================
+// AUDIT-MANDATED TESTS: Double-Settlement, Conservation, Reserved Insurance
+// These tests were mandated by the security audit to verify critical fixes.
+// ============================================================================
+
+/// Test A: Double-Settlement Bug Fix
+///
+/// Verifies that settle_warmup_to_capital is idempotent when warmup is paused.
+/// The fix ensures that warmup_started_at_slot is always updated to effective_slot,
+/// preventing the same matured PnL from being settled twice.
+///
+/// Bug scenario (before fix):
+/// 1. User has positive PnL warming up
+/// 2. Warmup gets paused at slot 50 (e.g., due to risk mode)
+/// 3. User calls settle_warmup_to_capital at slot 100 - settles 50 slots of PnL
+/// 4. User calls settle_warmup_to_capital again at slot 100 - should settle 0 more
+/// 5. BUG: Without the fix, warmup_started_at_slot wasn't updated, allowing double-settlement
+#[test]
+fn test_audit_a_settle_idempotent_when_paused() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // Non-zero floor
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: User has positive PnL with warmup slope
+    engine.insurance_fund.balance = 10_000; // Provide warmup budget
+    engine.deposit(user_idx, 1_000).unwrap();
+    engine.accounts[user_idx as usize].pnl = 500;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+    // Advance to slot 50 and pause warmup
+    engine.current_slot = 50;
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = 50;
+
+    // First settlement at slot 100 (but effective_slot is capped at 50)
+    engine.current_slot = 100;
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+
+    let capital_after_first = engine.accounts[user_idx as usize].capital;
+    let pnl_after_first = engine.accounts[user_idx as usize].pnl;
+    let warmed_pos_after_first = engine.warmed_pos_total;
+
+    // Second settlement at same slot - should be idempotent (no change)
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+
+    let capital_after_second = engine.accounts[user_idx as usize].capital;
+    let pnl_after_second = engine.accounts[user_idx as usize].pnl;
+    let warmed_pos_after_second = engine.warmed_pos_total;
+
+    // CRITICAL: Second settlement must not change anything
+    assert_eq!(capital_after_first, capital_after_second,
+               "TEST A FAILED: Capital changed on second settlement ({} -> {}). \
+                Double-settlement bug still present!",
+               capital_after_first, capital_after_second);
+    assert_eq!(pnl_after_first, pnl_after_second,
+               "TEST A FAILED: PnL changed on second settlement ({} -> {}). \
+                Double-settlement bug still present!",
+               pnl_after_first, pnl_after_second);
+    assert_eq!(warmed_pos_after_first, warmed_pos_after_second,
+               "TEST A FAILED: warmed_pos_total changed on second settlement ({} -> {}). \
+                Double-settlement bug still present!",
+               warmed_pos_after_first, warmed_pos_after_second);
+
+    // Also verify that warmup_started_at_slot was updated to effective_slot
+    assert_eq!(engine.accounts[user_idx as usize].warmup_started_at_slot, 50,
+               "warmup_started_at_slot should be updated to effective_slot (pause_slot)");
+}
+
+/// Test A variant: Multiple settlements over time while paused
+#[test]
+fn test_audit_a_settle_idempotent_multiple_times_while_paused() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 0;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup
+    engine.insurance_fund.balance = 10_000;
+    engine.deposit(user_idx, 1_000).unwrap();
+    engine.accounts[user_idx as usize].pnl = 1000;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+    // Pause at slot 10
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = 10;
+
+    // First settlement at slot 20
+    engine.current_slot = 20;
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+    let state_after_first = (
+        engine.accounts[user_idx as usize].capital,
+        engine.accounts[user_idx as usize].pnl,
+        engine.warmed_pos_total,
+    );
+
+    // Multiple subsequent settlements at various slots - all should be idempotent
+    for slot in [30, 50, 100, 200] {
+        engine.current_slot = slot;
+        engine.settle_warmup_to_capital(user_idx).unwrap();
+
+        let state_now = (
+            engine.accounts[user_idx as usize].capital,
+            engine.accounts[user_idx as usize].pnl,
+            engine.warmed_pos_total,
+        );
+
+        assert_eq!(state_after_first, state_now,
+                   "Settlement at slot {} changed state while paused. Double-settlement bug!", slot);
+    }
+}
+
+/// Test B: Conservation Bug Fix
+///
+/// Verifies that check_conservation uses >= instead of == to account for
+/// safe rounding surplus that stays in the vault unclaimed.
+/// The rounding_surplus field was removed, and negative rounding errors
+/// are now safely ignored (they leave extra value in the vault).
+#[test]
+fn test_audit_b_conservation_after_panic_settle_with_rounding() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup opposing positions that will create rounding when settled
+    engine.deposit(user_idx, 50_000).unwrap();
+    engine.deposit(lp_idx, 50_000).unwrap();
+
+    // Create positions with values that will cause integer division rounding
+    // Position size of 333 at price 1_000_003 creates rounding scenarios
+    engine.accounts[user_idx as usize].position_size = 333;
+    engine.accounts[user_idx as usize].entry_price = 1_000_003;
+    engine.accounts[lp_idx as usize].position_size = -333;
+    engine.accounts[lp_idx as usize].entry_price = 1_000_003;
+
+    // Verify conservation before
+    assert!(engine.check_conservation(),
+            "TEST B: Conservation violated BEFORE panic_settle");
+
+    // Settle at a different price to realize rounding errors
+    let oracle_price = 1_500_007; // Prime number for maximum rounding
+    engine.panic_settle_all(oracle_price).unwrap();
+
+    // CRITICAL: Conservation must hold even with rounding
+    assert!(engine.check_conservation(),
+            "TEST B FAILED: Conservation violated after panic_settle_all. \
+             The conservation check should use >= to account for safe rounding surplus.");
+
+    // Verify all positions are closed
+    assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
+    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
+}
+
+/// Test B variant: Conservation with force_realize_losses rounding
+#[test]
+fn test_audit_b_conservation_after_force_realize_with_rounding() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup - do deposits first
+    engine.deposit(user_idx, 50_000).unwrap();
+    engine.deposit(lp_idx, 50_000).unwrap();
+
+    // Adjust insurance to be at threshold to trigger force_realize
+    // After account creation and deposits:
+    // - vault = account_fees + deposits = 2 + 100_000 = 100_002
+    // - insurance = account_fees = 2
+    // - capitals = 100_000
+    // Conservation: vault = sum(capital) + sum(pnl) + insurance
+    // 100_002 = 100_000 + 0 + 2 ✓
+    //
+    // Now set insurance to threshold (1000), adjust vault accordingly
+    engine.insurance_fund.balance = 1000;
+    engine.vault = 100_000 + 1000; // capitals + insurance
+
+    // Create positions with rounding-prone values
+    engine.accounts[user_idx as usize].position_size = 777;
+    engine.accounts[user_idx as usize].entry_price = 999_999;
+    engine.accounts[lp_idx as usize].position_size = -777;
+    engine.accounts[lp_idx as usize].entry_price = 999_999;
+
+    assert!(engine.check_conservation(), "Conservation before force_realize");
+
+    // Force realize at price that causes rounding
+    engine.force_realize_losses(1_234_567).unwrap();
+
+    assert!(engine.check_conservation(),
+            "TEST B FAILED: Conservation violated after force_realize_losses");
+}
+
+/// Test C: Reserved Insurance Spending Protection
+///
+/// Verifies that warmup_insurance_reserved properly protects the insurance
+/// fund from being spent in ADL. Insurance reserved for backing warmed
+/// profits must not be used to cover ADL losses.
+#[test]
+fn test_audit_c_reserved_insurance_not_spent_in_adl() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // Floor of 100
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let winner_idx = engine.add_user(1).unwrap();
+    let loser_idx = engine.add_user(1).unwrap();
+
+    // Setup: Insurance fund has balance above floor
+    engine.insurance_fund.balance = 500;
+    engine.vault = 500;
+
+    // Winner has positive PnL that will warm up
+    engine.deposit(winner_idx, 1_000).unwrap();
+    engine.accounts[winner_idx as usize].pnl = 200;
+    engine.accounts[winner_idx as usize].warmup_slope_per_step = 1000;
+    engine.accounts[winner_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+
+    // Loser has no PnL to haircut
+    engine.deposit(loser_idx, 1_000).unwrap();
+
+    // Warm up the winner's PnL (this should reserve insurance)
+    engine.settle_warmup_to_capital(winner_idx).unwrap();
+
+    let reserved_before_adl = engine.warmup_insurance_reserved;
+    assert!(reserved_before_adl > 0,
+            "Should have reserved insurance for warmed profits");
+
+    // Calculate spendable insurance (raw - reserved)
+    let raw_spendable = engine.insurance_spendable_raw();
+    let unreserved_spendable = engine.insurance_spendable_unreserved();
+
+    // The reserved amount should protect insurance
+    assert!(unreserved_spendable < raw_spendable,
+            "Unreserved spendable should be less than raw spendable");
+
+    // Now apply ADL with a loss larger than unreserved spendable
+    // This should NOT touch the reserved portion
+    let insurance_before = engine.insurance_fund.balance;
+    let large_loss = unreserved_spendable + 100; // More than unreserved
+
+    engine.apply_adl(large_loss).unwrap();
+
+    // Check that reserved amount was protected
+    let insurance_after = engine.insurance_fund.balance;
+    let insurance_spent = insurance_before.saturating_sub(insurance_after);
+
+    // Insurance spent should be at most the unreserved amount
+    // (remaining loss goes to loss_accum, not from reserved insurance)
+    assert!(insurance_spent <= unreserved_spendable,
+            "TEST C FAILED: ADL spent reserved insurance! \
+             Spent: {}, Unreserved was: {}, Reserved: {}",
+            insurance_spent, unreserved_spendable, reserved_before_adl);
+
+    // The remaining loss should be in loss_accum
+    assert!(engine.loss_accum > 0,
+            "Excess loss should go to loss_accum, not reserved insurance");
+
+    // Reserved should not decrease
+    assert!(engine.warmup_insurance_reserved >= reserved_before_adl,
+            "TEST C FAILED: Reserved insurance decreased during ADL");
+}
+
+/// Test C variant: Verify insurance floor + reserved is protected
+#[test]
+fn test_audit_c_insurance_floor_plus_reserved_protected() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 200; // Floor
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: Insurance = 500, floor = 200, so raw_spendable = 300
+    engine.insurance_fund.balance = 500;
+    engine.vault = 500;
+
+    engine.deposit(user_idx, 5_000).unwrap();
+    engine.accounts[user_idx as usize].pnl = 100;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 10;
+
+    // Warm up PnL - this will reserve some insurance
+    engine.settle_warmup_to_capital(user_idx).unwrap();
+
+    let reserved = engine.warmup_insurance_reserved;
+    let floor = params.risk_reduction_threshold;
+
+    // Apply massive ADL
+    engine.apply_adl(1000).unwrap();
+
+    // Insurance should never go below floor + reserved
+    let min_protected = floor.saturating_add(reserved);
+    assert!(engine.insurance_fund.balance >= min_protected.saturating_sub(1), // Allow 1 for rounding
+            "TEST C FAILED: Insurance {} fell below floor + reserved = {}",
+            engine.insurance_fund.balance, min_protected);
+}
+

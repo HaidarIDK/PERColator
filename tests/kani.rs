@@ -2008,3 +2008,209 @@ fn warmup_budget_d_paused_settlement_time_invariant() {
             "WB-D: Vested amount must be time-invariant when warmup is paused");
 }
 
+// ============================================================================
+// AUDIT-MANDATED PROOFS: Double-Settlement Fix Verification
+// These proofs were mandated by the security audit to verify the fix for the
+// double-settlement bug in settle_warmup_to_capital when warmup is paused.
+// ============================================================================
+
+/// Proof: settle_warmup_to_capital is idempotent when warmup is paused
+///
+/// This proves that calling settle_warmup_to_capital twice when warmup is paused
+/// produces the same result as calling it once. The fix ensures that
+/// warmup_started_at_slot is always updated to effective_slot, preventing
+/// double-settlement of the same matured PnL.
+///
+/// Bug scenario (before fix):
+/// 1. User has positive PnL warming up with slope S
+/// 2. Warmup paused at slot P
+/// 3. At slot T > P, user calls settle - settles P*S of PnL
+/// 4. Without fix: warmup_started_at_slot not updated, so second call would
+///    settle another P*S, effectively double-settling
+/// 5. With fix: warmup_started_at_slot = P after first settle, so second call
+///    has elapsed=0 and settles nothing
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_settle_idempotent_when_paused() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Symbolic inputs
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let pause_slot: u64 = kani::any();
+    let settle_slot: u64 = kani::any();
+    let insurance: u128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > 0 && pnl < 5_000); // Positive PnL for warmup
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(pause_slot > 0 && pause_slot < 100);
+    kani::assume(settle_slot >= pause_slot && settle_slot < 200);
+    kani::assume(insurance > 1_000 && insurance < 50_000);
+
+    // Setup account with positive PnL and warmup
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+    // Setup insurance for warmup budget
+    engine.insurance_fund.balance = insurance;
+    engine.vault = capital + insurance;
+
+    // Pause warmup
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = pause_slot;
+    engine.current_slot = settle_slot;
+
+    // First settlement
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // Capture state after first settlement
+    let capital_after_first = engine.accounts[user_idx as usize].capital;
+    let pnl_after_first = engine.accounts[user_idx as usize].pnl;
+    let warmed_pos_after_first = engine.warmed_pos_total;
+    let warmed_neg_after_first = engine.warmed_neg_total;
+    let reserved_after_first = engine.warmup_insurance_reserved;
+
+    // Second settlement - should be idempotent
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: All state must be identical after second settlement
+    assert!(engine.accounts[user_idx as usize].capital == capital_after_first,
+            "AUDIT PROOF FAILED: Capital changed on second settlement (double-settlement bug)");
+    assert!(engine.accounts[user_idx as usize].pnl == pnl_after_first,
+            "AUDIT PROOF FAILED: PnL changed on second settlement (double-settlement bug)");
+    assert!(engine.warmed_pos_total == warmed_pos_after_first,
+            "AUDIT PROOF FAILED: warmed_pos_total changed (double-settlement bug)");
+    assert!(engine.warmed_neg_total == warmed_neg_after_first,
+            "AUDIT PROOF FAILED: warmed_neg_total changed (double-settlement bug)");
+    assert!(engine.warmup_insurance_reserved == reserved_after_first,
+            "AUDIT PROOF FAILED: reserved changed (double-settlement bug)");
+}
+
+/// Proof: warmup_started_at_slot is updated to effective_slot after settlement
+///
+/// This proves the specific fix: that warmup_started_at_slot is always set to
+/// effective_slot (min(current_slot, pause_slot)) after settle_warmup_to_capital,
+/// which prevents double-settlement.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_warmup_started_at_updated_to_effective_slot() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Symbolic inputs
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let started_at: u64 = kani::any();
+    let pause_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(pnl > 0 && pnl < 5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(started_at < 50);
+    kani::assume(pause_slot >= started_at && pause_slot < 100);
+    kani::assume(current_slot >= pause_slot && current_slot < 200);
+
+    // Setup
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = started_at;
+    engine.insurance_fund.balance = 10_000;
+    engine.vault = 10_000;
+
+    // Pause warmup
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = pause_slot;
+    engine.current_slot = current_slot;
+
+    // Calculate expected effective_slot
+    let effective_slot = core::cmp::min(current_slot, pause_slot);
+
+    // Settle
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: warmup_started_at_slot must equal effective_slot
+    assert!(engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
+            "AUDIT PROOF FAILED: warmup_started_at_slot not updated to effective_slot");
+}
+
+/// Proof: Multiple settlements when paused all produce same result
+///
+/// This strengthens the idempotence proof by verifying that any number of
+/// settlements when paused produces the same result as the first settlement.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn audit_multiple_settlements_when_paused_idempotent() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Symbolic inputs
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let pause_slot: u64 = kani::any();
+    let slot1: u64 = kani::any();
+    let slot2: u64 = kani::any();
+    let slot3: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(pnl > 0 && pnl < 3_000);
+    kani::assume(slope > 0 && slope < 50);
+    kani::assume(pause_slot > 5 && pause_slot < 50);
+    kani::assume(slot1 >= pause_slot && slot1 < 100);
+    kani::assume(slot2 > slot1 && slot2 < 150);
+    kani::assume(slot3 > slot2 && slot3 < 200);
+
+    // Setup
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.insurance_fund.balance = 10_000;
+    engine.vault = 10_000;
+
+    // Pause warmup
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = pause_slot;
+
+    // First settlement at slot1
+    engine.current_slot = slot1;
+    let _ = engine.settle_warmup_to_capital(user_idx);
+    let state_after_first = (
+        engine.accounts[user_idx as usize].capital,
+        engine.accounts[user_idx as usize].pnl,
+        engine.warmed_pos_total,
+    );
+
+    // Second settlement at slot2
+    engine.current_slot = slot2;
+    let _ = engine.settle_warmup_to_capital(user_idx);
+    let state_after_second = (
+        engine.accounts[user_idx as usize].capital,
+        engine.accounts[user_idx as usize].pnl,
+        engine.warmed_pos_total,
+    );
+
+    // Third settlement at slot3
+    engine.current_slot = slot3;
+    let _ = engine.settle_warmup_to_capital(user_idx);
+    let state_after_third = (
+        engine.accounts[user_idx as usize].capital,
+        engine.accounts[user_idx as usize].pnl,
+        engine.warmed_pos_total,
+    );
+
+    // PROOF: All states must be identical
+    assert!(state_after_first == state_after_second,
+            "AUDIT PROOF FAILED: State changed between first and second settlement");
+    assert!(state_after_second == state_after_third,
+            "AUDIT PROOF FAILED: State changed between second and third settlement");
+}
+
