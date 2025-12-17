@@ -28,8 +28,6 @@ fn test_params() -> RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
-        liquidation_fee_bps: 50,
-        insurance_fee_share_bps: 5000,
         max_accounts: 8, // Match Kani's MAX_ACCOUNTS
         account_fee_bps: 10000,
         risk_reduction_threshold: 0,
@@ -491,39 +489,6 @@ fn saturating_arithmetic_prevents_overflow() {
     assert!(result <= a,
             "Saturating sub should not underflow");
 }
-
-// ============================================================================
-// Liquidation Safety
-// SLOW_PROOF: Liquidation involves complex margin calculations
-// ============================================================================
-
-// Previously slow - now fast with 8 accounts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn liquidation_closes_position() {
-    let mut engine = Box::new(RiskEngine::new(test_params()));
-    let user_idx = engine.add_user(1).unwrap();
-    let keeper_idx = engine.add_user(1).unwrap();
-
-    let principal: u128 = kani::any();
-    let position: i128 = kani::any();
-
-    kani::assume(principal > 0 && principal < 1_000);
-    kani::assume(position != 0 && position > -10_000 && position < 10_000);
-
-    engine.accounts[user_idx as usize].capital = principal;
-    engine.accounts[user_idx as usize].position_size = position;
-    engine.accounts[user_idx as usize].entry_price = 1_000_000;
-    engine.vault = principal;
-
-    let _ = engine.liquidate_account(user_idx, keeper_idx, 1_000_000);
-
-    // After liquidation, position should be closed (or at least reduced)
-    assert!(engine.accounts[user_idx as usize].position_size.abs() <= position.abs(),
-            "Liquidation should reduce or close position");
-}
-
 
 // ============================================================================
 // Edge Cases
@@ -1288,40 +1253,6 @@ fn i1_lp_adl_never_reduces_capital() {
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn i1_lp_liquidation_never_reduces_capital() {
-    // I1 for LPs: Liquidation must NEVER reduce LP capital
-    // LP capital can only be reduced by explicit withdrawals, never by liquidation
-
-    let mut engine = Box::new(RiskEngine::new(test_params()));
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-    let keeper_idx = engine.add_user(1).unwrap();
-
-    let capital: u128 = kani::any();
-    let position: i128 = kani::any();
-    let oracle_price: u64 = kani::any();
-
-    kani::assume(capital > 0 && capital < 10_000);
-    kani::assume(position != 0 && position > -50_000 && position < 50_000);
-    kani::assume(oracle_price > 100_000 && oracle_price < 10_000_000); // $0.10 to $10
-
-    engine.accounts[lp_idx as usize].capital = capital;
-    engine.accounts[lp_idx as usize].position_size = position;
-    engine.accounts[lp_idx as usize].entry_price = 1_000_000; // $1
-    engine.vault = capital;
-
-    let capital_before = engine.accounts[lp_idx as usize].capital;
-
-    let _ = engine.liquidate_account(lp_idx, keeper_idx, oracle_price);
-
-    assert!(engine.accounts[lp_idx as usize].capital == capital_before,
-            "I1-LP: Liquidation must NEVER reduce LP capital");
-}
-
-
-// Previously slow - now fast with 8 accounts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
 fn adl_is_proportional_for_user_and_lp() {
     // Proportional ADL Fairness: Users and LPs with equal unwrapped PNL
     // should receive equal haircuts
@@ -1683,6 +1614,186 @@ fn proof_risk_increasing_trades_rejected() {
     // PROOF: If trade increases absolute exposure, it must be rejected in risk mode
     if user_increases {
         assert!(result.is_err(), "Risk-increasing trades must fail in risk mode");
+    }
+}
+
+// ============================================================================
+// Panic Settle Proofs
+// These prove key properties of the panic_settle_all function
+// ============================================================================
+
+// Proof PS1: panic_settle_all closes all positions
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn panic_settle_closes_all_positions() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_pos: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(user_pos != 0); // Must have a position
+    kani::assume(user_pos != i128::MIN);
+    kani::assume(user_pos.abs() < 100_000);
+    kani::assume(entry_price > 0 && entry_price < 100_000_000);
+    kani::assume(oracle_price > 0 && oracle_price < 100_000_000);
+
+    // Setup opposing positions (LP is counterparty)
+    engine.accounts[user_idx as usize].position_size = user_pos;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.accounts[user_idx as usize].capital = 100_000;
+
+    engine.accounts[lp_idx as usize].position_size = -user_pos;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+    engine.accounts[lp_idx as usize].capital = 100_000;
+
+    engine.vault = 200_000;
+    engine.insurance_fund.balance = 10_000;
+
+    // Call panic_settle_all
+    let result = engine.panic_settle_all(oracle_price);
+
+    // PROOF: If successful, all positions must be zero
+    if result.is_ok() {
+        assert!(engine.accounts[user_idx as usize].position_size == 0,
+                "PS1: User position must be closed after panic settle");
+        assert!(engine.accounts[lp_idx as usize].position_size == 0,
+                "PS1: LP position must be closed after panic settle");
+    }
+}
+
+// Proof PS2: panic_settle_all clamps all negative PNL to zero
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn panic_settle_clamps_negative_pnl() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_pos: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    let initial_pnl: i128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(user_pos != i128::MIN);
+    kani::assume(user_pos.abs() < 100_000);
+    kani::assume(entry_price > 0 && entry_price < 100_000_000);
+    kani::assume(oracle_price > 0 && oracle_price < 100_000_000);
+    kani::assume(initial_pnl > -100_000 && initial_pnl < 100_000);
+
+    // Setup positions
+    engine.accounts[user_idx as usize].position_size = user_pos;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.accounts[user_idx as usize].pnl = initial_pnl;
+    engine.accounts[user_idx as usize].capital = 100_000;
+
+    engine.accounts[lp_idx as usize].position_size = -user_pos;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+    engine.accounts[lp_idx as usize].pnl = -initial_pnl; // Opposite for zero-sum
+    engine.accounts[lp_idx as usize].capital = 100_000;
+
+    engine.vault = 200_000;
+    engine.insurance_fund.balance = 50_000;
+
+    // Call panic_settle_all
+    let result = engine.panic_settle_all(oracle_price);
+
+    // PROOF: If successful, all PNLs must be >= 0
+    if result.is_ok() {
+        assert!(engine.accounts[user_idx as usize].pnl >= 0,
+                "PS2: User PNL must be >= 0 after panic settle");
+        assert!(engine.accounts[lp_idx as usize].pnl >= 0,
+                "PS2: LP PNL must be >= 0 after panic settle");
+    }
+}
+
+// Proof PS3: panic_settle_all always enters risk-reduction-only mode
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn panic_settle_enters_risk_mode() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let oracle_price: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(oracle_price > 0 && oracle_price < 100_000_000);
+
+    // Setup minimal account
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.vault = 10_000;
+
+    // Ensure we're not in risk mode initially
+    assert!(!engine.risk_reduction_only, "Should not start in risk mode");
+
+    // Call panic_settle_all
+    let result = engine.panic_settle_all(oracle_price);
+
+    // PROOF: After panic_settle, we must be in risk-reduction-only mode
+    if result.is_ok() {
+        assert!(engine.risk_reduction_only,
+                "PS3: Must be in risk-reduction-only mode after panic settle");
+        assert!(engine.warmup_paused,
+                "PS3: Warmup must be paused after panic settle");
+    }
+}
+
+// Proof PS4: panic_settle_all preserves conservation (with rounding compensation)
+// SLOW_PROOF: Uses apply_adl which iterates over all accounts
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn panic_settle_preserves_conservation() {
+    let mut engine = Box::new(RiskEngine::new(test_params()));
+    let user_idx = engine.add_user(1).unwrap();
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    let user_pos: i128 = kani::any();
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(user_pos != i128::MIN);
+    kani::assume(user_pos.abs() < 10_000);
+    kani::assume(entry_price > 100_000 && entry_price < 10_000_000);
+    kani::assume(oracle_price > 100_000 && oracle_price < 10_000_000);
+    kani::assume(user_capital > 1_000 && user_capital < 50_000);
+    kani::assume(lp_capital > 1_000 && lp_capital < 50_000);
+
+    // Setup zero-sum positions at same entry price
+    engine.accounts[user_idx as usize].position_size = user_pos;
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.accounts[user_idx as usize].capital = user_capital;
+
+    engine.accounts[lp_idx as usize].position_size = -user_pos;
+    engine.accounts[lp_idx as usize].entry_price = entry_price;
+    engine.accounts[lp_idx as usize].capital = lp_capital;
+
+    // Set vault to match total capital + insurance (account creation fees)
+    let total_capital = user_capital + lp_capital;
+    engine.vault = total_capital;
+    engine.insurance_fund.balance = 0; // Reset for clarity
+
+    // Verify conservation before
+    // Note: We manually set insurance to 0 and vault to match, so conservation should hold
+    // The add_user/add_lp fees are already accounted for in the initial setup
+
+    // Call panic_settle_all
+    let result = engine.panic_settle_all(oracle_price);
+
+    // PROOF: Conservation must hold after panic_settle
+    if result.is_ok() {
+        assert!(engine.check_conservation(),
+                "PS4: Conservation must hold after panic settle");
     }
 }
 

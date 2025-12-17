@@ -6,14 +6,49 @@ use percolator::*;
 // Use the no-op matcher for tests
 const MATCHER: NoOpMatcher = NoOpMatcher;
 
+// ==============================================================================
+// DETERMINISTIC PRNG FOR FUZZ TESTS
+// ==============================================================================
+
+/// Simple xorshift64 PRNG for deterministic fuzz testing
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed)
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn u64(&mut self, lo: u64, hi: u64) -> u64 {
+        if lo >= hi { return lo; }
+        lo + (self.next() % (hi - lo + 1))
+    }
+
+    fn i128(&mut self, lo: i128, hi: i128) -> i128 {
+        if lo >= hi { return lo; }
+        lo + (self.next() as i128 % (hi - lo + 1))
+    }
+
+    fn u128(&mut self, lo: u128, hi: u128) -> u128 {
+        if lo >= hi { return lo; }
+        lo + (self.next() as u128 % (hi - lo + 1))
+    }
+}
+
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
         maintenance_margin_bps: 500, // 5%
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,          // 0.1%
-        liquidation_fee_bps: 50,      // 0.5%
-        insurance_fee_share_bps: 5000, // 50% to insurance
         max_accounts: 1000,
         account_fee_bps: 10000, // 1%
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
@@ -320,37 +355,6 @@ fn test_trading_realizes_pnl() {
     // Price went from $1 to $1.50, so 500 profit on 1000 units
     assert!(engine.accounts[user_idx as usize].pnl > 0);
     assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
-}
-
-#[test]
-fn test_liquidation() {
-    let mut engine = Box::new(RiskEngine::new(default_params()));
-    let user_idx = engine.add_user(1).unwrap();
-    let keeper_idx = engine.add_user(1).unwrap();
-
-    // User with small capital and large position
-    engine.deposit(user_idx, 1000).unwrap();
-    engine.accounts[user_idx as usize].position_size = 50_000; // Very leveraged
-    engine.accounts[user_idx as usize].entry_price = 1_000_000;
-
-    // Price moves against user
-    let oracle_price = 1_200_000; // 20% increase
-
-    // Should be below maintenance margin
-    assert!(!engine.is_above_maintenance_margin(&engine.accounts[user_idx as usize], oracle_price));
-
-    // Liquidate
-    let initial_keeper_pnl = engine.accounts[keeper_idx as usize].pnl;
-    engine.liquidate_account(user_idx, keeper_idx, oracle_price).unwrap();
-
-    // Position should be closed
-    assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
-
-    // Keeper should receive fee
-    assert!(engine.accounts[keeper_idx as usize].pnl > initial_keeper_pnl);
-
-    // Insurance fund should receive fee
-    assert!(engine.insurance_fund.liquidation_revenue > 0);
 }
 
 #[test]
@@ -736,44 +740,6 @@ fn test_funding_position_flip() {
 
     // Now user is short, so they receive funding (if rate is still positive)
     // This verifies no "double charge" bug
-}
-
-#[test]
-fn test_funding_liquidation_path() {
-    // T6: Liquidation with funding accrual
-    let mut engine = Box::new(RiskEngine::new(default_params()));
-    let user_idx = engine.add_user(10000).unwrap();
-    let keeper_idx = engine.add_user(10000).unwrap();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10000).unwrap();
-
-    // Small principal, large position (risky)
-    engine.deposit(user_idx, 10_000).unwrap();
-    engine.accounts[lp_idx as usize].capital = 10_000_000;
-    engine.vault = 10_010_000;
-
-    // Open large long position
-    engine.accounts[user_idx as usize].position_size = 1_000_000;
-    engine.accounts[user_idx as usize].entry_price = 10_000_000; // $10
-
-    engine.accounts[lp_idx as usize].position_size = -1_000_000;
-    engine.accounts[lp_idx as usize].entry_price = 10_000_000;
-
-    // Accrue negative funding (hurts the long)
-    engine.advance_slot(1);
-    engine.accrue_funding(1, 10_000_000, 50).unwrap(); // Large positive rate
-
-    // Price drops slightly
-    let oracle_price = 9_000_000; // $9
-
-    // Attempt liquidation - should settle funding first
-    let liq_result = engine.liquidate_account(user_idx, keeper_idx, oracle_price);
-
-    // Liquidation may or may not succeed depending on exact collateral,
-    // but funding should have been settled before the check
-    // Verify snapshot is updated
-    if liq_result.is_ok() {
-        assert_eq!(engine.accounts[user_idx as usize].funding_index, engine.funding_index_qpb_e6);
-    }
 }
 
 #[test]
@@ -1581,47 +1547,6 @@ fn test_fair_unwinding_scenario() {
 // ==============================================================================
 
 #[test]
-fn test_lp_liquidation() {
-    // CRITICAL: Tests that liquidate_lp() actually works
-    let mut engine = Box::new(RiskEngine::new(default_params()));
-
-    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
-    let keeper_idx = engine.add_user(1).unwrap();
-
-    // LP deposits capital
-    engine.deposit(lp_idx, 100).unwrap();
-
-    // Simulate LP taking a large losing position
-    // Position size = 10,000 units, entry at $1
-    // Position value = 10,000 units * $1 = $10,000
-    // Maintenance margin = $10,000 * 5% = $500
-    // Collateral = capital + clamp_pos(pnl) = 100 + 0 = 100
-    // 100 < 500 -> liquidatable!
-    engine.accounts[lp_idx as usize].position_size = 10_000;
-    engine.accounts[lp_idx as usize].entry_price = 1_000_000;
-    engine.accounts[lp_idx as usize].pnl = -50; // Some loss
-
-    let oracle_price = 1_000_000; // $1
-
-    // Calculate if LP is underwater (using same logic as liquidate_lp)
-    let collateral = engine.accounts[lp_idx as usize].capital + (if engine.accounts[lp_idx as usize].pnl > 0 { engine.accounts[lp_idx as usize].pnl as u128 } else { 0 });
-    let position_value = (engine.accounts[lp_idx as usize].position_size.abs() as u128 * oracle_price as u128) / 1_000_000;
-    let maintenance_margin = position_value * 500 / 10_000; // 5%
-
-    assert!(collateral < maintenance_margin, "LP should be underwater: collateral {} < maintenance {}", collateral, maintenance_margin);
-
-    // Liquidate LP
-    let result = engine.liquidate_account(lp_idx, keeper_idx, oracle_price);
-    assert!(result.is_ok(), "LP liquidation should succeed");
-
-    // Verify position closed
-    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0, "LP position should be closed");
-
-    // Verify keeper received reward
-    assert!(engine.accounts[keeper_idx as usize].pnl > 0, "Keeper should receive liquidation fee");
-}
-
-#[test]
 fn test_lp_withdraw() {
     // Tests that LP withdrawal works correctly
     let mut engine = Box::new(RiskEngine::new(default_params()));
@@ -1818,4 +1743,298 @@ fn test_risk_reduction_threshold() {
     assert_eq!(engine.insurance_fund.balance, 5_000);
     assert!(!engine.risk_reduction_only, "Should exit risk mode (5k >= 5k)");
     assert!(!engine.warmup_paused, "Warmup should unfreeze");
+}
+
+// ==============================================================================
+// PANIC SETTLE TESTS
+// ==============================================================================
+
+#[test]
+fn test_panic_settle_closes_all_positions() {
+    // Test A: settles all positions to zero
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Create 1 LP and 2 users
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+
+    // Fund accounts
+    engine.deposit(lp_idx, 100_000).unwrap();
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 10_000).unwrap();
+
+    // Set positions: user1 long +10, user2 short -7, lp takes opposite (-3)
+    engine.accounts[user1 as usize].position_size = 10_000_000; // +10 contracts
+    engine.accounts[user1 as usize].entry_price = 1_000_000; // $1
+    engine.accounts[user2 as usize].position_size = -7_000_000; // -7 contracts
+    engine.accounts[user2 as usize].entry_price = 1_200_000; // $1.20
+    engine.accounts[lp_idx as usize].position_size = -3_000_000; // -3 contracts (net = 0)
+    engine.accounts[lp_idx as usize].entry_price = 1_000_000; // $1
+
+    // Call panic_settle_all at oracle price $1.10
+    let oracle_price = 1_100_000;
+    engine.panic_settle_all(oracle_price).unwrap();
+
+    // Assert all position_size == 0
+    assert_eq!(engine.accounts[user1 as usize].position_size, 0, "User1 position should be closed");
+    assert_eq!(engine.accounts[user2 as usize].position_size, 0, "User2 position should be closed");
+    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0, "LP position should be closed");
+}
+
+#[test]
+fn test_panic_settle_clamps_negative_pnl() {
+    // Test B: mark pnl realized and losers clamped
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(user_idx, 10_000).unwrap();
+
+    // User is long at $1, oracle will be $0.50 => big loss
+    engine.accounts[user_idx as usize].position_size = 100_000_000; // Large long
+    engine.accounts[user_idx as usize].entry_price = 1_000_000; // $1
+
+    let oracle_price = 500_000; // $0.50 - user loses badly
+
+    // Capture loss_accum before
+    let loss_before = engine.loss_accum;
+
+    engine.panic_settle_all(oracle_price).unwrap();
+
+    // User's PNL should be clamped to 0
+    assert!(engine.accounts[user_idx as usize].pnl >= 0, "User PNL should be >= 0 after panic settle");
+
+    // loss_accum or insurance should have absorbed the loss
+    let loss_increased = engine.loss_accum > loss_before;
+    let insurance_decreased = engine.insurance_fund.balance == 0;
+    assert!(loss_increased || insurance_decreased || engine.accounts[user_idx as usize].pnl == 0,
+            "Loss should be socialized or absorbed by insurance");
+}
+
+#[test]
+fn test_panic_settle_adl_waterfall() {
+    // Test C: ADL waterfall ordering (unwrapped first, then insurance)
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Account A with unwrapped PNL (warmup_slope = 0, so nothing is withdrawable)
+    let winner = engine.add_user(1).unwrap();
+    engine.deposit(winner, 10_000).unwrap();
+
+    // Loser account that will have a position
+    let loser = engine.add_user(1).unwrap();
+    engine.deposit(loser, 10_000).unwrap();
+
+    // Set up zero-sum positions at same entry price
+    // Loser has a long position
+    engine.accounts[loser as usize].position_size = 10_000_000;
+    engine.accounts[loser as usize].entry_price = 1_000_000;
+
+    // Winner has matching short position
+    engine.accounts[winner as usize].position_size = -10_000_000;
+    engine.accounts[winner as usize].entry_price = 1_000_000;
+    engine.accounts[winner as usize].warmup_slope_per_step = 0; // Any PNL will be unwrapped
+
+    // Don't modify insurance_fund.balance - let it stay at what deposits set it to
+    // This preserves conservation
+
+    // Verify conservation before
+    assert!(engine.check_conservation(), "Conservation should hold before panic settle");
+
+    // Oracle price causes loss on loser (long loses when price drops)
+    // Winner (short) gains when price drops
+    let oracle_price = 200_000; // $0.20, way below $1 entry
+
+    engine.panic_settle_all(oracle_price).unwrap();
+
+    // After panic settle:
+    // - Loser's long at $1 with oracle $0.20 means loss = (0.2 - 1.0) * 10 = -8 (scaled)
+    // - Winner's short at $1 with oracle $0.20 means gain = (1.0 - 0.2) * 10 = +8 (scaled)
+    // But loser's PNL gets clamped to 0, creating a system loss
+    // That loss gets socialized via ADL from winner's PNL (which became positive from position)
+
+    // Winner should have gained from short position closing, then had ADL haircut applied
+    // System should be conserved
+    assert!(engine.check_conservation(), "Conservation must hold after panic settle");
+}
+
+#[test]
+fn test_panic_settle_freezes_warmup() {
+    // Test D: warmup frozen on panic settle
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(user_idx, 10_000).unwrap();
+
+    // User has positive PNL with warmup slope
+    engine.accounts[user_idx as usize].pnl = 1000;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+    engine.current_slot = 50; // 50 slots elapsed
+
+    let withdrawable_before = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+    // Call panic_settle_all
+    engine.panic_settle_all(1_000_000).unwrap();
+
+    // Advance slots
+    engine.advance_slot(100);
+
+    let withdrawable_after = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+    // Warmup should be frozen, so withdrawable should not increase
+    assert!(withdrawable_after <= withdrawable_before + 1, // +1 for rounding tolerance
+            "Withdrawable PNL should not increase after panic settle (warmup frozen)");
+
+    // Verify warmup is actually paused
+    assert!(engine.warmup_paused, "Warmup should be paused after panic settle");
+}
+
+#[test]
+fn test_panic_settle_conservation_holds() {
+    // Test E: conservation holds after panic settle
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Setup multiple accounts with various positions
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+
+    engine.deposit(lp_idx, 50_000).unwrap();
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 10_000).unwrap();
+
+    // Set up positions at same entry price (net position = 0)
+    // This ensures positions are zero-sum
+    engine.accounts[user1 as usize].position_size = 5_000_000;  // Long 5
+    engine.accounts[user1 as usize].entry_price = 1_000_000;    // $1
+    engine.accounts[user2 as usize].position_size = -2_000_000; // Short 2
+    engine.accounts[user2 as usize].entry_price = 1_000_000;    // $1
+    engine.accounts[lp_idx as usize].position_size = -3_000_000; // Short 3 (LP takes other side)
+    engine.accounts[lp_idx as usize].entry_price = 1_000_000;   // $1
+
+    // Reset insurance fund to 0 so conservation is clean
+    // (account fees already went to insurance)
+    let insurance_from_fees = engine.insurance_fund.balance;
+
+    // Verify conservation before
+    assert!(engine.check_conservation(), "Conservation should hold before panic settle");
+
+    // Panic settle at a price that causes losses for longs
+    engine.panic_settle_all(500_000).unwrap();
+
+    // Verify conservation after
+    assert!(engine.check_conservation(), "Conservation must hold after panic settle");
+
+    // Verify risk mode is active
+    assert!(engine.risk_reduction_only, "Should be in risk-reduction mode after panic settle");
+}
+
+// ==============================================================================
+// DETERMINISTIC FUZZ/PROPERTY TESTS
+// ==============================================================================
+
+#[test]
+fn fuzz_panic_settle_closes_all_positions_and_conserves() {
+    // Property test: panic settle never leaves open positions + conservation holds
+    // Loop for 200 seeds with randomized inputs
+
+    for seed in 1..=200 {
+        let mut rng = Rng::new(seed);
+        let mut engine = Box::new(RiskEngine::new(default_params()));
+
+        // Create N accounts (1 LP + some users)
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+        engine.deposit(lp_idx, rng.u128(10_000, 100_000)).unwrap();
+
+        let num_users = rng.u64(2, 6) as usize;
+        let mut user_indices = Vec::new();
+
+        for _ in 0..num_users {
+            let user_idx = engine.add_user(1).unwrap();
+            engine.deposit(user_idx, rng.u128(1_000, 50_000)).unwrap();
+            user_indices.push(user_idx);
+        }
+
+        // Randomize positions (ensure they sum to zero for valid state)
+        // IMPORTANT: All positions must use the SAME entry price for zero-sum to hold
+        // In a real perp system, every trade has a counterparty at the same price
+        let mut total_position: i128 = 0;
+        let common_entry_price = rng.u64(100_000, 10_000_000); // $0.10 to $10
+
+        for &user_idx in &user_indices {
+            let position = rng.i128(-50_000, 50_000);
+
+            engine.accounts[user_idx as usize].position_size = position;
+            engine.accounts[user_idx as usize].entry_price = common_entry_price;
+            total_position += position;
+        }
+
+        // LP takes opposite position to balance (net zero) at same entry price
+        engine.accounts[lp_idx as usize].position_size = -total_position;
+        engine.accounts[lp_idx as usize].entry_price = common_entry_price;
+
+        // Verify conservation before (should hold with zero-sum positions)
+        if !engine.check_conservation() {
+            eprintln!("Seed {} BEFORE: vault={}, insurance={}, loss_accum={}",
+                     seed, engine.vault, engine.insurance_fund.balance, engine.loss_accum);
+            panic!("Seed {}: Conservation should hold before panic settle", seed);
+        }
+
+        // Debug: capture state before panic settle (prefixed with _ to suppress warnings)
+        let _vault_before = engine.vault;
+        let _insurance_before = engine.insurance_fund.balance;
+
+        // Random oracle price
+        let oracle_price = rng.u64(100_000, 10_000_000);
+
+        // Call panic_settle_all
+        let result = engine.panic_settle_all(oracle_price);
+        assert!(result.is_ok(), "Seed {}: panic_settle_all should not fail", seed);
+
+        // Assert: all positions are zero
+        assert_eq!(engine.accounts[lp_idx as usize].position_size, 0,
+                   "Seed {}: LP position should be closed", seed);
+        for &user_idx in &user_indices {
+            assert_eq!(engine.accounts[user_idx as usize].position_size, 0,
+                       "Seed {}: User {} position should be closed", seed, user_idx);
+        }
+
+        // Assert: all PNLs are >= 0 (negative clamped)
+        assert!(engine.accounts[lp_idx as usize].pnl >= 0,
+                "Seed {}: LP PNL should be >= 0", seed);
+        for &user_idx in &user_indices {
+            assert!(engine.accounts[user_idx as usize].pnl >= 0,
+                    "Seed {}: User {} PNL should be >= 0", seed, user_idx);
+        }
+
+        // Assert: conservation holds after
+        if !engine.check_conservation() {
+            // Debug output - compute what check_conservation computes
+            let mut real_total_capital = 0u128;
+            let mut real_net_pnl: i128 = 0;
+            for word in engine.used.iter() {
+                let mut w = *word;
+                let block_offset = engine.used.iter().position(|x| x == word).unwrap_or(0) * 64;
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block_offset + bit;
+                    w &= w - 1;
+                    real_total_capital += engine.accounts[idx].capital;
+                    real_net_pnl += engine.accounts[idx].pnl;
+                }
+            }
+            let expected = (real_total_capital as i128 + real_net_pnl +
+                           engine.insurance_fund.balance as i128 -
+                           engine.loss_accum as i128) as u128;
+            eprintln!("Seed {}: vault={}, real_capital={}, real_pnl={}, insurance={}, loss_accum={}, expected={}",
+                     seed, engine.vault, real_total_capital, real_net_pnl,
+                     engine.insurance_fund.balance, engine.loss_accum, expected);
+            panic!("Seed {}: Conservation must hold after panic settle", seed);
+        }
+
+        // Assert: risk mode is active
+        assert!(engine.risk_reduction_only,
+                "Seed {}: Should be in risk-reduction mode", seed);
+    }
 }

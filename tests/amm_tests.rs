@@ -3,17 +3,12 @@
 
 use percolator::*;
 
-// Use the Vec-based implementation for tests
-
-
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
         maintenance_margin_bps: 500,      // 5%
         initial_margin_bps: 1000,         // 10%
         trading_fee_bps: 10,              // 0.1%
-        liquidation_fee_bps: 50,          // 0.5%
-        insurance_fee_share_bps: 5000,    // 50% to insurance
         max_accounts: 1000,
         account_fee_bps: 10000,           // 1%
         risk_reduction_threshold: 0,      // Default: only trigger on full depletion
@@ -152,32 +147,26 @@ fn test_e2e_complete_user_journey() {
         assert!(engine.accounts[alice as usize].capital + clamp_pos_i128(engine.accounts[alice as usize].pnl) < 100);
     }
 
-    // === Phase 6: Bob Gets Liquidated ===
+    // === Phase 6: Panic Settle All ===
 
-    // Price moves to $2.00 (Bob is heavily underwater on short from $1.20)
-    // Bob had short -3000 at entry $1.00, price now $2.00
-    // Loss = (2.00 - 1.00) × 3000 = 3000 loss
-    let liquidation_price = 2_000_000;
+    // Price moves to $2.00, causing significant losses
+    let settle_price = 2_000_000;
 
-    // Create keeper account
-    let keeper = engine.add_user(10_000).unwrap();
-    engine.deposit(keeper, 1_000).unwrap();
+    // Trigger panic settlement at the oracle price
+    engine.panic_settle_all(settle_price).unwrap();
 
-    // Try to liquidate Bob (will only work if underwater)
-    engine.liquidate_account(bob, keeper, liquidation_price).unwrap();
+    // All positions should be closed
+    assert_eq!(engine.accounts[alice as usize].position_size, 0, "Alice position should be closed");
+    assert_eq!(engine.accounts[bob as usize].position_size, 0, "Bob position should be closed");
+    assert_eq!(engine.accounts[lp as usize].position_size, 0, "LP position should be closed");
 
-    // Check if Bob actually got liquidated (position closed) or was above margin
-    if engine.accounts[bob as usize].position_size == 0 {
-        // Bob was liquidated - position closed
-        assert!(engine.accounts[keeper as usize].pnl > 0, "Keeper should receive reward");
-        println!("Bob was liquidated successfully");
-    } else {
-        // Bob was above maintenance margin, so not liquidated
-        // This can happen if Bob received enough funding payments
-        let bob_collateral = engine.accounts[bob as usize].capital as i128 + engine.accounts[bob as usize].pnl;
-        assert!(bob_collateral > 0, "Bob should still have some collateral");
-        println!("Bob was not liquidated (above maintenance margin)");
-    }
+    // System should be in risk-reduction mode
+    assert!(engine.risk_reduction_only, "Should be in risk-reduction mode after panic settle");
+
+    // All PNLs should be >= 0 (negative PNL clamped and socialized)
+    assert!(engine.accounts[alice as usize].pnl >= 0, "Alice PNL should be >= 0");
+    assert!(engine.accounts[bob as usize].pnl >= 0, "Bob PNL should be >= 0");
+    assert!(engine.accounts[lp as usize].pnl >= 0, "LP PNL should be >= 0");
 
     println!("✅ E2E test passed: Complete user journey works correctly");
 }
