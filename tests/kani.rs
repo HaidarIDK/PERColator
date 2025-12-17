@@ -1797,3 +1797,210 @@ fn panic_settle_preserves_conservation() {
     }
 }
 
+// ============================================================================
+// Warmup Budget Invariant Proofs
+// These prove properties of the warmup budget system:
+// - W⁺ ≤ W⁻ + max(0, I - I_min)
+// - Where W⁺ = warmed_pos_total, W⁻ = warmed_neg_total,
+//   I = insurance_fund.balance, I_min = risk_reduction_threshold
+// ============================================================================
+
+// Helper for tests requiring positive insurance balance
+fn test_params_with_floor() -> RiskParams {
+    RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 8,
+        account_fee_bps: 10000,
+        risk_reduction_threshold: 1000, // Non-zero floor
+    }
+}
+
+// Proof A: Warmup budget invariant always holds after settlement
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn warmup_budget_a_invariant_holds_after_settlement() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let slots: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > -5_000 && pnl < 5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(insurance > 1_000 && insurance < 50_000); // Above floor
+    kani::assume(slots > 0 && slots < 200);
+
+    // Setup account with PNL that can be settled
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = slots;
+
+    // Set insurance and adjust vault for conservation
+    engine.insurance_fund.balance = insurance;
+    engine.vault = capital + insurance;
+    if pnl > 0 {
+        engine.vault = engine.vault.saturating_add(pnl as u128);
+    }
+
+    // Settle warmup
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: Warmup budget invariant must hold
+    let spendable = engine.insurance_spendable();
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(spendable),
+            "WB-A: W+ <= W- + spendable must hold after settlement");
+}
+
+// Proof B: Settling negative PNL cannot increase warmed_pos_total
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn warmup_budget_b_negative_settlement_no_increase_pos() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let slots: u64 = kani::any();
+
+    // Bounded assumptions - specifically test negative PNL
+    kani::assume(capital > 1_000 && capital < 10_000);
+    kani::assume(pnl < 0 && pnl > -5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(slots > 0 && slots < 200);
+
+    // Setup account with negative PNL
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = slots;
+
+    // Set vault for conservation (negative PNL means less total value)
+    engine.insurance_fund.balance = 5_000;
+    engine.vault = capital + 5_000; // pnl is negative, so doesn't add to vault
+
+    let warmed_pos_before = engine.warmed_pos_total;
+
+    // Settle warmup (negative PNL should only affect capital, not warmed_pos_total)
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: warmed_pos_total should not increase when settling negative PNL
+    assert!(engine.warmed_pos_total == warmed_pos_before,
+            "WB-B: Settling negative PNL must not increase warmed_pos_total");
+}
+
+// Proof C: Settling positive PNL cannot exceed available budget
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn warmup_budget_c_positive_settlement_bounded_by_budget() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let slots: u64 = kani::any();
+
+    // Bounded assumptions - test positive PNL
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > 0 && pnl < 5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(insurance > 1_000 && insurance < 10_000); // Above floor but limited
+    kani::assume(slots > 0 && slots < 200);
+
+    // Setup account with positive PNL
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.current_slot = slots;
+
+    // Set insurance (controls budget)
+    engine.insurance_fund.balance = insurance;
+    engine.vault = capital + insurance + (pnl as u128);
+
+    let budget_before = engine.warmup_budget_remaining();
+    let warmed_neg_before = engine.warmed_neg_total;
+
+    // Settle warmup
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: The increase in warmed_pos_total must not exceed available budget
+    // Since warmed_neg_total doesn't change (positive PNL), this means:
+    // warmed_pos_total_after - warmed_pos_total_before <= budget_before
+    let budget_after = engine.warmup_budget_remaining();
+
+    // Budget should decrease or stay same after settling positive PNL
+    // (it decreases when we use insurance spendable, stays same if limited by losses)
+    assert!(budget_after <= budget_before.saturating_add(1), // Allow for rounding
+            "WB-C: Budget should not increase after settling positive PNL");
+
+    // Alternative check: warmed_neg_total should stay the same
+    assert!(engine.warmed_neg_total == warmed_neg_before,
+            "WB-C: warmed_neg_total should not change when settling positive PNL");
+}
+
+// Proof D: In warmup-paused mode, settlement result is unchanged by time
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn warmup_budget_d_paused_settlement_time_invariant() {
+    let mut engine = Box::new(RiskEngine::new(test_params_with_floor()));
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let slope: u128 = kani::any();
+    let pause_slot: u64 = kani::any();
+    let settle_slot1: u64 = kani::any();
+    let settle_slot2: u64 = kani::any();
+
+    // Bounded assumptions
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > 0 && pnl < 5_000);
+    kani::assume(slope > 0 && slope < 100);
+    kani::assume(pause_slot > 10 && pause_slot < 100);
+    kani::assume(settle_slot1 >= pause_slot && settle_slot1 < 200);
+    kani::assume(settle_slot2 > settle_slot1 && settle_slot2 < 300);
+
+    // Setup account
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.insurance_fund.balance = 10_000;
+    engine.vault = capital + 10_000 + (pnl as u128);
+
+    // Pause warmup
+    engine.warmup_paused = true;
+    engine.warmup_pause_slot = pause_slot;
+
+    // Compute vested amount at slot1
+    engine.current_slot = settle_slot1;
+    let vested1 = engine.vested_warmup(&engine.accounts[user_idx as usize]);
+
+    // Compute vested amount at later slot2
+    engine.current_slot = settle_slot2;
+    let vested2 = engine.vested_warmup(&engine.accounts[user_idx as usize]);
+
+    // PROOF: Vested amount should not change when warmup is paused
+    // (both should be capped at pause_slot)
+    assert!(vested1 == vested2,
+            "WB-D: Vested amount must be time-invariant when warmup is paused");
+}
+

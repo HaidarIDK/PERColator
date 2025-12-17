@@ -169,6 +169,10 @@ fn test_withdraw_with_warmed_up_pnl() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
 
+    // Add insurance to provide warmup budget for converting positive PnL to capital
+    // Budget = warmed_neg_total + insurance_spendable() = 0 + 500 = 500
+    engine.insurance_fund.balance = 500;
+
     engine.deposit(user_idx, 1000).unwrap();
     engine.accounts[user_idx as usize].pnl = 500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
@@ -798,6 +802,10 @@ fn test_adl_protects_principal_during_warmup() {
     engine.deposit(attacker, 10_000).unwrap();
     engine.deposit(victim, 10_000).unwrap();
 
+    // Add insurance to provide warmup budget for converting positive PnL to capital
+    // Budget = warmed_neg_total + insurance_spendable() = 0 + 10000 = 10000
+    engine.insurance_fund.balance = 10_000;
+
     let attacker_principal = engine.accounts[attacker as usize].capital;
     let victim_principal = engine.accounts[victim as usize].capital;
 
@@ -1305,6 +1313,10 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user = engine.add_user(100).unwrap();
 
+    // Add insurance to provide warmup budget for converting positive PnL to capital
+    // Budget = warmed_neg_total + insurance_spendable() = 0 + 100 = 100
+    engine.insurance_fund.balance = 100;
+
     // User.pnl=+1000, slope=10, started_at_slot=0
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
@@ -1321,7 +1333,7 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
     // Call withdraw(50)
     // Should convert 100 PNL to capital, then withdraw 50
     let result = engine.withdraw(user, 50);
-    assert!(result.is_ok(), "Should succeed");
+    assert!(result.is_ok(), "Should succeed: {:?}", result);
 
     // Check: pnl reduced by 100, capital increased by 100 then decreased by 50
     assert_eq!(engine.accounts[user as usize].pnl, 900); // 1000 - 100
@@ -1564,6 +1576,10 @@ fn test_lp_withdraw() {
     engine.deposit(user_idx, 5_000).unwrap();
     // vault = 10,001 + 1 + 5000 = 15,002
 
+    // Add insurance to provide warmup budget for converting LP's positive PnL to capital
+    // Budget = warmed_neg_total + insurance_spendable() = 0 + 5000 = 5000
+    engine.insurance_fund.balance = 5_000;
+
     // Zero-sum PNL: LP gains 5000, user loses 5000
     engine.accounts[lp_idx as usize].pnl = 5_000;
     engine.accounts[user_idx as usize].pnl = -5_000;
@@ -1710,8 +1726,9 @@ fn test_lp_capital_never_reduced_by_adl() {
 #[test]
 fn test_risk_reduction_threshold() {
     // Test that risk-reduction mode triggers at configured threshold
+    // With the insurance floor, ADL cannot spend insurance below the threshold.
     let mut params = default_params();
-    params.risk_reduction_threshold = 5_000; // Trigger when insurance < 5k
+    params.risk_reduction_threshold = 5_000; // Floor: insurance won't go below 5k
 
     let mut engine = Box::new(RiskEngine::new(params));
 
@@ -1722,26 +1739,25 @@ fn test_risk_reduction_threshold() {
     engine.insurance_fund.balance = 10_000;
     assert!(!engine.risk_reduction_only);
 
-    // Apply ADL with 3k loss - should bring insurance to 7k (still above 5k threshold)
+    // Apply ADL with 3k loss - should bring insurance to 7k (spendable was 5k, used 3k)
     engine.apply_adl(3_000).unwrap();
     assert_eq!(engine.insurance_fund.balance, 7_000);
     assert!(!engine.risk_reduction_only, "Should not trigger yet (7k > 5k)");
 
-    // Apply ADL with 3k loss - should bring insurance to 4k (below 5k threshold)
+    // Apply ADL with 3k loss - spendable = 7k - 5k = 2k, so only 2k is spent
+    // Insurance goes to floor (5k), remaining 1k goes to loss_accum
     engine.apply_adl(3_000).unwrap();
-    assert_eq!(engine.insurance_fund.balance, 4_000);
-    assert!(engine.risk_reduction_only, "Should trigger now (4k < 5k)");
+    assert_eq!(engine.insurance_fund.balance, 5_000, "Insurance clamped at floor");
+    assert_eq!(engine.loss_accum, 1_000, "Uncovered loss added to loss_accum");
+    assert!(engine.risk_reduction_only, "Should trigger now (at floor + uncovered loss)");
     assert!(engine.warmup_paused, "Warmup should be frozen");
 
-    // Top up to 4.5k - still below threshold, should stay in risk mode
-    engine.top_up_insurance_fund(500).unwrap();
-    assert_eq!(engine.insurance_fund.balance, 4_500);
-    assert!(engine.risk_reduction_only, "Should stay in risk mode (4.5k < 5k)");
-
-    // Top up to 5k - exactly at threshold, should exit
-    engine.top_up_insurance_fund(500).unwrap();
-    assert_eq!(engine.insurance_fund.balance, 5_000);
-    assert!(!engine.risk_reduction_only, "Should exit risk mode (5k >= 5k)");
+    // Top up 1k to cover loss_accum
+    engine.top_up_insurance_fund(1_000).unwrap();
+    assert_eq!(engine.loss_accum, 0, "Loss covered");
+    assert_eq!(engine.insurance_fund.balance, 5_000, "Still at floor");
+    // System should exit risk mode since loss_accum is 0 and insurance >= threshold
+    assert!(!engine.risk_reduction_only, "Should exit risk mode (loss covered, at threshold)");
     assert!(!engine.warmup_paused, "Warmup should unfreeze");
 }
 
@@ -2038,3 +2054,451 @@ fn fuzz_panic_settle_closes_all_positions_and_conserves() {
                 "Seed {}: Should be in risk-reduction mode", seed);
     }
 }
+
+// ==============================================================================
+// WARMUP BUDGET INVARIANT TESTS
+// ==============================================================================
+
+// Test 1: Budget blocks warmed positive when no losses and no spendable insurance
+#[test]
+fn test_warmup_budget_blocks_positive_without_budget() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // Floor at 100
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user = engine.add_user(1).unwrap();
+
+    // Set insurance exactly at floor (no spendable insurance)
+    engine.insurance_fund.balance = 100;
+
+    // Setup account with positive PnL, large slope, started_at_slot=0
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].warmup_slope_per_step = 100;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+
+    // Advance enough slots so cap >= 1000
+    engine.current_slot = 20; // cap = 100 * 20 = 2000
+
+    // Call settle_warmup_to_capital
+    let capital_before = engine.accounts[user as usize].capital;
+    let result = engine.settle_warmup_to_capital(user);
+    assert!(result.is_ok());
+
+    // Assert: capital unchanged (no budget for warming positive PnL)
+    assert_eq!(engine.accounts[user as usize].capital, capital_before,
+               "Capital should not increase without warmup budget");
+    assert_eq!(engine.warmed_pos_total, 0, "No positive PnL should be warmed");
+}
+
+// Test 2: Warmed losses create budget for warmed profits
+#[test]
+fn test_warmup_budget_losses_create_budget_for_profits() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 0; // Floor at 0
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Create loser and winner accounts
+    let loser = engine.add_user(1).unwrap();
+    let winner = engine.add_user(1).unwrap();
+
+    // Set insurance at floor (no spendable insurance)
+    engine.insurance_fund.balance = 0;
+
+    // Loser: capital=500, pnl=-500, large cap
+    engine.accounts[loser as usize].capital = 500;
+    engine.accounts[loser as usize].pnl = -500;
+    engine.accounts[loser as usize].warmup_slope_per_step = 1000;
+    engine.accounts[loser as usize].warmup_started_at_slot = 0;
+
+    // Winner: pnl=+500, large cap
+    engine.accounts[winner as usize].pnl = 500;
+    engine.accounts[winner as usize].warmup_slope_per_step = 1000;
+    engine.accounts[winner as usize].warmup_started_at_slot = 0;
+
+    engine.current_slot = 10; // cap = 1000 * 10 = 10000
+
+    // Settle loser first
+    engine.settle_warmup_to_capital(loser).unwrap();
+
+    // Loser should have paid 500 from capital
+    assert_eq!(engine.accounts[loser as usize].capital, 0);
+    assert_eq!(engine.accounts[loser as usize].pnl, 0);
+    assert_eq!(engine.warmed_neg_total, 500, "Loser should have contributed to warmed_neg_total");
+
+    // Now settle winner
+    engine.settle_warmup_to_capital(winner).unwrap();
+
+    // Winner should gain 500 capital (budget = warmed_neg_total = 500)
+    assert_eq!(engine.accounts[winner as usize].capital, 500);
+    assert_eq!(engine.accounts[winner as usize].pnl, 0);
+    assert_eq!(engine.warmed_pos_total, 500, "Winner should have used warmup budget");
+
+    // Invariant should hold with equality
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable(),
+            "Warmup budget invariant violated");
+}
+
+// Test 3: Spendable insurance allows warming profits without losses
+#[test]
+fn test_warmup_budget_insurance_allows_profits_without_losses() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 0; // Floor at 0
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user = engine.add_user(1).unwrap();
+
+    // Insurance provides budget
+    engine.insurance_fund.balance = 200;
+
+    // User has positive PnL
+    engine.accounts[user as usize].pnl = 500;
+    engine.accounts[user as usize].warmup_slope_per_step = 1000;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+
+    engine.current_slot = 10; // cap = 10000
+
+    // Settle warmup
+    engine.settle_warmup_to_capital(user).unwrap();
+
+    // Should warm exactly 200 (limited by budget = insurance_spendable = 200)
+    assert_eq!(engine.warmed_pos_total, 200, "Should warm up to insurance budget");
+    assert_eq!(engine.accounts[user as usize].capital, 200, "Capital should increase by 200");
+    assert_eq!(engine.accounts[user as usize].pnl, 300, "PnL should decrease by 200");
+
+    // Invariant holds
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total + engine.insurance_spendable(),
+            "Warmup budget invariant violated");
+}
+
+// Test 4: In risk mode warmup frozen means no additional settlement over time
+#[test]
+fn test_warmup_budget_frozen_in_risk_mode() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(1).unwrap();
+
+    // Provide insurance budget
+    engine.insurance_fund.balance = 1000;
+
+    // Setup account with positive PnL
+    engine.accounts[user as usize].pnl = 500;
+    engine.accounts[user as usize].warmup_slope_per_step = 10;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+
+    // Advance to slot 10, settle once
+    engine.current_slot = 10; // cap = 100
+    engine.settle_warmup_to_capital(user).unwrap();
+    let warmed_after_first = engine.warmed_pos_total;
+    assert_eq!(warmed_after_first, 100, "Should warm 100 (cap = 10 * 10)");
+
+    // Enter risk mode (freezes warmup at slot 10)
+    engine.enter_risk_reduction_only_mode();
+    assert!(engine.warmup_paused);
+    assert_eq!(engine.warmup_pause_slot, 10);
+
+    // Advance slot further
+    engine.current_slot = 100;
+
+    // Settle again - should NOT warm any more (frozen at slot 10)
+    engine.settle_warmup_to_capital(user).unwrap();
+
+    // Warmed totals should be unchanged
+    assert_eq!(engine.warmed_pos_total, warmed_after_first,
+               "No additional warmup should occur when frozen");
+}
+
+// Test 5: Invariant holds after random sequence of operations
+#[test]
+fn test_warmup_budget_invariant_random_sequence() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Create 4 accounts with varied initial state
+    let users: Vec<u16> = (0..4).map(|_| engine.add_user(1).unwrap()).collect();
+
+    // Set insurance above floor to provide some budget
+    engine.insurance_fund.balance = 5000;
+
+    // Randomize initial state (deterministic seed)
+    let mut rng = Rng::new(12345);
+
+    for &user in &users {
+        // Random capital and PnL (bounded)
+        let capital = rng.u128(0, 10000);
+        let pnl = rng.i128(-5000, 5000);
+        let slope = rng.u128(0, 100);
+
+        engine.accounts[user as usize].capital = capital;
+        engine.accounts[user as usize].pnl = pnl;
+        engine.accounts[user as usize].warmup_slope_per_step = slope;
+        engine.accounts[user as usize].warmup_started_at_slot = 0;
+    }
+
+    // Fix vault to match capital + insurance for conservation
+    let mut total_capital = 0u128;
+    for &user in &users {
+        total_capital += engine.accounts[user as usize].capital;
+    }
+    engine.vault = total_capital + engine.insurance_fund.balance;
+
+    // Run sequence of operations
+    for step in 0..20 {
+        // Advance slot
+        engine.advance_slot(rng.u64(1, 5));
+
+        // Settle warmup for each account
+        for &user in &users {
+            let _ = engine.settle_warmup_to_capital(user);
+        }
+
+        // Check invariant at each step
+        let spendable = if engine.insurance_fund.balance > engine.params.risk_reduction_threshold {
+            engine.insurance_fund.balance - engine.params.risk_reduction_threshold
+        } else {
+            0
+        };
+
+        assert!(engine.warmed_pos_total <= engine.warmed_neg_total + spendable,
+                "Step {}: Warmup budget invariant violated: W+={}, W-={}, spendable={}",
+                step, engine.warmed_pos_total, engine.warmed_neg_total, spendable);
+    }
+}
+
+// ==============================================================================
+// FORCE REALIZE LOSSES TESTS
+// ==============================================================================
+
+// Helper: params with non-zero threshold
+fn params_with_threshold() -> RiskParams {
+    RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 1000,
+        account_fee_bps: 10000,
+        risk_reduction_threshold: 1000, // Non-zero threshold
+    }
+}
+
+// Test 1: Threshold gate - force_realize_losses errors if insurance > threshold
+#[test]
+fn test_force_realize_losses_threshold_gate() {
+    let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
+    let _user = engine.add_user(1).unwrap();
+
+    // Set insurance above threshold (threshold is 1000)
+    engine.insurance_fund.balance = 5000;
+
+    // force_realize_losses should fail
+    let result = engine.force_realize_losses(1_000_000);
+    assert!(result.is_err(), "Should fail when insurance > threshold");
+    assert!(matches!(result.unwrap_err(), RiskError::Unauthorized));
+
+    // Set insurance at threshold
+    engine.insurance_fund.balance = 1000;
+    let result = engine.force_realize_losses(1_000_000);
+    assert!(result.is_ok(), "Should succeed when insurance == threshold");
+
+    // Reset and set insurance below threshold
+    let mut engine2 = Box::new(RiskEngine::new(params_with_threshold()));
+    let _user2 = engine2.add_user(1).unwrap();
+    engine2.insurance_fund.balance = 500;
+    let result = engine2.force_realize_losses(1_000_000);
+    assert!(result.is_ok(), "Should succeed when insurance < threshold");
+}
+
+// Test 2: Loss paydown happens - capital decreases, warmed_neg_total increases
+#[test]
+fn test_force_realize_losses_paydown() {
+    let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
+    let user = engine.add_user(1).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup: user long, lp short. Use small position to get predictable loss.
+    // Position size 1000 contracts at entry 2_000_000
+    // Oracle drops to 1_990_000 (10_000 price move)
+    // mark_pnl = (1_990_000 - 2_000_000) * 1000 / 1_000_000 = -10_000 * 1000 / 1_000_000 = -10
+    engine.accounts[user as usize].capital = 1000;
+    engine.accounts[user as usize].position_size = 1000; // small position
+    engine.accounts[user as usize].entry_price = 2_000_000;
+
+    engine.accounts[lp as usize].capital = 1000;
+    engine.accounts[lp as usize].position_size = -1000;
+    engine.accounts[lp as usize].entry_price = 2_000_000;
+
+    // Set vault = capital + insurance for conservation (no pnl yet)
+    engine.vault = 2000 + 1000;
+    engine.insurance_fund.balance = 1000; // At threshold
+
+    let warmed_neg_before = engine.warmed_neg_total;
+    let user_capital_before = engine.accounts[user as usize].capital;
+
+    // Oracle drops slightly: loss = (2_000_000 - 1_990_000) * 1000 / 1_000_000 = 10
+    engine.force_realize_losses(1_990_000).unwrap();
+
+    // User should have paid losses from capital
+    assert!(engine.accounts[user as usize].capital < user_capital_before,
+            "User capital should decrease");
+    assert_eq!(engine.accounts[user as usize].capital, user_capital_before - 10,
+            "User should pay 10 loss from capital");
+
+    // warmed_neg_total should increase by the paid amount
+    assert!(engine.warmed_neg_total > warmed_neg_before,
+            "warmed_neg_total should increase");
+    assert_eq!(engine.warmed_neg_total, warmed_neg_before + 10,
+            "warmed_neg_total should increase by 10");
+
+    // Positions should be closed
+    assert_eq!(engine.accounts[user as usize].position_size, 0);
+    assert_eq!(engine.accounts[lp as usize].position_size, 0);
+
+    // LP should have positive PnL (winner)
+    assert!(engine.accounts[lp as usize].pnl >= 0,
+            "LP should have non-negative PnL");
+
+    // Conservation should hold
+    assert!(engine.check_conservation(), "Conservation should hold");
+}
+
+// Test 3: Unpaid loss goes to ADL - capital exhausted case
+#[test]
+fn test_force_realize_losses_unpaid_to_adl() {
+    let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
+    let loser = engine.add_user(1).unwrap();
+    let winner = engine.add_user(1).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup: loser has small capital and will have large loss
+    // Position 100_000 contracts at entry 2_000_000
+    // Oracle drops to 1_900_000 (100_000 price drop)
+    // mark_pnl = (1_900_000 - 2_000_000) * 100_000 / 1_000_000 = -10_000
+    engine.accounts[loser as usize].capital = 100; // Small capital, will be exhausted
+    engine.accounts[loser as usize].position_size = 100_000;
+    engine.accounts[loser as usize].entry_price = 2_000_000;
+
+    // Winner has positive PnL (young, subject to ADL)
+    engine.accounts[winner as usize].capital = 5000;
+    engine.accounts[winner as usize].pnl = 5000; // Young positive PnL
+    engine.accounts[winner as usize].warmup_slope_per_step = 10;
+
+    // LP is counterparty
+    engine.accounts[lp as usize].capital = 10_000;
+    engine.accounts[lp as usize].position_size = -100_000;
+    engine.accounts[lp as usize].entry_price = 2_000_000;
+
+    // vault = sum(capital) + sum(pnl) + insurance
+    // sum(capital) = 100 + 5000 + 10000 = 15100
+    // sum(pnl) = 0 + 5000 + 0 = 5000
+    // insurance = 1000
+    engine.vault = 15100 + 5000 + 1000;
+    engine.insurance_fund.balance = 1000; // At threshold
+
+    let winner_pnl_before = engine.accounts[winner as usize].pnl;
+
+    // Oracle drops: loser's loss = 10_000, can only pay 100, unpaid = 9900
+    engine.force_realize_losses(1_900_000).unwrap();
+
+    // Loser capital should be exhausted
+    assert_eq!(engine.accounts[loser as usize].capital, 0,
+               "Loser capital should be exhausted");
+
+    // Loser PnL should be clamped to 0
+    assert_eq!(engine.accounts[loser as usize].pnl, 0,
+               "Loser PnL should be clamped to 0");
+
+    // ADL should have been triggered - winner's PnL should be haircut
+    // (the LP also gains 10_000 but that goes through ADL as well)
+    assert!(engine.accounts[winner as usize].pnl < winner_pnl_before,
+            "Winner PnL should be haircut by ADL");
+
+    // Conservation should hold
+    assert!(engine.check_conservation(), "Conservation should hold");
+}
+
+// Test 4: Warmup remains frozen after force_realize_losses
+#[test]
+fn test_force_realize_losses_warmup_frozen() {
+    let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
+    let user = engine.add_user(1).unwrap();
+
+    // Setup user with positive PnL and warmup
+    engine.accounts[user as usize].capital = 5000;
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].warmup_slope_per_step = 10;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+
+    engine.vault = 6000;
+    engine.insurance_fund.balance = 1000; // At threshold
+    engine.current_slot = 50;
+
+    // Before force_realize, warmup should work normally
+    let withdrawable_before = engine.withdrawable_pnl(&engine.accounts[user as usize]);
+    assert!(withdrawable_before > 0, "Should have some withdrawable PnL");
+
+    // Force realize losses
+    engine.force_realize_losses(1_000_000).unwrap();
+
+    // Warmup should be frozen
+    assert!(engine.warmup_paused, "Warmup should be paused");
+    let pause_slot = engine.warmup_pause_slot;
+
+    // Advance time
+    engine.current_slot = 200;
+
+    // Withdrawable should NOT increase (frozen at pause_slot)
+    let withdrawable_after = engine.withdrawable_pnl(&engine.accounts[user as usize]);
+
+    // The withdrawable should be capped at pause_slot, not current_slot
+    // Since warmup is frozen, vested amount is fixed
+    let expected_vested = 10 * pause_slot as u128; // slope * steps at pause
+    let expected_withdrawable = core::cmp::min(expected_vested, 1000);
+    assert_eq!(withdrawable_after, expected_withdrawable,
+               "Withdrawable should be frozen at pause slot");
+}
+
+// Test 5: Warmup budget invariant holds after force_realize_losses
+#[test]
+fn test_force_realize_losses_invariant_holds() {
+    let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(1).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+    // Setup: user1 has losing position, user2 has positive pnl
+    // Position 10_000 contracts at entry 2_000_000
+    // Oracle drops to 1_990_000 (10_000 price drop)
+    // mark_pnl = (1_990_000 - 2_000_000) * 10_000 / 1_000_000 = -100
+    engine.accounts[user1 as usize].capital = 5000;
+    engine.accounts[user1 as usize].position_size = 10_000;
+    engine.accounts[user1 as usize].entry_price = 2_000_000;
+
+    engine.accounts[user2 as usize].capital = 5000;
+    engine.accounts[user2 as usize].pnl = 2000; // existing positive PnL
+    engine.accounts[user2 as usize].warmup_slope_per_step = 20;
+
+    engine.accounts[lp as usize].capital = 10_000;
+    engine.accounts[lp as usize].position_size = -10_000;
+    engine.accounts[lp as usize].entry_price = 2_000_000;
+
+    // vault = sum(capital) + sum(pnl) + insurance
+    // sum(capital) = 5000 + 5000 + 10000 = 20000
+    // sum(pnl) = 0 + 2000 + 0 = 2000
+    // insurance = 1000
+    engine.vault = 20000 + 2000 + 1000;
+    engine.insurance_fund.balance = 1000; // At threshold
+
+    // Force realize at a price that causes small loss
+    engine.force_realize_losses(1_990_000).unwrap();
+
+    // Check invariant: warmed_pos_total <= warmed_neg_total + insurance_spendable()
+    let spendable = engine.insurance_spendable();
+    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(spendable),
+            "Warmup budget invariant violated after force_realize_losses: W+={}, W-={}, spendable={}",
+            engine.warmed_pos_total, engine.warmed_neg_total, spendable);
+
+    // Conservation should hold
+    assert!(engine.check_conservation(),
+            "Conservation violated after force_realize_losses");
+}
+
