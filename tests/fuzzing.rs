@@ -12,11 +12,23 @@
 //! Where settled_pnl accounts for lazy funding:
 //!   settled_pnl = account.pnl - (global_funding_index - account.funding_index) * position / 1e6
 //!
-//! ### Atomicity
+//! ### Atomicity (Err => No Mutation)
 //! All public operations are atomic on error: if an operation returns Err,
-//! the engine state must be unchanged from before the call. This includes:
-//! - withdraw: rolls back touch_account and settle_warmup on failure
-//! - execute_trade: rolls back funding settlement on margin check failure
+//! the engine state must be unchanged from before the call. Rollback fields:
+//!
+//! - **withdraw**: rolls back account (pnl, capital, funding_index, warmup fields),
+//!   warmed_pos_total, warmed_neg_total, warmup_insurance_reserved
+//!
+//! - **execute_trade**: rolls back both user/lp accounts (all fields),
+//!   warmed_pos_total, warmed_neg_total, warmup_insurance_reserved.
+//!   Fee is only applied to insurance_fund AFTER all margin checks pass.
+//!   Exception: if insurance <= threshold, force_realize_losses triggers before
+//!   the trade and its effects persist regardless of trade outcome.
+//!
+//! - **add_user/add_lp**: either succeeds (allocates slot, increments counters)
+//!   or fails with no mutation
+//!
+//! - **deposit**: settles warmup then adds capital; cannot partially fail
 //!
 //! ### Warmup Budget
 //! - W+ <= W- + raw_spendable (positive warmup bounded by losses + available insurance)
@@ -89,6 +101,7 @@ struct Snapshot {
     num_used_accounts: u16,
     next_account_id: u64,
     free_head: u16,
+    next_free: Vec<u16>, // Freelist chain pointers
     // All accounts (up to max_accounts)
     accounts: Vec<AccountSnapshot>,
 }
@@ -144,6 +157,9 @@ impl Snapshot {
             });
         }
 
+        // Capture freelist chain (only up to account_count for efficiency)
+        let next_free: Vec<u16> = engine.next_free[..n].to_vec();
+
         Snapshot {
             vault: engine.vault,
             insurance_balance: engine.insurance_fund.balance,
@@ -162,6 +178,7 @@ impl Snapshot {
             num_used_accounts: engine.num_used_accounts,
             next_account_id: engine.next_account_id,
             free_head: engine.free_head,
+            next_free,
             accounts,
         }
     }
@@ -220,6 +237,9 @@ fn assert_unchanged(engine: &RiskEngine, snapshot: &Snapshot, context: &str) {
         }
         if current.free_head != snapshot.free_head {
             panic!("{}: free_head changed from {} to {}", context, snapshot.free_head, current.free_head);
+        }
+        if current.next_free != snapshot.next_free {
+            panic!("{}: next_free freelist chain changed", context);
         }
         // Account comparison
         for (i, (curr_acc, snap_acc)) in current.accounts.iter().zip(snapshot.accounts.iter()).enumerate() {
@@ -1683,6 +1703,9 @@ proptest! {
         let principal_before = engine.accounts[user_idx as usize].capital;
         let pnl_before = engine.accounts[user_idx as usize].pnl;
         let funding_idx_before = engine.accounts[user_idx as usize].funding_index;
+        let warmed_pos_before = engine.warmed_pos_total;
+        let warmed_neg_before = engine.warmed_neg_total;
+        let warmup_reserved_before = engine.warmup_insurance_reserved;
 
         let result = engine.withdraw(user_idx, withdraw_amount);
 
@@ -1698,6 +1721,12 @@ proptest! {
                            "withdraw Err must not change pnl");
             prop_assert_eq!(engine.accounts[user_idx as usize].funding_index, funding_idx_before,
                            "withdraw Err must not change funding_index");
+            prop_assert_eq!(engine.warmed_pos_total, warmed_pos_before,
+                           "withdraw Err must not change warmed_pos_total");
+            prop_assert_eq!(engine.warmed_neg_total, warmed_neg_before,
+                           "withdraw Err must not change warmed_neg_total");
+            prop_assert_eq!(engine.warmup_insurance_reserved, warmup_reserved_before,
+                           "withdraw Err must not change warmup_insurance_reserved");
         }
     }
 
@@ -1840,11 +1869,14 @@ fn withdraw_atomic_err_regression() {
     // Accrue some funding to create unsettled state
     engine.accrue_funding(100, 1_000_000, 100).unwrap();
 
-    // Capture state before
+    // Capture state before (including warmup counters)
     let pnl_before = engine.accounts[user_idx as usize].pnl;
     let capital_before = engine.accounts[user_idx as usize].capital;
     let funding_idx_before = engine.accounts[user_idx as usize].funding_index;
     let vault_before = engine.vault;
+    let warmed_pos_before = engine.warmed_pos_total;
+    let warmed_neg_before = engine.warmed_neg_total;
+    let warmup_reserved_before = engine.warmup_insurance_reserved;
 
     // Try to withdraw more than available - should fail
     let result = engine.withdraw(user_idx, 999_999);
@@ -1859,6 +1891,12 @@ fn withdraw_atomic_err_regression() {
                "withdraw Err must not change funding_index");
     assert_eq!(engine.vault, vault_before,
                "withdraw Err must not change vault");
+    assert_eq!(engine.warmed_pos_total, warmed_pos_before,
+               "withdraw Err must not change warmed_pos_total");
+    assert_eq!(engine.warmed_neg_total, warmed_neg_before,
+               "withdraw Err must not change warmed_neg_total");
+    assert_eq!(engine.warmup_insurance_reserved, warmup_reserved_before,
+               "withdraw Err must not change warmup_insurance_reserved");
 }
 
 /// Regression test: execute_trade must not mutate state on margin error
@@ -1876,12 +1914,15 @@ fn execute_trade_atomic_err_regression() {
     // Accrue some funding to create unsettled state
     engine.accrue_funding(100, 1_000_000, 100).unwrap();
 
-    // Capture state before
+    // Capture state before (including warmup counters)
     let user_funding_idx_before = engine.accounts[user_idx as usize].funding_index;
     let lp_funding_idx_before = engine.accounts[lp_idx as usize].funding_index;
     let user_pnl_before = engine.accounts[user_idx as usize].pnl;
     let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
     let insurance_before = engine.insurance_fund.balance;
+    let warmed_pos_before = engine.warmed_pos_total;
+    let warmed_neg_before = engine.warmed_neg_total;
+    let warmup_reserved_before = engine.warmup_insurance_reserved;
 
     // Try to trade a huge size that will fail margin check
     let result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1_000_000);
@@ -1898,6 +1939,12 @@ fn execute_trade_atomic_err_regression() {
                "execute_trade Err must not change LP pnl");
     assert_eq!(engine.insurance_fund.balance, insurance_before,
                "execute_trade Err must not change insurance");
+    assert_eq!(engine.warmed_pos_total, warmed_pos_before,
+               "execute_trade Err must not change warmed_pos_total");
+    assert_eq!(engine.warmed_neg_total, warmed_neg_before,
+               "execute_trade Err must not change warmed_neg_total");
+    assert_eq!(engine.warmup_insurance_reserved, warmup_reserved_before,
+               "execute_trade Err must not change warmup_insurance_reserved");
 }
 
 /// Regression test: panic_settle_all must settle funding before computing mark PNL
