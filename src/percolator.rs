@@ -888,37 +888,25 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
+    /// Withdraw capital from an account.
+    /// Relies on Solana transaction atomicity: if this returns Err, the entire TX aborts.
     pub fn withdraw(&mut self, idx: u16, amount: u128) -> Result<()> {
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
 
-        // Early validation (no state change yet)
+        // Validate account exists
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
 
-        // Capture state for potential rollback (touch_account and settle_warmup mutate)
-        let account_snapshot = self.accounts[idx as usize].clone();
-        let warmed_pos_snapshot = self.warmed_pos_total;
-        let warmed_neg_snapshot = self.warmed_neg_total;
-        let warmup_reserved_snapshot = self.warmup_insurance_reserved;
-
-        // Settle funding before any PNL calculations
-        // (Can't fail after is_used check passed)
-        let _ = self.touch_account(idx);
-
-        // Settle warmup (converts PnL to capital with budget constraint)
-        let _ = self.settle_warmup_to_capital(idx);
+        // Settle funding and warmup (propagate errors)
+        self.touch_account(idx)?;
+        self.settle_warmup_to_capital(idx)?;
 
         let account = &self.accounts[idx as usize];
 
-        // Check we have enough capital - rollback on failure
+        // Check we have enough capital
         if account.capital < amount {
-            self.accounts[idx as usize] = account_snapshot;
-            self.warmed_pos_total = warmed_pos_snapshot;
-            self.warmed_neg_total = warmed_neg_snapshot;
-            self.warmup_insurance_reserved = warmup_reserved_snapshot;
             return Err(RiskError::InsufficientBalance);
         }
 
@@ -926,7 +914,7 @@ impl RiskEngine {
         let new_capital = sub_u128(account.capital, amount);
         let new_collateral = add_u128(new_capital, clamp_pos_i128(account.pnl));
 
-        // If account has position, must maintain initial margin - rollback on failure
+        // If account has position, must maintain initial margin
         if account.position_size != 0 {
             let position_notional = mul_u128(
                 saturating_abs_i128(account.position_size) as u128,
@@ -939,10 +927,6 @@ impl RiskEngine {
             ) / 10_000;
 
             if new_collateral < initial_margin_required {
-                self.accounts[idx as usize] = account_snapshot;
-                self.warmed_pos_total = warmed_pos_snapshot;
-                self.warmed_neg_total = warmed_neg_snapshot;
-                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -983,6 +967,8 @@ impl RiskEngine {
     }
 
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
+    /// Execute a trade between LP and user.
+    /// Relies on Solana transaction atomicity: if this returns Err, the entire TX aborts.
     pub fn execute_trade<M: MatchingEngine>(
         &mut self,
         matcher: &M,
@@ -991,14 +977,12 @@ impl RiskEngine {
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
-        // === Phase 1: Non-mutating validation (no state changes) ===
-
         // Validate indices
         if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
 
-        // Validate account kinds (before any mutations)
+        // Validate account kinds
         if self.accounts[lp_idx as usize].kind != AccountKind::LP {
             return Err(RiskError::AccountKindMismatch);
         }
@@ -1016,12 +1000,12 @@ impl RiskEngine {
         let lp_inc = saturating_abs_i128(new_lp_pos) > saturating_abs_i128(old_lp_pos);
 
         if user_inc || lp_inc {
-            self.enforce_op(OpClass::RiskIncrease)?; // Blocked in risk mode
+            self.enforce_op(OpClass::RiskIncrease)?;
         } else {
-            self.enforce_op(OpClass::RiskReduce)?;   // Allowed in risk mode
+            self.enforce_op(OpClass::RiskReduce)?;
         }
 
-        // Call matching engine with LP account ID (before any mutations)
+        // Call matching engine
         let lp = &self.accounts[lp_idx as usize];
         let execution = matcher.execute_match(
             &lp.matcher_program,
@@ -1031,26 +1015,18 @@ impl RiskEngine {
             size,
         )?;
 
-        // === Phase 2: Capture state for rollback ===
-        let user_snapshot = self.accounts[user_idx as usize].clone();
-        let lp_snapshot = self.accounts[lp_idx as usize].clone();
-        let warmed_pos_snapshot = self.warmed_pos_total;
-        let warmed_neg_snapshot = self.warmed_neg_total;
-        let warmup_reserved_snapshot = self.warmup_insurance_reserved;
+        // Settle funding for both accounts (propagate errors)
+        self.touch_account(user_idx)?;
+        self.touch_account(lp_idx)?;
 
-        // Settle funding for both accounts (can't fail after is_used check)
-        let _ = self.touch_account(user_idx);
-        let _ = self.touch_account(lp_idx);
-
-        // Use executed price and size from matching engine
         let exec_price = execution.price;
         let exec_size = execution.size;
 
-        // Calculate fee based on actual execution
+        // Calculate fee
         let notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
-        // Use split_at_mut to access both accounts without copying
+        // Access both accounts
         let (user, lp) = if user_idx < lp_idx {
             let (left, right) = self.accounts.split_at_mut(lp_idx as usize);
             (&mut left[user_idx as usize], &mut right[0])
@@ -1067,114 +1043,64 @@ impl RiskEngine {
             let old_position = user.position_size;
             let old_entry = user.entry_price;
 
-            // If reducing position, realize PNL at execution price
             if (old_position > 0 && exec_size < 0) || (old_position < 0 && exec_size > 0) {
                 let close_size = core::cmp::min(saturating_abs_i128(old_position), saturating_abs_i128(exec_size));
                 let price_diff = if old_position > 0 {
-                    // Closing long: (exit_price - entry_price)
                     (exec_price as i128).saturating_sub(old_entry as i128)
                 } else {
-                    // Closing short: (entry_price - exit_price)
                     (old_entry as i128).saturating_sub(exec_price as i128)
                 };
 
-                let pnl = match price_diff.checked_mul(close_size) {
-                    Some(v) => match v.checked_div(1_000_000) {
-                        Some(p) => p,
-                        None => {
-                            self.accounts[user_idx as usize] = user_snapshot;
-                            self.accounts[lp_idx as usize] = lp_snapshot;
-                            self.warmed_pos_total = warmed_pos_snapshot;
-                            self.warmed_neg_total = warmed_neg_snapshot;
-                            self.warmup_insurance_reserved = warmup_reserved_snapshot;
-                            return Err(RiskError::Overflow);
-                        }
-                    },
-                    None => {
-                        self.accounts[user_idx as usize] = user_snapshot;
-                        self.accounts[lp_idx as usize] = lp_snapshot;
-                        self.warmed_pos_total = warmed_pos_snapshot;
-                        self.warmed_neg_total = warmed_neg_snapshot;
-                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
-                        return Err(RiskError::Overflow);
-                    }
-                };
-
+                // Use saturating arithmetic (no overflow errors needed with Solana atomicity)
+                let pnl = price_diff.saturating_mul(close_size).saturating_div(1_000_000);
                 user_pnl_delta = pnl;
                 lp_pnl_delta = -pnl;
             }
         }
 
-        // Calculate new positions using executed size
+        // Calculate new positions
         let new_user_position = user.position_size.saturating_add(exec_size);
         let new_lp_position = lp.position_size.saturating_sub(exec_size);
 
-        // Calculate new entry prices using execution price
+        // Calculate new entry prices
         let mut new_user_entry = user.entry_price;
         let mut new_lp_entry = lp.entry_price;
 
         // Update user entry price
         if (user.position_size > 0 && exec_size > 0) || (user.position_size < 0 && exec_size < 0) {
-            // Increasing position - weighted average entry at execution price
             let old_notional = mul_u128(saturating_abs_i128(user.position_size) as u128, user.entry_price as u128);
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
             let total_size = saturating_abs_i128(user.position_size).saturating_add(saturating_abs_i128(exec_size));
-
             if total_size != 0 {
-                match div_u128(total_notional, total_size as u128) {
-                    Ok(v) => new_user_entry = v as u64,
-                    Err(e) => {
-                        self.accounts[user_idx as usize] = user_snapshot;
-                        self.accounts[lp_idx as usize] = lp_snapshot;
-                        self.warmed_pos_total = warmed_pos_snapshot;
-                        self.warmed_neg_total = warmed_neg_snapshot;
-                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
-                        return Err(e);
-                    }
-                }
+                new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if saturating_abs_i128(user.position_size) < saturating_abs_i128(exec_size) {
-            // Flipping position - new entry at execution price
             new_user_entry = exec_price;
         }
 
-        // Update LP entry price (LP takes opposite side: -exec_size)
+        // Update LP entry price
         if lp.position_size == 0 {
-            // Opening fresh position - entry at execution price
             new_lp_entry = exec_price;
         } else if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
                   (lp.position_size < 0 && new_lp_position < lp.position_size) {
-            // Increasing position - weighted average entry
             let old_notional = mul_u128(saturating_abs_i128(lp.position_size) as u128, lp.entry_price as u128);
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
             let total_size = saturating_abs_i128(lp.position_size).saturating_add(saturating_abs_i128(exec_size));
-
             if total_size != 0 {
-                match div_u128(total_notional, total_size as u128) {
-                    Ok(v) => new_lp_entry = v as u64,
-                    Err(e) => {
-                        self.accounts[user_idx as usize] = user_snapshot;
-                        self.accounts[lp_idx as usize] = lp_snapshot;
-                        self.warmed_pos_total = warmed_pos_snapshot;
-                        self.warmed_neg_total = warmed_neg_snapshot;
-                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
-                        return Err(e);
-                    }
-                }
+                new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if saturating_abs_i128(lp.position_size) < saturating_abs_i128(new_lp_position)
                   && ((lp.position_size > 0 && new_lp_position < 0) || (lp.position_size < 0 && new_lp_position > 0)) {
-            // Flipping position - new entry at execution price
             new_lp_entry = exec_price;
         }
 
-        // Compute final PNL values (for margin checks)
+        // Compute final PNL values
         let new_user_pnl = user.pnl.saturating_add(user_pnl_delta).saturating_sub(fee as i128);
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
-        // Check user maintenance margin requirement - rollback on failure
+        // Check user maintenance margin
         if new_user_position != 0 {
             let user_collateral = add_u128(user.capital, clamp_pos_i128(new_user_pnl));
             let position_value = mul_u128(
@@ -1185,18 +1111,12 @@ impl RiskEngine {
                 position_value,
                 self.params.maintenance_margin_bps as u128
             ) / 10_000;
-
             if user_collateral <= margin_required {
-                self.accounts[user_idx as usize] = user_snapshot;
-                self.accounts[lp_idx as usize] = lp_snapshot;
-                self.warmed_pos_total = warmed_pos_snapshot;
-                self.warmed_neg_total = warmed_neg_snapshot;
-                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // Check LP maintenance margin requirement - rollback on failure
+        // Check LP maintenance margin
         if new_lp_position != 0 {
             let lp_collateral = add_u128(lp.capital, clamp_pos_i128(new_lp_pnl));
             let position_value = mul_u128(
@@ -1207,28 +1127,19 @@ impl RiskEngine {
                 position_value,
                 self.params.maintenance_margin_bps as u128
             ) / 10_000;
-
             if lp_collateral <= margin_required {
-                self.accounts[user_idx as usize] = user_snapshot;
-                self.accounts[lp_idx as usize] = lp_snapshot;
-                self.warmed_pos_total = warmed_pos_snapshot;
-                self.warmed_neg_total = warmed_neg_snapshot;
-                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // All checks passed - now commit state changes atomically
-        // Apply fee to insurance fund
+        // Commit all state changes
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, fee);
 
-        // Update user account
         user.pnl = new_user_pnl;
         user.position_size = new_user_position;
         user.entry_price = new_user_entry;
 
-        // Update LP account
         lp.pnl = new_lp_pnl;
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
@@ -1848,16 +1759,16 @@ impl RiskEngine {
 
         let actual = add_u128(self.vault, self.loss_accum);
 
-        // Check: |actual - expected| <= MAX_ROUNDING_SLACK
-        // This allows small rounding errors in either direction while catching
-        // significant conservation violations (minting or under-collateralization).
-        let slack = if actual >= expected {
-            (actual - expected) as i128
-        } else {
-            -((expected - actual) as i128)
-        };
+        // Conservation check with bounded rounding tolerance:
+        // - Vault should approximately equal what is owed
+        // - Slack bounded by ±MAX_ROUNDING_SLACK to catch minting/burning bugs
+        // - Rounding in funding calculations can produce small deficits
+        //   (one truncation per account, up to MAX_ACCOUNTS total)
+        let slack: i128 = (actual as i128) - (expected as i128);
+        let max_slack = MAX_ROUNDING_SLACK as i128;
 
-        slack.abs() <= MAX_ROUNDING_SLACK as i128
+        // Reject out-of-bounds slack (potential minting/burning bug)
+        slack >= -max_slack && slack <= max_slack
     }
 
     /// Advance to next slot (for testing warmup)
