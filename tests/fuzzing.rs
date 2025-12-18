@@ -1,15 +1,34 @@
 //! Comprehensive Fuzzing Suite for the Risk Engine
 //!
-//! Run with: cargo test --features fuzz
-//! Increase cases: PROPTEST_CASES=1000 cargo test --features fuzz
-//! Run deterministic only: cargo test --features fuzz fuzz_deterministic
+//! ## Running Tests
+//! - Quick: `cargo test --features fuzz` (100 proptest cases, 200 deterministic seeds)
+//! - Deep: `PROPTEST_CASES=1000 cargo test --features fuzz fuzz_deterministic_extended`
 //!
-//! This suite implements:
+//! ## Invariant Definitions
+//!
+//! ### Conservation (check_conservation)
+//! vault + loss_accum = sum(capital) + sum(settled_pnl) + insurance
+//!
+//! Where settled_pnl accounts for lazy funding:
+//!   settled_pnl = account.pnl - (global_funding_index - account.funding_index) * position / 1e6
+//!
+//! ### Atomicity
+//! All public operations are atomic on error: if an operation returns Err,
+//! the engine state must be unchanged from before the call. This includes:
+//! - withdraw: rolls back touch_account and settle_warmup on failure
+//! - execute_trade: rolls back funding settlement on margin check failure
+//!
+//! ### Warmup Budget
+//! - W+ <= W- + raw_spendable (positive warmup bounded by losses + available insurance)
+//! - reserved <= raw_spendable (reservations backed by insurance)
+//!
+//! ## Suite Components
 //! - Snapshot-based "no mutation on error" checking
 //! - Global invariants (conservation, warmup budget, risk reduction mode)
 //! - Action-based state machine fuzzer
 //! - Focused unit property tests
 //! - Deterministic seeded fuzzer with logging
+//! - Atomicity regression tests
 
 #![cfg(feature = "fuzz")]
 
@@ -41,8 +60,11 @@ fn is_account_used(engine: &RiskEngine, idx: u16) -> bool {
     ((engine.used[w] >> b) & 1) == 1
 }
 
-/// BITMAP_WORDS constant for snapshot
-const BITMAP_WORDS: usize = 64; // 64 * 64 = 4096 max accounts
+/// Helper to get the safe upper bound for account iteration
+#[inline]
+fn account_count(engine: &RiskEngine) -> usize {
+    core::cmp::min(engine.params.max_accounts as usize, engine.accounts.len())
+}
 
 /// Captures FULL engine state for comparison (including allocator state)
 /// This is essential for detecting mutations on error paths
@@ -98,9 +120,10 @@ impl Snapshot {
 
         // Capture ALL accounts (not just used ones - to detect bitmap corruption)
         let mut accounts = Vec::new();
-        for i in 0..engine.params.max_accounts {
+        let n = account_count(engine);
+        for i in 0..n {
             let idx = i as u16;
-            let acc = &engine.accounts[i as usize];
+            let acc = &engine.accounts[i];
             accounts.push(AccountSnapshot {
                 idx,
                 kind: match acc.kind {
@@ -226,9 +249,10 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         let mut account_details = Vec::new();
         let global_index = engine.funding_index_qpb_e6;
 
-        for i in 0..engine.params.max_accounts {
+        let n = account_count(engine);
+        for i in 0..n {
             if is_account_used(engine, i as u16) {
-                let acc = &engine.accounts[i as usize];
+                let acc = &engine.accounts[i];
                 total_capital += acc.capital;
 
                 // Compute settled PNL (same formula as check_conservation)
@@ -330,9 +354,10 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
     }
 
     // 4. Account local sanity (for each used account)
-    for i in 0..engine.params.max_accounts {
+    let n = account_count(engine);
+    for i in 0..n {
         if is_account_used(engine, i as u16) {
-            let acc = &engine.accounts[i as usize];
+            let acc = &engine.accounts[i];
 
             // reserved_pnl <= max(0, pnl)
             let positive_pnl = if acc.pnl > 0 { acc.pnl as u128 } else { 0 };
@@ -416,15 +441,13 @@ enum Action {
 }
 
 /// Strategy for generating index selectors
+/// Weights: Existing=6, ExistingNonLp=2, Lp=1, Random=2
+/// This ensures most actions target valid accounts while still testing error paths
 fn idx_sel_strategy() -> impl Strategy<Value = IdxSel> {
     prop_oneof![
-        // 60% existing account
         6 => Just(IdxSel::Existing),
-        // 15% non-LP existing
-        15 => Just(IdxSel::ExistingNonLp).prop_filter("", |_| true).prop_map(|_| IdxSel::ExistingNonLp),
-        // 5% LP
-        5 => Just(IdxSel::Lp),
-        // 20% random (to test error paths)
+        2 => Just(IdxSel::ExistingNonLp),
+        1 => Just(IdxSel::Lp),
         2 => (0u16..64).prop_map(IdxSel::Random),
     ]
 }
@@ -505,11 +528,13 @@ impl FuzzState {
                 }
             }
             IdxSel::ExistingNonLp => {
-                let non_lp: Vec<u16> = self.live_accounts.iter()
-                    .copied()
-                    .filter(|&x| Some(x) != self.lp_idx)
-                    .collect();
-                if non_lp.is_empty() {
+                // Single-pass selection to avoid Vec allocation:
+                // 1. Count non-LP accounts
+                // 2. Pick kth candidate
+                let count = self.live_accounts.iter()
+                    .filter(|&&x| Some(x) != self.lp_idx)
+                    .count();
+                if count == 0 {
                     // Fallback to random different from LP
                     let mut idx = (self.next_rng() % 64) as u16;
                     if Some(idx) == self.lp_idx && idx < 63 {
@@ -517,8 +542,12 @@ impl FuzzState {
                     }
                     idx
                 } else {
-                    let i = self.next_rng() as usize % non_lp.len();
-                    non_lp[i]
+                    let k = self.next_rng() as usize % count;
+                    self.live_accounts.iter()
+                        .copied()
+                        .filter(|&x| Some(x) != self.lp_idx)
+                        .nth(k)
+                        .unwrap_or(0)
                 }
             }
             IdxSel::Lp => {
@@ -768,10 +797,11 @@ impl FuzzState {
                             context
                         );
                         // All positions should be 0 - scan ALL used accounts, not just live_accounts
-                        for idx in 0..self.engine.params.max_accounts {
+                        let n = account_count(&self.engine);
+                        for idx in 0..n {
                             if is_account_used(&self.engine, idx as u16) {
                                 assert_eq!(
-                                    self.engine.accounts[idx as usize].position_size,
+                                    self.engine.accounts[idx].position_size,
                                     0,
                                     "{}: position not closed for account {}",
                                     context,
@@ -807,10 +837,11 @@ impl FuzzState {
                             context
                         );
                         // All positions should be 0 - scan ALL used accounts
-                        for idx in 0..self.engine.params.max_accounts {
+                        let n = account_count(&self.engine);
+                        for idx in 0..n {
                             if is_account_used(&self.engine, idx as u16) {
                                 assert_eq!(
-                                    self.engine.accounts[idx as usize].position_size,
+                                    self.engine.accounts[idx].position_size,
                                     0,
                                     "{}: position not closed for account {}",
                                     context,
@@ -883,7 +914,8 @@ impl FuzzState {
 
     fn count_used(&self) -> u32 {
         let mut count = 0;
-        for i in 0..self.engine.params.max_accounts {
+        let n = account_count(&self.engine);
+        for i in 0..n {
             if is_account_used(&self.engine, i as u16) {
                 count += 1;
             }
@@ -1400,14 +1432,6 @@ impl Rng {
         lo + ((self.next() as usize) % (hi - lo + 1))
     }
 
-    fn bool(&mut self) -> bool {
-        self.next() % 2 == 0
-    }
-
-    fn pick<'a, T>(&mut self, slice: &'a [T]) -> Option<&'a T> {
-        if slice.is_empty() { None }
-        else { Some(&slice[self.usize(0, slice.len() - 1)]) }
-    }
 }
 
 /// Generate a random selector using RNG
@@ -1464,9 +1488,10 @@ fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u
     let mut net_settled_pnl: i128 = 0;
     let global_index = engine.funding_index_qpb_e6;
 
-    for i in 0..engine.params.max_accounts {
+    let n = account_count(engine);
+    for i in 0..n {
         if is_account_used(engine, i as u16) {
-            let acc = &engine.accounts[i as usize];
+            let acc = &engine.accounts[i];
             total_capital += acc.capital;
 
             // Compute settled PNL (same formula as check_conservation)
@@ -1623,20 +1648,8 @@ fn amount_strategy() -> impl Strategy<Value = u128> {
     0u128..1_000_000
 }
 
-fn pnl_strategy() -> impl Strategy<Value = i128> {
-    -100_000i128..100_000
-}
-
-fn price_strategy() -> impl Strategy<Value = u64> {
-    100_000u64..10_000_000
-}
-
 fn position_strategy() -> impl Strategy<Value = i128> {
     -100_000i128..100_000
-}
-
-fn funding_rate_strategy() -> impl Strategy<Value = i64> {
-    -1000i64..1000
 }
 
 proptest! {
@@ -1655,7 +1668,7 @@ proptest! {
         prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before + amount);
     }
 
-    // Test that withdrawal never increases balance
+    // Test that withdrawal never increases balance AND is atomic on Err
     #[test]
     fn fuzz_withdraw_decreases_or_fails(
         deposit_amount in amount_strategy(),
@@ -1668,12 +1681,23 @@ proptest! {
 
         let vault_before = engine.vault;
         let principal_before = engine.accounts[user_idx as usize].capital;
+        let pnl_before = engine.accounts[user_idx as usize].pnl;
+        let funding_idx_before = engine.accounts[user_idx as usize].funding_index;
 
         let result = engine.withdraw(user_idx, withdraw_amount);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= vault_before);
             prop_assert!(engine.accounts[user_idx as usize].capital <= principal_before);
+        } else {
+            // ATOMIC: Err must mean no mutation
+            prop_assert_eq!(engine.vault, vault_before, "withdraw Err must not change vault");
+            prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before,
+                           "withdraw Err must not change capital");
+            prop_assert_eq!(engine.accounts[user_idx as usize].pnl, pnl_before,
+                           "withdraw Err must not change pnl");
+            prop_assert_eq!(engine.accounts[user_idx as usize].funding_index, funding_idx_before,
+                           "withdraw Err must not change funding_index");
         }
     }
 
@@ -1796,4 +1820,114 @@ proptest! {
         prop_assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
         prop_assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
     }
+}
+
+// ============================================================================
+// SECTION 9: ATOMICITY REGRESSION TESTS
+// These verify that operations are atomic on error (Err => no mutation)
+// ============================================================================
+
+/// Regression test: withdraw must not mutate state on insufficient balance error
+/// Before fix: touch_account and settle_warmup would mutate even when withdraw failed
+#[test]
+fn withdraw_atomic_err_regression() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create user with some funding accrued
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(user_idx, 1000).unwrap();
+
+    // Accrue some funding to create unsettled state
+    engine.accrue_funding(100, 1_000_000, 100).unwrap();
+
+    // Capture state before
+    let pnl_before = engine.accounts[user_idx as usize].pnl;
+    let capital_before = engine.accounts[user_idx as usize].capital;
+    let funding_idx_before = engine.accounts[user_idx as usize].funding_index;
+    let vault_before = engine.vault;
+
+    // Try to withdraw more than available - should fail
+    let result = engine.withdraw(user_idx, 999_999);
+    assert!(result.is_err(), "Withdraw should fail with insufficient balance");
+
+    // Verify NO state changed (this was the bug)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, pnl_before,
+               "withdraw Err must not change pnl");
+    assert_eq!(engine.accounts[user_idx as usize].capital, capital_before,
+               "withdraw Err must not change capital");
+    assert_eq!(engine.accounts[user_idx as usize].funding_index, funding_idx_before,
+               "withdraw Err must not change funding_index");
+    assert_eq!(engine.vault, vault_before,
+               "withdraw Err must not change vault");
+}
+
+/// Regression test: execute_trade must not mutate state on margin error
+/// Before fix: touch_account would mutate funding_index even when trade failed margin check
+#[test]
+fn execute_trade_atomic_err_regression() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create LP and user with minimal capital
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(lp_idx, 100).unwrap();
+    engine.deposit(user_idx, 100).unwrap();
+
+    // Accrue some funding to create unsettled state
+    engine.accrue_funding(100, 1_000_000, 100).unwrap();
+
+    // Capture state before
+    let user_funding_idx_before = engine.accounts[user_idx as usize].funding_index;
+    let lp_funding_idx_before = engine.accounts[lp_idx as usize].funding_index;
+    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Try to trade a huge size that will fail margin check
+    let result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1_000_000);
+    assert!(result.is_err(), "Trade should fail margin check");
+
+    // Verify NO state changed (this was the bug)
+    assert_eq!(engine.accounts[user_idx as usize].funding_index, user_funding_idx_before,
+               "execute_trade Err must not change user funding_index");
+    assert_eq!(engine.accounts[lp_idx as usize].funding_index, lp_funding_idx_before,
+               "execute_trade Err must not change LP funding_index");
+    assert_eq!(engine.accounts[user_idx as usize].pnl, user_pnl_before,
+               "execute_trade Err must not change user pnl");
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, lp_pnl_before,
+               "execute_trade Err must not change LP pnl");
+    assert_eq!(engine.insurance_fund.balance, insurance_before,
+               "execute_trade Err must not change insurance");
+}
+
+/// Regression test: panic_settle_all must settle funding before computing mark PNL
+/// Before fix: conservation would fail due to unsettled funding
+#[test]
+fn panic_settle_funding_regression() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create LP and user with positions
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(lp_idx, 100_000).unwrap();
+    engine.deposit(user_idx, 100_000).unwrap();
+
+    // Execute a trade to create positions
+    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000).unwrap();
+
+    // Accrue significant funding WITHOUT touching accounts
+    engine.accrue_funding(1000, 1_000_000, 1000).unwrap();
+
+    // Verify conservation holds before panic settle
+    assert!(engine.check_conservation(), "Conservation should hold before panic_settle");
+
+    // Panic settle - this should settle funding first
+    engine.panic_settle_all(1_000_000).unwrap();
+
+    // Verify conservation still holds
+    assert!(engine.check_conservation(), "Conservation must hold after panic_settle");
+
+    // All positions should be closed
+    assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
+    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
 }
