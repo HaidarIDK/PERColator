@@ -155,8 +155,8 @@ impl Snapshot {
             });
         }
 
-        // Capture freelist chain (only up to account_count for efficiency)
-        let next_free: Vec<u16> = engine.next_free[..n].to_vec();
+        // Capture full freelist chain (detects corruption outside used range)
+        let next_free: Vec<u16> = engine.next_free.to_vec();
 
         Snapshot {
             vault: engine.vault,
@@ -240,9 +240,9 @@ fn assert_unchanged(engine: &RiskEngine, snapshot: &Snapshot, context: &str) {
             panic!("{}: next_free freelist chain changed", context);
         }
         // Account comparison
-        for (i, (curr_acc, snap_acc)) in current.accounts.iter().zip(snapshot.accounts.iter()).enumerate() {
+        for (curr_acc, snap_acc) in current.accounts.iter().zip(snapshot.accounts.iter()) {
             if curr_acc != snap_acc {
-                panic!("{}: account {} changed\n  before: {:?}\n  after:  {:?}", context, i, snap_acc, curr_acc);
+                panic!("{}: account slot {} changed\n  before: {:?}\n  after:  {:?}", context, snap_acc.idx, snap_acc, curr_acc);
             }
         }
         // Shouldn't reach here if we checked everything
@@ -1988,28 +1988,30 @@ fn add_user_atomic_err_allocator_regression() {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 2,
-        account_fee_bps: 100, // Low fee so we can easily exceed it
+        account_fee_bps: 10_000, // 1% base fee
         risk_reduction_threshold: 0,
     };
     let mut engine = Box::new(RiskEngine::new(params));
 
-    // Add LP (uses slot 0) - fee = 100 * 1 / 10000 = 0, so any fee works
-    let _lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+    // Add LP (uses slot 0)
+    // multiplier = 2^floor(log2(2/2)) = 1, required = 10000 * 1 / 10000 = 1
+    let _lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 10).unwrap();
 
     // Add user (uses slot 1) - now at capacity
-    // With max=2, used=1: multiplier=2, required = 100 * 2 / 10000 = 0, so any fee works
-    let _user_idx = engine.add_user(100).unwrap();
+    // multiplier = 2^floor(log2(2/1)) = 2, required = 10000 * 2 / 10000 = 2
+    let _user_idx = engine.add_user(10).unwrap();
 
     // Capture allocator state before failed add
     let num_used_before = engine.num_used_accounts;
     let next_id_before = engine.next_account_id;
     let free_head_before = engine.free_head;
     let used_bitmap_before: Vec<u64> = engine.used.iter().copied().collect();
-    let next_free_before: Vec<u16> = engine.next_free[..2].to_vec();
+    let next_free_before: Vec<u16> = engine.next_free.to_vec();
 
-    // Try to add another user - should fail (at capacity, Overflow error)
+    // Try to add another user - should fail with Overflow (at capacity)
     let result = engine.add_user(100);
-    assert!(result.is_err(), "add_user should fail when at capacity");
+    assert!(matches!(result, Err(RiskError::Overflow)),
+            "add_user at capacity should fail with Overflow, got {:?}", result);
 
     // Verify allocator state unchanged
     assert_eq!(engine.num_used_accounts, num_used_before,
@@ -2021,7 +2023,78 @@ fn add_user_atomic_err_allocator_regression() {
     let used_bitmap_after: Vec<u64> = engine.used.iter().copied().collect();
     assert_eq!(used_bitmap_after, used_bitmap_before,
                "add_user Err must not change used bitmap");
-    let next_free_after: Vec<u16> = engine.next_free[..2].to_vec();
+    let next_free_after: Vec<u16> = engine.next_free.to_vec();
     assert_eq!(next_free_after, next_free_before,
                "add_user Err must not change next_free");
+}
+
+/// Verify check_conservation uses settled_pnl (accounts for lazy funding)
+/// This prevents "docs drift" - ensures engine matches documented formula
+#[test]
+fn conservation_uses_settled_pnl_regression() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create LP and user with positions
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(lp_idx, 100_000).unwrap();
+    engine.deposit(user_idx, 100_000).unwrap();
+
+    // Execute trade to create positions
+    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000).unwrap();
+
+    // Accrue significant funding WITHOUT touching accounts
+    // This creates a gap between account.pnl and settled_pnl
+    engine.accrue_funding(1000, 1_000_000, 500).unwrap();
+
+    // Manually compute conservation using settled_pnl formula
+    let global_index = engine.funding_index_qpb_e6;
+    let mut total_capital = 0u128;
+    let mut net_settled_pnl: i128 = 0;
+
+    for i in 0..account_count(&engine) {
+        if is_account_used(&engine, i as u16) {
+            let acc = &engine.accounts[i];
+            total_capital += acc.capital;
+
+            // Compute settled_pnl: pnl - position * (global_index - acc.funding_index) / 1e6
+            let mut settled_pnl = acc.pnl;
+            if acc.position_size != 0 {
+                let delta_f = global_index.saturating_sub(acc.funding_index);
+                if delta_f != 0 {
+                    let payment = acc.position_size
+                        .saturating_mul(delta_f)
+                        .saturating_div(1_000_000);
+                    settled_pnl = settled_pnl.saturating_sub(payment);
+                }
+            }
+            net_settled_pnl = net_settled_pnl.saturating_add(settled_pnl);
+        }
+    }
+
+    // Compute expected: sum(capital) + sum(settled_pnl) + insurance
+    let base = total_capital + engine.insurance_fund.balance;
+    let expected = if net_settled_pnl >= 0 {
+        base + (net_settled_pnl as u128)
+    } else {
+        base.saturating_sub((-net_settled_pnl) as u128)
+    };
+
+    // Compute actual: vault + loss_accum
+    let actual = engine.vault + engine.loss_accum;
+
+    // Verify our manual computation matches engine's check
+    assert!(engine.check_conservation(),
+            "check_conservation failed: actual={}, expected={}, diff={}",
+            actual, expected, (actual as i128) - (expected as i128));
+
+    // Also verify our formula matches (within rounding tolerance)
+    let diff = if actual >= expected {
+        actual - expected
+    } else {
+        expected - actual
+    };
+    assert!(diff <= 100, // MAX_ROUNDING_SLACK is typically small
+            "Manual settled_pnl formula doesn't match engine: actual={}, expected={}, diff={}",
+            actual, expected, diff);
 }
