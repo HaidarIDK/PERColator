@@ -14,7 +14,7 @@ The Percolator codebase is well-structured with strong security focus:
 
 ### High
 
-*   **[H-01] Unused `pinocchio` Dependency:** The `pinocchio` and `pinocchio-log` dependencies are in `Cargo.toml` but not used anywhere in the codebase. Unused dependencies increase attack surface and should be removed.
+*   **[H-01] ~~Unused `pinocchio` Dependency~~:** FIXED - Removed unused `pinocchio` and `pinocchio-log` dependencies from `Cargo.toml`.
 
 ### Medium
 
@@ -32,7 +32,7 @@ The Percolator codebase is well-structured with strong security focus:
 
 ## Recommendations
 
-*   **[R-01] Remove Unused Dependencies:** Remove `pinocchio` and `pinocchio-log` from `Cargo.toml`, or document their intended use.
+*   **[R-01] ~~Remove Unused Dependencies~~:** DONE - Removed `pinocchio` and `pinocchio-log` from `Cargo.toml`.
 
 *   **[R-02] Consider Account Deallocation:** Add a mechanism to reclaim slots from accounts with zero capital, zero position, and zero PnL. Could require a waiting period to prevent abuse.
 
