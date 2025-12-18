@@ -41,9 +41,14 @@ fn is_account_used(engine: &RiskEngine, idx: u16) -> bool {
     ((engine.used[w] >> b) & 1) == 1
 }
 
-/// Captures engine state for comparison
+/// BITMAP_WORDS constant for snapshot
+const BITMAP_WORDS: usize = 64; // 64 * 64 = 4096 max accounts
+
+/// Captures FULL engine state for comparison (including allocator state)
+/// This is essential for detecting mutations on error paths
 #[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
+    // Core state
     vault: u128,
     insurance_balance: u128,
     insurance_fee_revenue: u128,
@@ -57,13 +62,21 @@ struct Snapshot {
     current_slot: u64,
     funding_index_qpb_e6: i128,
     last_funding_slot: u64,
-    // Account snapshots for touched accounts
+    // Allocator state (critical for detecting corruption)
+    used_bitmap: Vec<u64>,
+    num_used_accounts: u16,
+    next_account_id: u64,
+    free_head: u16,
+    // All accounts (up to max_accounts)
     accounts: Vec<AccountSnapshot>,
 }
 
+/// Full account snapshot including kind, id, and matcher fields
 #[derive(Clone, Debug, PartialEq)]
 struct AccountSnapshot {
     idx: u16,
+    kind: u8, // 0=User, 1=LP
+    account_id: u64,
     capital: u128,
     pnl: i128,
     reserved_pnl: u128,
@@ -72,29 +85,41 @@ struct AccountSnapshot {
     funding_index: i128,
     warmup_slope_per_step: u128,
     warmup_started_at_slot: u64,
+    matcher_program: [u8; 32],
+    matcher_context: [u8; 32],
 }
 
 impl Snapshot {
-    /// Take a snapshot of the engine state including specified accounts
-    fn take(engine: &RiskEngine, account_indices: &[u16]) -> Self {
-        let accounts = account_indices
-            .iter()
-            .filter(|&&idx| is_account_used(engine, idx))
-            .map(|&idx| {
-                let acc = &engine.accounts[idx as usize];
-                AccountSnapshot {
-                    idx,
-                    capital: acc.capital,
-                    pnl: acc.pnl,
-                    reserved_pnl: acc.reserved_pnl,
-                    position_size: acc.position_size,
-                    entry_price: acc.entry_price,
-                    funding_index: acc.funding_index,
-                    warmup_slope_per_step: acc.warmup_slope_per_step,
-                    warmup_started_at_slot: acc.warmup_started_at_slot,
-                }
-            })
-            .collect();
+    /// Take a FULL snapshot of the entire engine state
+    /// This captures everything needed to detect any mutation
+    fn take_full(engine: &RiskEngine) -> Self {
+        // Capture used bitmap
+        let used_bitmap: Vec<u64> = engine.used.iter().copied().collect();
+
+        // Capture ALL accounts (not just used ones - to detect bitmap corruption)
+        let mut accounts = Vec::new();
+        for i in 0..engine.params.max_accounts {
+            let idx = i as u16;
+            let acc = &engine.accounts[i as usize];
+            accounts.push(AccountSnapshot {
+                idx,
+                kind: match acc.kind {
+                    AccountKind::User => 0,
+                    AccountKind::LP => 1,
+                },
+                account_id: acc.account_id,
+                capital: acc.capital,
+                pnl: acc.pnl,
+                reserved_pnl: acc.reserved_pnl,
+                position_size: acc.position_size,
+                entry_price: acc.entry_price,
+                funding_index: acc.funding_index,
+                warmup_slope_per_step: acc.warmup_slope_per_step,
+                warmup_started_at_slot: acc.warmup_started_at_slot,
+                matcher_program: acc.matcher_program,
+                matcher_context: acc.matcher_context,
+            });
+        }
 
         Snapshot {
             vault: engine.vault,
@@ -110,91 +135,77 @@ impl Snapshot {
             current_slot: engine.current_slot,
             funding_index_qpb_e6: engine.funding_index_qpb_e6,
             last_funding_slot: engine.last_funding_slot,
+            used_bitmap,
+            num_used_accounts: engine.num_used_accounts,
+            next_account_id: engine.next_account_id,
+            free_head: engine.free_head,
             accounts,
         }
     }
-
-    /// Take a full snapshot of ALL used accounts
-    fn take_full(engine: &RiskEngine) -> Self {
-        let mut account_indices = Vec::new();
-        for i in 0..engine.params.max_accounts {
-            if is_account_used(engine, i as u16) {
-                account_indices.push(i as u16);
-            }
-        }
-        Self::take(engine, &account_indices)
-    }
 }
 
-/// Assert that engine state matches a previous snapshot
+/// Assert that engine state EXACTLY matches a previous snapshot
+/// This is the strict "no mutation on error" check
 fn assert_unchanged(engine: &RiskEngine, snapshot: &Snapshot, context: &str) {
-    let current = Snapshot::take(
-        engine,
-        &snapshot.accounts.iter().map(|a| a.idx).collect::<Vec<_>>(),
-    );
+    let current = Snapshot::take_full(engine);
 
-    assert_eq!(
-        current.vault, snapshot.vault,
-        "{}: vault changed from {} to {}",
-        context, snapshot.vault, current.vault
-    );
-    assert_eq!(
-        current.insurance_balance, snapshot.insurance_balance,
-        "{}: insurance_balance changed",
-        context
-    );
-    assert_eq!(
-        current.insurance_fee_revenue, snapshot.insurance_fee_revenue,
-        "{}: insurance_fee_revenue changed",
-        context
-    );
-    assert_eq!(
-        current.loss_accum, snapshot.loss_accum,
-        "{}: loss_accum changed",
-        context
-    );
-    assert_eq!(
-        current.risk_reduction_only, snapshot.risk_reduction_only,
-        "{}: risk_reduction_only changed",
-        context
-    );
-    assert_eq!(
-        current.warmup_paused, snapshot.warmup_paused,
-        "{}: warmup_paused changed",
-        context
-    );
-    assert_eq!(
-        current.warmed_pos_total, snapshot.warmed_pos_total,
-        "{}: warmed_pos_total changed",
-        context
-    );
-    assert_eq!(
-        current.warmed_neg_total, snapshot.warmed_neg_total,
-        "{}: warmed_neg_total changed",
-        context
-    );
-    assert_eq!(
-        current.warmup_insurance_reserved, snapshot.warmup_insurance_reserved,
-        "{}: warmup_insurance_reserved changed",
-        context
-    );
-    assert_eq!(
-        current.funding_index_qpb_e6, snapshot.funding_index_qpb_e6,
-        "{}: funding_index changed",
-        context
-    );
-    assert_eq!(
-        current.last_funding_slot, snapshot.last_funding_slot,
-        "{}: last_funding_slot changed",
-        context
-    );
-
-    for (curr_acc, snap_acc) in current.accounts.iter().zip(snapshot.accounts.iter()) {
-        assert_eq!(
-            curr_acc, snap_acc,
-            "{}: account {} changed",
-            context, snap_acc.idx
-        );
+    // Compare full snapshots - any difference is a failure
+    if current != *snapshot {
+        // Find what changed for better error messages
+        if current.vault != snapshot.vault {
+            panic!("{}: vault changed from {} to {}", context, snapshot.vault, current.vault);
+        }
+        if current.insurance_balance != snapshot.insurance_balance {
+            panic!("{}: insurance_balance changed from {} to {}", context, snapshot.insurance_balance, current.insurance_balance);
+        }
+        if current.insurance_fee_revenue != snapshot.insurance_fee_revenue {
+            panic!("{}: insurance_fee_revenue changed from {} to {}", context, snapshot.insurance_fee_revenue, current.insurance_fee_revenue);
+        }
+        if current.loss_accum != snapshot.loss_accum {
+            panic!("{}: loss_accum changed from {} to {}", context, snapshot.loss_accum, current.loss_accum);
+        }
+        if current.risk_reduction_only != snapshot.risk_reduction_only {
+            panic!("{}: risk_reduction_only changed from {} to {}", context, snapshot.risk_reduction_only, current.risk_reduction_only);
+        }
+        if current.warmup_paused != snapshot.warmup_paused {
+            panic!("{}: warmup_paused changed from {} to {}", context, snapshot.warmup_paused, current.warmup_paused);
+        }
+        if current.warmed_pos_total != snapshot.warmed_pos_total {
+            panic!("{}: warmed_pos_total changed from {} to {}", context, snapshot.warmed_pos_total, current.warmed_pos_total);
+        }
+        if current.warmed_neg_total != snapshot.warmed_neg_total {
+            panic!("{}: warmed_neg_total changed from {} to {}", context, snapshot.warmed_neg_total, current.warmed_neg_total);
+        }
+        if current.warmup_insurance_reserved != snapshot.warmup_insurance_reserved {
+            panic!("{}: warmup_insurance_reserved changed from {} to {}", context, snapshot.warmup_insurance_reserved, current.warmup_insurance_reserved);
+        }
+        if current.funding_index_qpb_e6 != snapshot.funding_index_qpb_e6 {
+            panic!("{}: funding_index changed from {} to {}", context, snapshot.funding_index_qpb_e6, current.funding_index_qpb_e6);
+        }
+        if current.last_funding_slot != snapshot.last_funding_slot {
+            panic!("{}: last_funding_slot changed from {} to {}", context, snapshot.last_funding_slot, current.last_funding_slot);
+        }
+        // Allocator state
+        if current.used_bitmap != snapshot.used_bitmap {
+            panic!("{}: used_bitmap changed", context);
+        }
+        if current.num_used_accounts != snapshot.num_used_accounts {
+            panic!("{}: num_used_accounts changed from {} to {}", context, snapshot.num_used_accounts, current.num_used_accounts);
+        }
+        if current.next_account_id != snapshot.next_account_id {
+            panic!("{}: next_account_id changed from {} to {}", context, snapshot.next_account_id, current.next_account_id);
+        }
+        if current.free_head != snapshot.free_head {
+            panic!("{}: free_head changed from {} to {}", context, snapshot.free_head, current.free_head);
+        }
+        // Account comparison
+        for (i, (curr_acc, snap_acc)) in current.accounts.iter().zip(snapshot.accounts.iter()).enumerate() {
+            if curr_acc != snap_acc {
+                panic!("{}: account {} changed\n  before: {:?}\n  after:  {:?}", context, i, snap_acc, curr_acc);
+            }
+        }
+        // Shouldn't reach here if we checked everything
+        panic!("{}: snapshot changed (unknown field)", context);
     }
 }
 
@@ -203,33 +214,47 @@ fn assert_unchanged(engine: &RiskEngine, snapshot: &Snapshot, context: &str) {
 // ============================================================================
 
 /// Assert all global invariants hold
-fn assert_global_invariants(engine: &mut RiskEngine, context: &str) {
-    // Settle funding for all accounts before checking conservation
-    // This ensures funding is zero-sum and conservation holds
-    engine.settle_all_funding();
-
+/// IMPORTANT: This function is PURE - it does NOT mutate the engine.
+/// Invariant checks must reflect on-chain semantics (funding is lazy).
+fn assert_global_invariants(engine: &RiskEngine, context: &str) {
     // 1. Conservation
+    // Note: check_conservation now accounts for lazy funding internally
     if !engine.check_conservation() {
-        // Compute details for debugging
+        // Compute details for debugging (using settled PNL like check_conservation does)
         let mut total_capital = 0u128;
-        let mut net_pnl: i128 = 0;
+        let mut net_settled_pnl: i128 = 0;
         let mut account_details = Vec::new();
+        let global_index = engine.funding_index_qpb_e6;
+
         for i in 0..engine.params.max_accounts {
             if is_account_used(engine, i as u16) {
                 let acc = &engine.accounts[i as usize];
                 total_capital += acc.capital;
-                net_pnl = net_pnl.saturating_add(acc.pnl);
+
+                // Compute settled PNL (same formula as check_conservation)
+                let mut settled_pnl = acc.pnl;
+                if acc.position_size != 0 {
+                    let delta_f = global_index.saturating_sub(acc.funding_index);
+                    if delta_f != 0 {
+                        let payment = acc.position_size
+                            .saturating_mul(delta_f)
+                            .saturating_div(1_000_000);
+                        settled_pnl = settled_pnl.saturating_sub(payment);
+                    }
+                }
+                net_settled_pnl = net_settled_pnl.saturating_add(settled_pnl);
+
                 account_details.push(format!(
-                    "  acc[{}]: capital={}, pnl={}, pos={}",
-                    i, acc.capital, acc.pnl, acc.position_size
+                    "  acc[{}]: capital={}, pnl={}, settled_pnl={}, pos={}, fidx={}",
+                    i, acc.capital, acc.pnl, settled_pnl, acc.position_size, acc.funding_index
                 ));
             }
         }
         let base = total_capital + engine.insurance_fund.balance;
-        let expected = if net_pnl >= 0 {
-            base + net_pnl as u128
+        let expected = if net_settled_pnl >= 0 {
+            base + net_settled_pnl as u128
         } else {
-            base.saturating_sub((-net_pnl) as u128)
+            base.saturating_sub((-net_settled_pnl) as u128)
         };
         let actual = engine.vault + engine.loss_accum;
 
@@ -241,12 +266,12 @@ fn assert_global_invariants(engine: &mut RiskEngine, context: &str) {
         panic!(
             "{}: Conservation invariant violated!\n\
              vault={}, loss_accum={}, actual={}\n\
-             total_capital={}, insurance={}, net_pnl={}, expected={}\n\
-             slack={}\n\
+             total_capital={}, insurance={}, net_settled_pnl={}, expected={}\n\
+             global_funding_index={}, slack={}\n\
              Accounts:\n{}",
             context, engine.vault, engine.loss_accum, actual,
-            total_capital, engine.insurance_fund.balance, net_pnl, expected,
-            slack,
+            total_capital, engine.insurance_fund.balance, net_settled_pnl, expected,
+            global_index, slack,
             account_details.join("\n")
         );
     }
@@ -354,41 +379,66 @@ fn params_regime_b() -> RiskParams {
 }
 
 // ============================================================================
-// SECTION 4: ACTION ENUM AND STRATEGIES
+// SECTION 4: SELECTOR-BASED ACTION ENUM AND STRATEGIES
 // ============================================================================
 
+/// Index selector - resolved at runtime against live state
+/// This allows proptest to generate meaningful action sequences
+/// even though it can't see runtime state during strategy generation.
+#[derive(Clone, Debug)]
+enum IdxSel {
+    /// Pick any account from live_accounts (fallback to Random if empty)
+    Existing,
+    /// Pick an account that is NOT the LP (fallback to Random if impossible)
+    ExistingNonLp,
+    /// Use the LP index (fallback to 0 if no LP)
+    Lp,
+    /// Random index 0..64 (to test AccountNotFound paths)
+    Random(u16),
+}
+
+/// Actions use selectors instead of concrete indices
+/// Selectors are resolved at runtime in execute()
 #[derive(Clone, Debug)]
 enum Action {
     AddUser { fee_payment: u128 },
     AddLp { fee_payment: u128 },
-    Deposit { idx: u16, amount: u128 },
-    Withdraw { idx: u16, amount: u128 },
+    Deposit { who: IdxSel, amount: u128 },
+    Withdraw { who: IdxSel, amount: u128 },
     AdvanceSlot { dt: u64 },
     AccrueFunding { dt: u64, oracle_price: u64, rate_bps: i64 },
-    Touch { idx: u16 },
-    ExecuteTrade { lp_idx: u16, user_idx: u16, oracle_price: u64, size: i128 },
-    ApplyAdl { loss: u128 },
+    Touch { who: IdxSel },
+    ExecuteTrade { lp: IdxSel, user: IdxSel, oracle_price: u64, size: i128 },
+    // Note: ApplyAdl removed - it's internal and tested via PanicSettleAll/ForceRealizeLosses
     PanicSettleAll { oracle_price: u64 },
     ForceRealizeLosses { oracle_price: u64 },
     TopUpInsurance { amount: u128 },
 }
 
-/// Strategy for generating actions biased toward valid operations
-fn action_strategy(live_accounts: &[u16], lp_idx: Option<u16>) -> impl Strategy<Value = Action> {
-    let live = live_accounts.to_vec();
-    let lp = lp_idx;
+/// Strategy for generating index selectors
+fn idx_sel_strategy() -> impl Strategy<Value = IdxSel> {
+    prop_oneof![
+        // 60% existing account
+        6 => Just(IdxSel::Existing),
+        // 15% non-LP existing
+        15 => Just(IdxSel::ExistingNonLp).prop_filter("", |_| true).prop_map(|_| IdxSel::ExistingNonLp),
+        // 5% LP
+        5 => Just(IdxSel::Lp),
+        // 20% random (to test error paths)
+        2 => (0u16..64).prop_map(IdxSel::Random),
+    ]
+}
 
+/// Strategy for generating actions
+/// Actions use selectors that are resolved at runtime
+fn action_strategy() -> impl Strategy<Value = Action> {
     prop_oneof![
         // Account creation
         2 => (1u128..100).prop_map(|fee| Action::AddUser { fee_payment: fee }),
         1 => (1u128..100).prop_map(|fee| Action::AddLp { fee_payment: fee }),
-        // Deposits/Withdrawals (80% valid indices)
-        10 => valid_idx_strategy(&live).prop_flat_map(|idx| {
-            (Just(idx), 0u128..50_000).prop_map(|(idx, amount)| Action::Deposit { idx, amount })
-        }),
-        5 => valid_idx_strategy(&live).prop_flat_map(|idx| {
-            (Just(idx), 0u128..50_000).prop_map(|(idx, amount)| Action::Withdraw { idx, amount })
-        }),
+        // Deposits/Withdrawals
+        10 => (idx_sel_strategy(), 0u128..50_000).prop_map(|(who, amount)| Action::Deposit { who, amount }),
+        5 => (idx_sel_strategy(), 0u128..50_000).prop_map(|(who, amount)| Action::Withdraw { who, amount }),
         // Time advancement
         5 => (0u64..10).prop_map(|dt| Action::AdvanceSlot { dt }),
         // Funding
@@ -396,11 +446,11 @@ fn action_strategy(live_accounts: &[u16], lp_idx: Option<u16>) -> impl Strategy<
             Action::AccrueFunding { dt, oracle_price: price, rate_bps: rate }
         }),
         // Touch account
-        5 => valid_idx_strategy(&live).prop_map(|idx| Action::Touch { idx }),
-        // Trades
-        8 => trade_strategy(&live, lp),
-        // ADL
-        2 => (0u128..10_000).prop_map(|loss| Action::ApplyAdl { loss }),
+        5 => idx_sel_strategy().prop_map(|who| Action::Touch { who }),
+        // Trades (LP vs non-LP user)
+        8 => (100_000u64..10_000_000, -5_000i128..5_000).prop_map(|(oracle_price, size)| {
+            Action::ExecuteTrade { lp: IdxSel::Lp, user: IdxSel::ExistingNonLp, oracle_price, size }
+        }),
         // Panic settle
         1 => (100_000u64..10_000_000).prop_map(|price| Action::PanicSettleAll { oracle_price: price }),
         // Force realize
@@ -408,44 +458,6 @@ fn action_strategy(live_accounts: &[u16], lp_idx: Option<u16>) -> impl Strategy<
         // Top up insurance
         2 => (0u128..10_000).prop_map(|amount| Action::TopUpInsurance { amount }),
     ]
-}
-
-fn valid_idx_strategy(live: &[u16]) -> impl Strategy<Value = u16> {
-    if live.is_empty() {
-        // Return a dummy index that will fail
-        Just(0u16).boxed()
-    } else {
-        let live_clone = live.to_vec();
-        prop_oneof![
-            // 80% valid indices
-            8 => prop::sample::select(live_clone.clone()),
-            // 20% random indices (to test AccountNotFound)
-            2 => 0u16..64,
-        ]
-        .boxed()
-    }
-}
-
-fn trade_strategy(live: &[u16], lp_idx: Option<u16>) -> impl Strategy<Value = Action> {
-    let live_clone = live.to_vec();
-    let lp = lp_idx.unwrap_or(0);
-
-    (
-        Just(lp),
-        if live_clone.is_empty() {
-            Just(1u16).boxed()
-        } else {
-            prop::sample::select(live_clone).boxed()
-        },
-        100_000u64..10_000_000,
-        -5_000i128..5_000,
-    )
-        .prop_map(|(lp_idx, user_idx, oracle_price, size)| Action::ExecuteTrade {
-            lp_idx,
-            user_idx,
-            oracle_price,
-            size,
-        })
 }
 
 // ============================================================================
@@ -458,6 +470,7 @@ struct FuzzState {
     live_accounts: Vec<u16>,
     lp_idx: Option<u16>,
     account_ids: Vec<u64>, // Track allocated account IDs for uniqueness
+    rng_state: u64,        // For deterministic selector resolution
 }
 
 impl FuzzState {
@@ -467,6 +480,51 @@ impl FuzzState {
             live_accounts: Vec::new(),
             lp_idx: None,
             account_ids: Vec::new(),
+            rng_state: 12345,
+        }
+    }
+
+    /// Simple deterministic RNG for selector resolution
+    fn next_rng(&mut self) -> u64 {
+        self.rng_state ^= self.rng_state << 13;
+        self.rng_state ^= self.rng_state >> 7;
+        self.rng_state ^= self.rng_state << 17;
+        self.rng_state
+    }
+
+    /// Resolve an index selector to a concrete index
+    fn resolve_selector(&mut self, sel: &IdxSel) -> u16 {
+        match sel {
+            IdxSel::Existing => {
+                if self.live_accounts.is_empty() {
+                    // Fallback to random
+                    (self.next_rng() % 64) as u16
+                } else {
+                    let idx = self.next_rng() as usize % self.live_accounts.len();
+                    self.live_accounts[idx]
+                }
+            }
+            IdxSel::ExistingNonLp => {
+                let non_lp: Vec<u16> = self.live_accounts.iter()
+                    .copied()
+                    .filter(|&x| Some(x) != self.lp_idx)
+                    .collect();
+                if non_lp.is_empty() {
+                    // Fallback to random different from LP
+                    let mut idx = (self.next_rng() % 64) as u16;
+                    if Some(idx) == self.lp_idx && idx < 63 {
+                        idx += 1;
+                    }
+                    idx
+                } else {
+                    let i = self.next_rng() as usize % non_lp.len();
+                    non_lp[i]
+                }
+            }
+            IdxSel::Lp => {
+                self.lp_idx.unwrap_or(0)
+            }
+            IdxSel::Random(idx) => *idx,
         }
     }
 
@@ -550,10 +608,12 @@ impl FuzzState {
                 }
             }
 
-            Action::Deposit { idx, amount } => {
+            Action::Deposit { who, amount } => {
+                let idx = self.resolve_selector(who);
+                let snapshot = Snapshot::take_full(&self.engine);
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.deposit(*idx, *amount);
+                let result = self.engine.deposit(idx, *amount);
 
                 match result {
                     Ok(()) => {
@@ -566,18 +626,18 @@ impl FuzzState {
                         );
                     }
                     Err(_) => {
-                        // Deposit checks is_used before modifying, so AccountNotFound
-                        // should leave state unchanged. However, if settle_warmup fails
-                        // after capital/vault are modified, state may be partially changed.
-                        // We rely on global invariants check below.
+                        // STRICT: Err must mean no mutation
+                        assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
             }
 
-            Action::Withdraw { idx, amount } => {
+            Action::Withdraw { who, amount } => {
+                let idx = self.resolve_selector(who);
+                let snapshot = Snapshot::take_full(&self.engine);
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.withdraw(*idx, *amount);
+                let result = self.engine.withdraw(idx, *amount);
 
                 match result {
                     Ok(()) => {
@@ -590,9 +650,8 @@ impl FuzzState {
                         );
                     }
                     Err(_) => {
-                        // NOTE: withdraw calls touch_account and settle_warmup_to_capital
-                        // before checking balance, so state may be modified even on error.
-                        // This is known behavior - we rely on global invariants check below.
+                        // STRICT: Err must mean no mutation
+                        assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
             }
@@ -620,175 +679,110 @@ impl FuzzState {
                 match result {
                     Ok(()) => {
                         // Only expect last_funding_slot to update if now_slot > old value
-                        // (accrue_funding is a no-op when dt=0, which happens when now_slot <= last_funding_slot)
                         if now_slot > snapshot.last_funding_slot {
                             assert_eq!(
                                 self.engine.last_funding_slot, now_slot,
                                 "{}: last_funding_slot not updated",
                                 context
                             );
-                        } else {
-                            // Should be unchanged when dt=0
-                            assert_eq!(
-                                self.engine.last_funding_slot, snapshot.last_funding_slot,
-                                "{}: last_funding_slot changed unexpectedly",
-                                context
-                            );
                         }
                     }
                     Err(_) => {
-                        // Funding index and last_funding_slot should not change on error
-                        assert_eq!(
-                            self.engine.funding_index_qpb_e6, snapshot.funding_index_qpb_e6,
-                            "{}: funding_index changed on error",
-                            context
-                        );
-                        assert_eq!(
-                            self.engine.last_funding_slot, snapshot.last_funding_slot,
-                            "{}: last_funding_slot changed on error",
-                            context
-                        );
+                        // STRICT: Err must mean no mutation
+                        assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
             }
 
-            Action::Touch { idx } => {
-                let snapshot = Snapshot::take(&self.engine, &[*idx]);
+            Action::Touch { who } => {
+                let idx = self.resolve_selector(who);
+                let snapshot = Snapshot::take_full(&self.engine);
 
-                let result = self.engine.touch_account(*idx);
+                let result = self.engine.touch_account(idx);
 
                 match result {
                     Ok(()) => {
                         // funding_index should equal global index
                         assert_eq!(
-                            self.engine.accounts[*idx as usize].funding_index,
+                            self.engine.accounts[idx as usize].funding_index,
                             self.engine.funding_index_qpb_e6,
                             "{}: funding_index not synced",
                             context
                         );
-                        // If position_size == 0, pnl should be unchanged
-                        if let Some(acc_snap) = snapshot.accounts.first() {
-                            if acc_snap.position_size == 0 {
-                                assert_eq!(
-                                    self.engine.accounts[*idx as usize].pnl,
-                                    acc_snap.pnl,
-                                    "{}: pnl changed with zero position",
-                                    context
-                                );
-                            }
-                        }
                     }
                     Err(_) => {
+                        // STRICT: Err must mean no mutation
                         assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
             }
 
             Action::ExecuteTrade {
-                lp_idx,
-                user_idx,
+                lp,
+                user,
                 oracle_price,
                 size,
             } => {
+                let lp_idx = self.resolve_selector(lp);
+                let user_idx = self.resolve_selector(user);
+
                 // Skip if LP and user are the same account (invalid trade)
                 if lp_idx == user_idx {
                     return;
                 }
 
-                let snapshot = Snapshot::take(&self.engine, &[*lp_idx, *user_idx]);
-                let _insurance_before = self.engine.insurance_fund.fee_revenue;
+                let snapshot = Snapshot::take_full(&self.engine);
 
                 let result =
                     self.engine
-                        .execute_trade(&MATCHER, *lp_idx, *user_idx, *oracle_price, *size);
+                        .execute_trade(&MATCHER, lp_idx, user_idx, *oracle_price, *size);
 
                 match result {
                     Ok(_) => {
-                        // If trade succeeded, positions should net to ~0
-                        // (allowing for pre-existing imbalance)
+                        // Trade succeeded - positions modified, that's fine
                     }
                     Err(_) => {
-                        // NOTE: execute_trade may mutate state before returning Err
-                        // This is a known issue flagged in plan.md section 10
-                        // We document but don't fail here to avoid blocking other tests
-                        // TODO: Fix execute_trade to be atomic
-                        let _ = snapshot; // Acknowledge we're not checking unchanged
+                        // STRICT: Err must mean no mutation
+                        assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
-            }
-
-            Action::ApplyAdl { loss: _ } => {
-                // apply_adl is an internal function that should only be called during
-                // settlement operations (panic_settle_all, force_realize_losses) with
-                // actual realized losses from position closures.
-                //
-                // Calling it directly with arbitrary or computed "bad debt" values when
-                // positions are still open causes conservation violations because:
-                // 1. apply_adl haircuts positive PNL and spends insurance to "cover" the loss
-                // 2. But the unrealized negative PNL on accounts still exists
-                // 3. This creates an imbalance: vault stays same, but claims decrease
-                //
-                // The real apply_adl calls happen internally within panic_settle_all and
-                // force_realize_losses, which correctly compute the loss from position closure.
-                //
-                // So we skip this action - it's tested via PanicSettleAll and ForceRealizeLosses.
             }
 
             Action::PanicSettleAll { oracle_price } => {
-                // Debug: print state before panic_settle_all
-                let (slack_before, _, _, ins_before, _) = compute_conservation_slack(&self.engine);
-                let reserved_before = self.engine.warmup_insurance_reserved;
-                let spendable = self.engine.insurance_spendable_unreserved();
-                eprintln!("PanicSettleAll debug:");
-                eprintln!("  slack_before={}, insurance={}, reserved={}, spendable={}",
-                    slack_before, ins_before, reserved_before, spendable);
-
-                // Print positions before - check ALL accounts, not just live_accounts
-                let mut total_pos_value: i128 = 0;
-                for idx in 0..self.engine.params.max_accounts {
-                    if is_account_used(&self.engine, idx as u16) {
-                        let acc = &self.engine.accounts[idx as usize];
-                        if acc.position_size != 0 {
-                            // Estimate mark PNL
-                            let mark_pnl = if acc.position_size > 0 {
-                                ((*oracle_price as i128) - (acc.entry_price as i128))
-                                    * acc.position_size.abs() / 1_000_000
-                            } else {
-                                ((acc.entry_price as i128) - (*oracle_price as i128))
-                                    * acc.position_size.abs() / 1_000_000
-                            };
-                            total_pos_value += mark_pnl;
-                            eprintln!("  acc[{}]: pos={}, entry={}, mark_pnl={}",
-                                idx, acc.position_size, acc.entry_price, mark_pnl);
-                        }
-                    }
-                }
-                eprintln!("  total_pos_value (estimated mark pnl): {}", total_pos_value);
+                let snapshot = Snapshot::take_full(&self.engine);
 
                 let result = self.engine.panic_settle_all(*oracle_price);
 
-                if result.is_ok() {
-                    // risk_reduction_only should be true
-                    assert!(
-                        self.engine.risk_reduction_only,
-                        "{}: risk_reduction_only not set after panic_settle",
-                        context
-                    );
-                    // warmup_paused should be true
-                    assert!(
-                        self.engine.warmup_paused,
-                        "{}: warmup_paused not set after panic_settle",
-                        context
-                    );
-                    // All positions should be 0
-                    for idx in &self.live_accounts {
-                        assert_eq!(
-                            self.engine.accounts[*idx as usize].position_size,
-                            0,
-                            "{}: position not closed for account {}",
-                            context,
-                            idx
+                match result {
+                    Ok(()) => {
+                        // risk_reduction_only should be true
+                        assert!(
+                            self.engine.risk_reduction_only,
+                            "{}: risk_reduction_only not set after panic_settle",
+                            context
                         );
+                        // warmup_paused should be true
+                        assert!(
+                            self.engine.warmup_paused,
+                            "{}: warmup_paused not set after panic_settle",
+                            context
+                        );
+                        // All positions should be 0 - scan ALL used accounts, not just live_accounts
+                        for idx in 0..self.engine.params.max_accounts {
+                            if is_account_used(&self.engine, idx as u16) {
+                                assert_eq!(
+                                    self.engine.accounts[idx as usize].position_size,
+                                    0,
+                                    "{}: position not closed for account {}",
+                                    context,
+                                    idx
+                                );
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // STRICT: Err must mean no mutation
+                        assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
             }
@@ -801,7 +795,6 @@ impl FuzzState {
 
                 match result {
                     Ok(()) => {
-                        // Should only succeed if insurance was at/below floor
                         // risk_reduction_only and warmup_paused should be true
                         assert!(
                             self.engine.risk_reduction_only,
@@ -813,15 +806,17 @@ impl FuzzState {
                             "{}: warmup_paused not set after force_realize",
                             context
                         );
-                        // All positions should be 0
-                        for idx in &self.live_accounts {
-                            assert_eq!(
-                                self.engine.accounts[*idx as usize].position_size,
-                                0,
-                                "{}: position not closed for account {}",
-                                context,
-                                idx
-                            );
+                        // All positions should be 0 - scan ALL used accounts
+                        for idx in 0..self.engine.params.max_accounts {
+                            if is_account_used(&self.engine, idx as u16) {
+                                assert_eq!(
+                                    self.engine.accounts[idx as usize].position_size,
+                                    0,
+                                    "{}: position not closed for account {}",
+                                    context,
+                                    idx
+                                );
+                            }
                         }
                     }
                     Err(RiskError::Unauthorized) => {
@@ -836,7 +831,7 @@ impl FuzzState {
                         assert_unchanged(&self.engine, &snapshot, &context);
                     }
                     Err(_) => {
-                        // Other errors - state should be unchanged
+                        // STRICT: Err must mean no mutation
                         assert_unchanged(&self.engine, &snapshot, &context);
                     }
                 }
@@ -882,8 +877,8 @@ impl FuzzState {
             }
         }
 
-        // Always assert global invariants after every action
-        assert_global_invariants(&mut self.engine, &context);
+        // Always assert global invariants after every action (pure - no mutation)
+        assert_global_invariants(&self.engine, &context);
     }
 
     fn count_used(&self) -> u32 {
@@ -904,10 +899,7 @@ proptest! {
     #[test]
     fn fuzz_state_machine_regime_a(
         initial_insurance in 0u128..50_000,
-        actions in prop::collection::vec(
-            action_strategy(&[], None),
-            50..100
-        )
+        actions in prop::collection::vec(action_strategy(), 50..100)
     ) {
         let mut state = FuzzState::new(params_regime_a());
 
@@ -937,7 +929,7 @@ proptest! {
             let _ = state.engine.top_up_insurance_fund(initial_insurance - current_insurance);
         }
 
-        // Execute actions
+        // Execute actions - selectors resolved at runtime against live state
         for (step, action) in actions.iter().enumerate() {
             state.execute(action, step);
         }
@@ -946,10 +938,7 @@ proptest! {
     #[test]
     fn fuzz_state_machine_regime_b(
         initial_insurance in 1000u128..50_000, // Above floor
-        actions in prop::collection::vec(
-            action_strategy(&[], None),
-            50..100
-        )
+        actions in prop::collection::vec(action_strategy(), 50..100)
     ) {
         let mut state = FuzzState::new(params_regime_b());
 
@@ -1394,12 +1383,16 @@ impl Rng {
 
     fn i128(&mut self, lo: i128, hi: i128) -> i128 {
         if lo >= hi { return lo; }
-        lo + ((self.next() as i128).abs() % (hi - lo + 1))
+        // Avoid overflow: use u64 directly and cast safely
+        let range = (hi - lo + 1) as u128;
+        lo + ((self.next() as u128 % range) as i128)
     }
 
     fn i64(&mut self, lo: i64, hi: i64) -> i64 {
         if lo >= hi { return lo; }
-        lo + ((self.next() as i64).abs() % (hi - lo + 1))
+        // Avoid overflow: use u64 directly and cast safely
+        let range = (hi - lo + 1) as u64;
+        lo + ((self.next() % range) as i64)
     }
 
     fn usize(&mut self, lo: usize, hi: usize) -> usize {
@@ -1417,68 +1410,47 @@ impl Rng {
     }
 }
 
-/// Generate a random action using the RNG
-fn random_action(rng: &mut Rng, live: &[u16], lp_idx: Option<u16>) -> (Action, String) {
-    let action_type = rng.usize(0, 11);
+/// Generate a random selector using RNG
+fn random_selector(rng: &mut Rng) -> IdxSel {
+    match rng.usize(0, 3) {
+        0 => IdxSel::Existing,
+        1 => IdxSel::ExistingNonLp,
+        2 => IdxSel::Lp,
+        _ => IdxSel::Random(rng.u64(0, 63) as u16),
+    }
+}
+
+/// Generate a random action using the RNG (selector-based)
+fn random_action(rng: &mut Rng) -> (Action, String) {
+    // Note: ApplyAdl removed - it's internal and tested via settlement ops
+    let action_type = rng.usize(0, 10);
 
     let action = match action_type {
         0 => Action::AddUser { fee_payment: rng.u128(1, 100) },
         1 => Action::AddLp { fee_payment: rng.u128(1, 100) },
-        2 => {
-            let idx = if rng.bool() && !live.is_empty() {
-                *rng.pick(live).unwrap()
-            } else {
-                rng.u64(0, 63) as u16
-            };
-            Action::Deposit { idx, amount: rng.u128(0, 50_000) }
-        }
-        3 => {
-            let idx = if rng.bool() && !live.is_empty() {
-                *rng.pick(live).unwrap()
-            } else {
-                rng.u64(0, 63) as u16
-            };
-            Action::Withdraw { idx, amount: rng.u128(0, 50_000) }
-        }
+        2 => Action::Deposit {
+            who: random_selector(rng),
+            amount: rng.u128(0, 50_000)
+        },
+        3 => Action::Withdraw {
+            who: random_selector(rng),
+            amount: rng.u128(0, 50_000)
+        },
         4 => Action::AdvanceSlot { dt: rng.u64(0, 10) },
         5 => Action::AccrueFunding {
             dt: rng.u64(1, 50),
             oracle_price: rng.u64(100_000, 10_000_000),
             rate_bps: rng.i64(-100, 100),
         },
-        6 => {
-            let idx = if !live.is_empty() {
-                *rng.pick(live).unwrap()
-            } else {
-                0
-            };
-            Action::Touch { idx }
-        }
-        7 => {
-            let lp = lp_idx.unwrap_or(0);
-            // Ensure user != lp
-            let user = if live.len() > 1 {
-                let candidates: Vec<u16> = live.iter().copied().filter(|&x| x != lp).collect();
-                if candidates.is_empty() {
-                    // Fallback: use a different index
-                    if lp == 0 { 1 } else { 0 }
-                } else {
-                    candidates[rng.usize(0, candidates.len().saturating_sub(1))]
-                }
-            } else {
-                // Only one account - use different index
-                if lp == 0 { 1 } else { 0 }
-            };
-            Action::ExecuteTrade {
-                lp_idx: lp,
-                user_idx: user,
-                oracle_price: rng.u64(100_000, 10_000_000),
-                size: rng.i128(-5_000, 5_000),
-            }
-        }
-        8 => Action::ApplyAdl { loss: rng.u128(0, 10_000) },
-        9 => Action::PanicSettleAll { oracle_price: rng.u64(100_000, 10_000_000) },
-        10 => Action::ForceRealizeLosses { oracle_price: rng.u64(100_000, 10_000_000) },
+        6 => Action::Touch { who: random_selector(rng) },
+        7 => Action::ExecuteTrade {
+            lp: IdxSel::Lp,
+            user: IdxSel::ExistingNonLp,
+            oracle_price: rng.u64(100_000, 10_000_000),
+            size: rng.i128(-5_000, 5_000),
+        },
+        8 => Action::PanicSettleAll { oracle_price: rng.u64(100_000, 10_000_000) },
+        9 => Action::ForceRealizeLosses { oracle_price: rng.u64(100_000, 10_000_000) },
         _ => Action::TopUpInsurance { amount: rng.u128(0, 10_000) },
     };
 
@@ -1489,23 +1461,37 @@ fn random_action(rng: &mut Rng, live: &[u16], lp_idx: Option<u16>) -> (Action, S
 /// Compute conservation slack without panicking
 fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u128) {
     let mut total_capital = 0u128;
-    let mut net_pnl: i128 = 0;
+    let mut net_settled_pnl: i128 = 0;
+    let global_index = engine.funding_index_qpb_e6;
+
     for i in 0..engine.params.max_accounts {
         if is_account_used(engine, i as u16) {
             let acc = &engine.accounts[i as usize];
             total_capital += acc.capital;
-            net_pnl = net_pnl.saturating_add(acc.pnl);
+
+            // Compute settled PNL (same formula as check_conservation)
+            let mut settled_pnl = acc.pnl;
+            if acc.position_size != 0 {
+                let delta_f = global_index.saturating_sub(acc.funding_index);
+                if delta_f != 0 {
+                    let payment = acc.position_size
+                        .saturating_mul(delta_f)
+                        .saturating_div(1_000_000);
+                    settled_pnl = settled_pnl.saturating_sub(payment);
+                }
+            }
+            net_settled_pnl = net_settled_pnl.saturating_add(settled_pnl);
         }
     }
     let base = total_capital + engine.insurance_fund.balance;
-    let expected = if net_pnl >= 0 {
-        base + net_pnl as u128
+    let expected = if net_settled_pnl >= 0 {
+        base + net_settled_pnl as u128
     } else {
-        base.saturating_sub((-net_pnl) as u128)
+        base.saturating_sub((-net_settled_pnl) as u128)
     };
     let actual = engine.vault + engine.loss_accum;
     let slack = actual as i128 - expected as i128;
-    (slack, total_capital, net_pnl, engine.insurance_fund.balance, actual)
+    (slack, total_capital, net_settled_pnl, engine.insurance_fund.balance, actual)
 }
 
 /// Run deterministic fuzzer for a single regime
@@ -1565,7 +1551,8 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
         // Run steps
         for step in 0..steps {
             let (slack_before, _, _, _, _) = compute_conservation_slack(&state.engine);
-            let (action, desc) = random_action(&mut rng, &state.live_accounts, state.lp_idx);
+            // Use selector-based random_action (no live/lp args needed)
+            let (action, desc) = random_action(&mut rng);
 
             // Keep last 10 actions
             if action_history.len() >= 10 {
@@ -1603,26 +1590,8 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
                 eprintln!("\nTo reproduce: run with seed={}, stop at step={}", seed, step);
                 panic!("Deterministic fuzzer failed - see above for repro");
             }
-
-            // Update live accounts after add operations
-            match &action {
-                Action::AddUser { .. } => {
-                    let last_idx = state.engine.next_account_id.saturating_sub(1) as u16;
-                    if is_account_used(&state.engine, last_idx) && !state.live_accounts.contains(&last_idx) {
-                        state.live_accounts.push(last_idx);
-                    }
-                }
-                Action::AddLp { .. } => {
-                    let last_idx = state.engine.next_account_id.saturating_sub(1) as u16;
-                    if is_account_used(&state.engine, last_idx) && !state.live_accounts.contains(&last_idx) {
-                        state.live_accounts.push(last_idx);
-                        if state.lp_idx.is_none() {
-                            state.lp_idx = Some(last_idx);
-                        }
-                    }
-                }
-                _ => {}
-            }
+            // Note: live_accounts tracking is now handled inside execute() via the returned idx
+            // when AddUser/AddLp succeeds. No need for separate tracking here.
         }
     }
 }

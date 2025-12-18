@@ -893,16 +893,32 @@ impl RiskEngine {
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
 
+        // Early validation (no state change yet)
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Capture state for potential rollback (touch_account and settle_warmup mutate)
+        let account_snapshot = self.accounts[idx as usize].clone();
+        let warmed_pos_snapshot = self.warmed_pos_total;
+        let warmed_neg_snapshot = self.warmed_neg_total;
+        let warmup_reserved_snapshot = self.warmup_insurance_reserved;
+
         // Settle funding before any PNL calculations
-        self.touch_account(idx)?;
+        // (Can't fail after is_used check passed)
+        let _ = self.touch_account(idx);
 
         // Settle warmup (converts PnL to capital with budget constraint)
-        self.settle_warmup_to_capital(idx)?;
+        let _ = self.settle_warmup_to_capital(idx);
 
         let account = &self.accounts[idx as usize];
 
-        // Check we have enough capital
+        // Check we have enough capital - rollback on failure
         if account.capital < amount {
+            self.accounts[idx as usize] = account_snapshot;
+            self.warmed_pos_total = warmed_pos_snapshot;
+            self.warmed_neg_total = warmed_neg_snapshot;
+            self.warmup_insurance_reserved = warmup_reserved_snapshot;
             return Err(RiskError::InsufficientBalance);
         }
 
@@ -910,7 +926,7 @@ impl RiskEngine {
         let new_capital = sub_u128(account.capital, amount);
         let new_collateral = add_u128(new_capital, clamp_pos_i128(account.pnl));
 
-        // If account has position, must maintain initial margin
+        // If account has position, must maintain initial margin - rollback on failure
         if account.position_size != 0 {
             let position_notional = mul_u128(
                 saturating_abs_i128(account.position_size) as u128,
@@ -923,6 +939,10 @@ impl RiskEngine {
             ) / 10_000;
 
             if new_collateral < initial_margin_required {
+                self.accounts[idx as usize] = account_snapshot;
+                self.warmed_pos_total = warmed_pos_snapshot;
+                self.warmed_neg_total = warmed_neg_snapshot;
+                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -971,13 +991,24 @@ impl RiskEngine {
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
+        // === Phase 1: Non-mutating validation (no state changes) ===
+
         // Validate indices
         if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
 
+        // Validate account kinds (before any mutations)
+        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
+            return Err(RiskError::AccountKindMismatch);
+        }
+        if self.accounts[user_idx as usize].kind != AccountKind::User {
+            return Err(RiskError::AccountKindMismatch);
+        }
+
         // Auto-trigger force_realize_losses when insurance is at/below threshold
         // This unsticks the exchange by forcing losers to pay from capital
+        // Note: This is an intended side effect, not rolled back
         if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
             self.force_realize_losses(oracle_price)?;
         }
@@ -997,19 +1028,7 @@ impl RiskEngine {
             self.enforce_op(OpClass::RiskReduce)?;   // Allowed in risk mode
         }
 
-        // Settle funding for both accounts
-        self.touch_account(user_idx)?;
-        self.touch_account(lp_idx)?;
-
-        // Validate account kinds
-        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
-            return Err(RiskError::AccountKindMismatch);
-        }
-        if self.accounts[user_idx as usize].kind != AccountKind::User {
-            return Err(RiskError::AccountKindMismatch);
-        }
-
-        // Call matching engine with LP account ID
+        // Call matching engine with LP account ID (before any mutations)
         let lp = &self.accounts[lp_idx as usize];
         let execution = matcher.execute_match(
             &lp.matcher_program,
@@ -1018,6 +1037,17 @@ impl RiskEngine {
             oracle_price,
             size,
         )?;
+
+        // === Phase 2: Capture state for rollback ===
+        let user_snapshot = self.accounts[user_idx as usize].clone();
+        let lp_snapshot = self.accounts[lp_idx as usize].clone();
+        let warmed_pos_snapshot = self.warmed_pos_total;
+        let warmed_neg_snapshot = self.warmed_neg_total;
+        let warmup_reserved_snapshot = self.warmup_insurance_reserved;
+
+        // Settle funding for both accounts (can't fail after is_used check)
+        let _ = self.touch_account(user_idx);
+        let _ = self.touch_account(lp_idx);
 
         // Use executed price and size from matching engine
         let exec_price = execution.price;
@@ -1055,11 +1085,27 @@ impl RiskEngine {
                     (old_entry as i128).saturating_sub(exec_price as i128)
                 };
 
-                let pnl = price_diff
-                    .checked_mul(close_size)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_div(1_000_000)
-                    .ok_or(RiskError::Overflow)?;
+                let pnl = match price_diff.checked_mul(close_size) {
+                    Some(v) => match v.checked_div(1_000_000) {
+                        Some(p) => p,
+                        None => {
+                            self.accounts[user_idx as usize] = user_snapshot;
+                            self.accounts[lp_idx as usize] = lp_snapshot;
+                            self.warmed_pos_total = warmed_pos_snapshot;
+                            self.warmed_neg_total = warmed_neg_snapshot;
+                            self.warmup_insurance_reserved = warmup_reserved_snapshot;
+                            return Err(RiskError::Overflow);
+                        }
+                    },
+                    None => {
+                        self.accounts[user_idx as usize] = user_snapshot;
+                        self.accounts[lp_idx as usize] = lp_snapshot;
+                        self.warmed_pos_total = warmed_pos_snapshot;
+                        self.warmed_neg_total = warmed_neg_snapshot;
+                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
+                        return Err(RiskError::Overflow);
+                    }
+                };
 
                 user_pnl_delta = pnl;
                 lp_pnl_delta = -pnl;
@@ -1083,7 +1129,17 @@ impl RiskEngine {
             let total_size = saturating_abs_i128(user.position_size).saturating_add(saturating_abs_i128(exec_size));
 
             if total_size != 0 {
-                new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
+                match div_u128(total_notional, total_size as u128) {
+                    Ok(v) => new_user_entry = v as u64,
+                    Err(e) => {
+                        self.accounts[user_idx as usize] = user_snapshot;
+                        self.accounts[lp_idx as usize] = lp_snapshot;
+                        self.warmed_pos_total = warmed_pos_snapshot;
+                        self.warmed_neg_total = warmed_neg_snapshot;
+                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
+                        return Err(e);
+                    }
+                }
             }
         } else if saturating_abs_i128(user.position_size) < saturating_abs_i128(exec_size) {
             // Flipping position - new entry at execution price
@@ -1103,7 +1159,17 @@ impl RiskEngine {
             let total_size = saturating_abs_i128(lp.position_size).saturating_add(saturating_abs_i128(exec_size));
 
             if total_size != 0 {
-                new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
+                match div_u128(total_notional, total_size as u128) {
+                    Ok(v) => new_lp_entry = v as u64,
+                    Err(e) => {
+                        self.accounts[user_idx as usize] = user_snapshot;
+                        self.accounts[lp_idx as usize] = lp_snapshot;
+                        self.warmed_pos_total = warmed_pos_snapshot;
+                        self.warmed_neg_total = warmed_neg_snapshot;
+                        self.warmup_insurance_reserved = warmup_reserved_snapshot;
+                        return Err(e);
+                    }
+                }
             }
         } else if saturating_abs_i128(lp.position_size) < saturating_abs_i128(new_lp_position)
                   && ((lp.position_size > 0 && new_lp_position < 0) || (lp.position_size < 0 && new_lp_position > 0)) {
@@ -1115,7 +1181,7 @@ impl RiskEngine {
         let new_user_pnl = user.pnl.saturating_add(user_pnl_delta).saturating_sub(fee as i128);
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
-        // Check user maintenance margin requirement BEFORE any state changes
+        // Check user maintenance margin requirement - rollback on failure
         if new_user_position != 0 {
             let user_collateral = add_u128(user.capital, clamp_pos_i128(new_user_pnl));
             let position_value = mul_u128(
@@ -1128,11 +1194,16 @@ impl RiskEngine {
             ) / 10_000;
 
             if user_collateral <= margin_required {
+                self.accounts[user_idx as usize] = user_snapshot;
+                self.accounts[lp_idx as usize] = lp_snapshot;
+                self.warmed_pos_total = warmed_pos_snapshot;
+                self.warmed_neg_total = warmed_neg_snapshot;
+                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // Check LP maintenance margin requirement BEFORE any state changes
+        // Check LP maintenance margin requirement - rollback on failure
         if new_lp_position != 0 {
             let lp_collateral = add_u128(lp.capital, clamp_pos_i128(new_lp_pnl));
             let position_value = mul_u128(
@@ -1145,6 +1216,11 @@ impl RiskEngine {
             ) / 10_000;
 
             if lp_collateral <= margin_required {
+                self.accounts[user_idx as usize] = user_snapshot;
+                self.accounts[lp_idx as usize] = lp_snapshot;
+                self.warmed_pos_total = warmed_pos_snapshot;
+                self.warmed_neg_total = warmed_neg_snapshot;
+                self.warmup_insurance_reserved = warmup_reserved_snapshot;
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -1446,7 +1522,8 @@ impl RiskEngine {
         // Track sum of mark PNL to compensate for integer division rounding
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: settle all positions and clamp negative PNL
+        // Single pass: settle funding and positions, clamp negative PNL
+        let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1455,6 +1532,9 @@ impl RiskEngine {
                 w &= w - 1;
 
                 let account = &mut self.accounts[idx];
+
+                // Settle funding first (required for correct PNL accounting)
+                let _ = Self::settle_account_funding(account, global_funding_index);
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1570,7 +1650,8 @@ impl RiskEngine {
         // Track sum of mark PNL for rounding compensation
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: realize mark PnL and settle negative PnL into capital
+        // Single pass: settle funding, realize mark PnL, and settle negative PnL into capital
+        let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1579,6 +1660,9 @@ impl RiskEngine {
                 w &= w - 1;
 
                 let account = &mut self.accounts[idx];
+
+                // Settle funding first (required for correct PNL accounting)
+                let _ = Self::settle_account_funding(account, global_funding_index);
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1730,17 +1814,33 @@ impl RiskEngine {
     pub fn check_conservation(&self) -> bool {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
+        let global_index = self.funding_index_qpb_e6;
 
         self.for_each_used(|_idx, account| {
             total_capital = add_u128(total_capital, account.capital);
-            net_pnl = net_pnl.saturating_add(account.pnl);
+
+            // Compute "would-be settled" PNL for this account
+            // This accounts for lazy funding settlement
+            let mut settled_pnl = account.pnl;
+            if account.position_size != 0 {
+                let delta_f = global_index.saturating_sub(account.funding_index);
+                if delta_f != 0 {
+                    // payment = position × ΔF / 1e6 (longs pay when funding positive)
+                    let payment = account.position_size
+                        .saturating_mul(delta_f)
+                        .saturating_div(1_000_000);
+                    settled_pnl = settled_pnl.saturating_sub(payment);
+                }
+            }
+            net_pnl = net_pnl.saturating_add(settled_pnl);
         });
 
         // Conservation formula:
-        // vault + loss_accum ≈ sum(capital) + sum(pnl) + insurance
+        // vault + loss_accum ≈ sum(capital) + sum(settled_pnl) + insurance
         //
         // Where:
         // - loss_accum: value that "left" the system (unrecoverable losses)
+        // - settled_pnl: pnl after accounting for unsettled funding
         //
         // The slack between actual and expected should be bounded by MAX_ROUNDING_SLACK.
         // Small positive slack means unclaimed dust in vault (safe).
