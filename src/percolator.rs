@@ -1006,13 +1006,6 @@ impl RiskEngine {
             return Err(RiskError::AccountKindMismatch);
         }
 
-        // Auto-trigger force_realize_losses when insurance is at/below threshold
-        // This unsticks the exchange by forcing losers to pay from capital
-        // Note: This is an intended side effect, not rolled back
-        if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-            self.force_realize_losses(oracle_price)?;
-        }
-
         // Check if trade increases risk (absolute exposure for either party)
         let old_user_pos = self.accounts[user_idx as usize].position_size;
         let old_lp_pos = self.accounts[lp_idx as usize].position_size;

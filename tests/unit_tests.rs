@@ -1189,7 +1189,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     engine.accounts[lp as usize].capital = 50_000;
     engine.vault = 60_000;
 
-    // Set insurance fund balance (must stay > 0 to avoid force_realize_losses trigger)
+    // Set insurance fund balance
     engine.insurance_fund.balance = 5_000;
 
     // User opens long position

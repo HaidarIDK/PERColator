@@ -22,13 +22,11 @@
 //! - **execute_trade**: rolls back both user/lp accounts (all fields),
 //!   warmed_pos_total, warmed_neg_total, warmup_insurance_reserved.
 //!   Fee is only applied to insurance_fund AFTER all margin checks pass.
-//!   Exception: if insurance <= threshold, force_realize_losses triggers before
-//!   the trade and its effects persist regardless of trade outcome.
 //!
 //! - **add_user/add_lp**: either succeeds (allocates slot, increments counters)
 //!   or fails with no mutation
 //!
-//! - **deposit**: settles warmup then adds capital; cannot partially fail
+//! - **deposit**: atomic on Err (enforced by snapshot checks)
 //!
 //! ### Warmup Budget
 //! - W+ <= W- + raw_spendable (positive warmup bounded by losses + available insurance)
@@ -1947,10 +1945,10 @@ fn execute_trade_atomic_err_regression() {
                "execute_trade Err must not change warmup_insurance_reserved");
 }
 
-/// Regression test: panic_settle_all must settle funding before computing mark PNL
-/// Before fix: conservation would fail due to unsettled funding
+/// Verify panic_settle_all preserves conservation with lazy funding
+/// Conservation uses settled_pnl which accounts for unsettled funding payments
 #[test]
-fn panic_settle_funding_regression() {
+fn panic_settle_preserves_conservation_with_lazy_funding() {
     let mut engine = Box::new(RiskEngine::new(params_regime_a()));
 
     // Create LP and user with positions
@@ -1965,10 +1963,10 @@ fn panic_settle_funding_regression() {
     // Accrue significant funding WITHOUT touching accounts
     engine.accrue_funding(1000, 1_000_000, 1000).unwrap();
 
-    // Verify conservation holds before panic settle
+    // Verify conservation holds before panic settle (uses settled_pnl)
     assert!(engine.check_conservation(), "Conservation should hold before panic_settle");
 
-    // Panic settle - this should settle funding first
+    // Panic settle
     engine.panic_settle_all(1_000_000).unwrap();
 
     // Verify conservation still holds
@@ -1977,4 +1975,53 @@ fn panic_settle_funding_regression() {
     // All positions should be closed
     assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
     assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
+}
+
+/// Verify add_user is atomic on Err - allocator state must not change
+/// Guards freelist/bitmap counters: used, free_head, next_free, num_used_accounts, next_account_id
+#[test]
+fn add_user_atomic_err_allocator_regression() {
+    // Create engine with capacity for only 2 accounts (LP + 1 user)
+    let params = RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 2,
+        account_fee_bps: 100, // Low fee so we can easily exceed it
+        risk_reduction_threshold: 0,
+    };
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Add LP (uses slot 0) - fee = 100 * 1 / 10000 = 0, so any fee works
+    let _lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 100).unwrap();
+
+    // Add user (uses slot 1) - now at capacity
+    // With max=2, used=1: multiplier=2, required = 100 * 2 / 10000 = 0, so any fee works
+    let _user_idx = engine.add_user(100).unwrap();
+
+    // Capture allocator state before failed add
+    let num_used_before = engine.num_used_accounts;
+    let next_id_before = engine.next_account_id;
+    let free_head_before = engine.free_head;
+    let used_bitmap_before: Vec<u64> = engine.used.iter().copied().collect();
+    let next_free_before: Vec<u16> = engine.next_free[..2].to_vec();
+
+    // Try to add another user - should fail (at capacity, Overflow error)
+    let result = engine.add_user(100);
+    assert!(result.is_err(), "add_user should fail when at capacity");
+
+    // Verify allocator state unchanged
+    assert_eq!(engine.num_used_accounts, num_used_before,
+               "add_user Err must not change num_used_accounts");
+    assert_eq!(engine.next_account_id, next_id_before,
+               "add_user Err must not change next_account_id");
+    assert_eq!(engine.free_head, free_head_before,
+               "add_user Err must not change free_head");
+    let used_bitmap_after: Vec<u64> = engine.used.iter().copied().collect();
+    assert_eq!(used_bitmap_after, used_bitmap_before,
+               "add_user Err must not change used bitmap");
+    let next_free_after: Vec<u16> = engine.next_free[..2].to_vec();
+    assert_eq!(next_free_after, next_free_before,
+               "add_user Err must not change next_free");
 }
