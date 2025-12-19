@@ -2858,6 +2858,7 @@ fn test_force_realize_losses_unpaid_to_adl() {
     let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
     let loser = engine.add_user(1).unwrap();
     let winner = engine.add_user(1).unwrap();
+    let pnl_counterparty = engine.add_user(1).unwrap(); // Dedicated counterparty for pnl
     let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     // Setup: loser has small capital and will have large loss
@@ -2870,11 +2871,12 @@ fn test_force_realize_losses_unpaid_to_adl() {
 
     // Winner has positive PnL (young, subject to ADL)
     engine.accounts[winner as usize].capital = 5000;
-    // Zero-sum PnL: winner gains, lp loses (no vault funding for pnl needed)
+    // Zero-sum PnL: winner gains, pnl_counterparty loses (no vault funding for pnl needed)
+    // Use dedicated counterparty so loser/lp can have their pnl set by force_realize_losses()
     assert_eq!(engine.accounts[winner as usize].pnl, 0);
-    assert_eq!(engine.accounts[lp as usize].pnl, 0);
+    assert_eq!(engine.accounts[pnl_counterparty as usize].pnl, 0);
     engine.accounts[winner as usize].pnl = 5000; // Young positive PnL
-    engine.accounts[lp as usize].pnl = -5000;
+    engine.accounts[pnl_counterparty as usize].pnl = -5000;
     engine.accounts[winner as usize].warmup_slope_per_step = 10;
 
     // LP is counterparty for positions
@@ -2972,6 +2974,7 @@ fn test_force_realize_losses_invariant_holds() {
     let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
     let user1 = engine.add_user(1).unwrap();
     let user2 = engine.add_user(1).unwrap();
+    let pnl_counterparty = engine.add_user(1).unwrap(); // Dedicated counterparty for pnl
     let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
     // Setup: user1 has losing position, user2 has positive pnl
@@ -2983,11 +2986,12 @@ fn test_force_realize_losses_invariant_holds() {
     engine.accounts[user1 as usize].entry_price = 2_000_000;
 
     engine.accounts[user2 as usize].capital = 5000;
-    // Zero-sum PnL: user2 gains, lp loses (no vault funding for pnl needed)
+    // Zero-sum PnL: user2 gains, pnl_counterparty loses (no vault funding for pnl needed)
+    // Use dedicated counterparty so user1/lp can have their pnl set by force_realize_losses()
     assert_eq!(engine.accounts[user2 as usize].pnl, 0);
-    assert_eq!(engine.accounts[lp as usize].pnl, 0);
+    assert_eq!(engine.accounts[pnl_counterparty as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 2000; // existing positive PnL
-    engine.accounts[lp as usize].pnl = -2000;
+    engine.accounts[pnl_counterparty as usize].pnl = -2000;
     engine.accounts[user2 as usize].warmup_slope_per_step = 20;
 
     engine.accounts[lp as usize].capital = 10_000;
