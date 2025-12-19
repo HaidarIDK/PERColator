@@ -175,6 +175,8 @@ fn test_pnl_warmup() {
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
+    engine.vault += 1000;
+    assert_conserved(&engine);
 
     // At slot 0, nothing is warmed up yet
     assert_eq!(
@@ -206,6 +208,8 @@ fn test_pnl_warmup_with_reserved() {
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].reserved_pnl = 300; // 300 reserved for pending withdrawal
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+    engine.vault += 1000;
+    assert_conserved(&engine);
 
     // Advance 100 slots
     engine.advance_slot(100);
@@ -228,6 +232,8 @@ fn test_withdraw_pnl_not_warmed_up() {
     engine.deposit(user_idx, 1000).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
+    engine.vault += 500;
+    assert_conserved(&engine);
 
     // Try to withdraw more than principal + warmed up PNL
     // Since PNL hasn't warmed up, can only withdraw the 1000 principal
@@ -2257,10 +2263,6 @@ fn test_panic_settle_conservation_holds() {
     engine.accounts[lp_idx as usize].position_size = -3_000_000; // Short 3 (LP takes other side)
     engine.accounts[lp_idx as usize].entry_price = 1_000_000; // $1
 
-    // Reset insurance fund to 0 so conservation is clean
-    // (account fees already went to insurance)
-    let insurance_from_fees = engine.insurance_fund.balance;
-
     // Verify conservation before
     assert!(
         engine.check_conservation(),
@@ -2478,7 +2480,7 @@ fn test_warmup_budget_losses_create_budget_for_profits() {
 
     // Loser: capital=500, pnl=-500
     // Winner: pnl=+500
-    // Zero-sum pnl pairs don't require vault funding (they cancel out)
+    // Zero-sum PnL: winner's claim is backed by loser's liability (net_pnl = 0)
     // Only fund the loser's capital
     engine.vault += 500;
     engine.accounts[loser as usize].capital = 500;
