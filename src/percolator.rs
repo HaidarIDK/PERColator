@@ -25,12 +25,15 @@ extern crate kani;
 // Constants
 // ============================================================================
 
-// Use smaller array size for Kani verification to make proofs tractable
-// Production uses 4096, but Kani symbolic execution becomes intractable at that scale
+// Use smaller array size for Kani verification and fuzz testing to make proofs tractable
+// and deep clones fast. Production uses 4096.
 #[cfg(kani)]
 pub const MAX_ACCOUNTS: usize = 8;  // Small for fast formal verification
 
-#[cfg(not(kani))]
+#[cfg(all(feature = "fuzz", not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64;  // Small for fast fuzz test rollback clones
+
+#[cfg(all(not(kani), not(feature = "fuzz")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 // Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
@@ -1759,15 +1762,14 @@ impl RiskEngine {
 
         let actual = add_u128(self.vault, self.loss_accum);
 
-        // Conservation check with bounded rounding tolerance:
-        // - Vault should approximately equal what is owed
-        // - Slack bounded by ±MAX_ROUNDING_SLACK to catch minting/burning bugs
-        // - Rounding in funding calculations can produce small deficits
-        //   (one truncation per account, up to MAX_ACCOUNTS total)
+        // Conservation check with bounded slack tolerance:
+        // Ideally: actual >= expected (vault has at least what is owed)
+        // Reality: integer truncation in funding can cause small deficits/surpluses
+        //
+        // We allow |slack| <= MAX_ROUNDING_SLACK to tolerate truncation artifacts
+        // while still catching minting/burning bugs that would cause larger drift.
         let slack: i128 = (actual as i128) - (expected as i128);
         let max_slack = MAX_ROUNDING_SLACK as i128;
-
-        // Reject out-of-bounds slack (potential minting/burning bug)
         slack >= -max_slack && slack <= max_slack
     }
 

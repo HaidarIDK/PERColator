@@ -2976,8 +2976,9 @@ fn test_audit_conservation_slack_bounded() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Create many accounts with positions that will cause rounding
+    // Use 50 to stay under MAX_ACCOUNTS (64 in fuzz builds)
     let mut user_indices = Vec::new();
-    for i in 0..100 {
+    for i in 0..50 {
         let user_idx = engine.add_user(1).unwrap();
         user_indices.push(user_idx);
         engine.deposit(user_idx, 1000 + i as u128).unwrap();
