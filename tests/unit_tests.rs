@@ -3160,3 +3160,22 @@ fn test_audit_force_realize_updates_all_accounts_warmup() {
                "LP warmup_started_at_slot should be updated");
 }
 
+// ==============================================================================
+// GUARDRAIL: NO IGNORED RESULT PATTERNS IN ENGINE
+// ==============================================================================
+
+/// This test guards against reintroducing ignored-Result patterns in the engine.
+/// The Solana atomicity model requires that all fallible operations propagate errors.
+#[test]
+fn no_ignored_result_patterns_in_engine() {
+    let src = include_str!("../src/percolator.rs");
+
+    // Check for ignored Result patterns on specific functions that must propagate errors
+    assert!(!src.contains("let _ = Self::settle_account_funding"),
+            "Do not ignore settle_account_funding errors - use ? operator");
+    assert!(!src.contains("let _ = self.touch_account"),
+            "Do not ignore touch_account errors - use ? operator");
+    assert!(!src.contains("let _ = self.settle_warmup_to_capital"),
+            "Do not ignore settle_warmup_to_capital errors - use ? operator");
+}
+

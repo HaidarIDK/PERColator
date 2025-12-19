@@ -25,15 +25,15 @@ extern crate kani;
 // Constants
 // ============================================================================
 
-// Use smaller array size for Kani verification and fuzz testing to make proofs tractable
-// and deep clones fast. Production uses 4096.
+// Use smaller array size for Kani verification, fuzz testing, and debug builds
+// to avoid stack overflow (RiskEngine is ~6MB at 4096 accounts). Production (release) uses 4096.
 #[cfg(kani)]
 pub const MAX_ACCOUNTS: usize = 8;  // Small for fast formal verification
 
-#[cfg(all(feature = "fuzz", not(kani)))]
-pub const MAX_ACCOUNTS: usize = 64;  // Small for fast fuzz test rollback clones
+#[cfg(all(any(feature = "fuzz", debug_assertions), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64;  // Small to avoid stack overflow in tests
 
-#[cfg(all(not(kani), not(feature = "fuzz")))]
+#[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 // Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
@@ -855,7 +855,7 @@ impl RiskEngine {
 
     /// Settle funding for all accounts (ensures funding is zero-sum for conservation checks)
     #[cfg(any(test, feature = "fuzz"))]
-    pub fn settle_all_funding(&mut self) {
+    pub fn settle_all_funding(&mut self) -> Result<()> {
         let global_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
@@ -864,9 +864,10 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
 
-                let _ = Self::settle_account_funding(&mut self.accounts[idx], global_index);
+                Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
             }
         }
+        Ok(())
     }
 
     // ========================================
@@ -1441,7 +1442,7 @@ impl RiskEngine {
                 let account = &mut self.accounts[idx];
 
                 // Settle funding first (required for correct PNL accounting)
-                let _ = Self::settle_account_funding(account, global_funding_index);
+                Self::settle_account_funding(account, global_funding_index)?;
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1569,7 +1570,7 @@ impl RiskEngine {
                 let account = &mut self.accounts[idx];
 
                 // Settle funding first (required for correct PNL accounting)
-                let _ = Self::settle_account_funding(account, global_funding_index);
+                Self::settle_account_funding(account, global_funding_index)?;
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1714,10 +1715,10 @@ impl RiskEngine {
     ///
     /// # Rounding Slack
     ///
-    /// We allow `actual >= expected` because integer division truncation can leave
-    /// small amounts of "dust" unclaimed in the vault. This is bounded by
-    /// `MAX_ROUNDING_SLACK` (one unit per account worst-case) to prevent unbounded
-    /// drift and catch accidental minting bugs.
+    /// We allow `|actual - expected| <= MAX_ROUNDING_SLACK` because integer division
+    /// truncation in funding calculations can cause small discrepancies in either
+    /// direction. This is bounded by `MAX_ROUNDING_SLACK` (one unit per account
+    /// worst-case) to prevent unbounded drift and catch accidental minting bugs.
     pub fn check_conservation(&self) -> bool {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
@@ -1750,8 +1751,8 @@ impl RiskEngine {
         // - settled_pnl: pnl after accounting for unsettled funding
         //
         // The slack between actual and expected should be bounded by MAX_ROUNDING_SLACK.
-        // Small positive slack means unclaimed dust in vault (safe).
-        // Small negative slack means rounding errors (acceptable within tolerance).
+        // Positive slack means unclaimed dust in vault (safe).
+        // Small negative slack can occur from integer truncation in funding (acceptable).
         let base = add_u128(total_capital, self.insurance_fund.balance);
 
         let expected = if net_pnl >= 0 {
@@ -1762,12 +1763,12 @@ impl RiskEngine {
 
         let actual = add_u128(self.vault, self.loss_accum);
 
-        // Conservation check with bounded slack tolerance:
-        // Ideally: actual >= expected (vault has at least what is owed)
-        // Reality: integer truncation in funding can cause small deficits/surpluses
+        // Conservation check with bounded two-sided slack tolerance:
+        // |actual - expected| <= MAX_ROUNDING_SLACK
         //
-        // We allow |slack| <= MAX_ROUNDING_SLACK to tolerate truncation artifacts
-        // while still catching minting/burning bugs that would cause larger drift.
+        // Integer truncation in funding calculations can cause small discrepancies
+        // in either direction. Both positive slack (dust in vault) and small
+        // negative slack (rounding deficit) are acceptable within tolerance.
         let slack: i128 = (actual as i128) - (expected as i128);
         let max_slack = MAX_ROUNDING_SLACK as i128;
         slack >= -max_slack && slack <= max_slack
