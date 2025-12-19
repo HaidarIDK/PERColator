@@ -2870,19 +2870,21 @@ fn test_force_realize_losses_unpaid_to_adl() {
 
     // Winner has positive PnL (young, subject to ADL)
     engine.accounts[winner as usize].capital = 5000;
+    // Zero-sum PnL: winner gains, lp loses (no vault funding for pnl needed)
     assert_eq!(engine.accounts[winner as usize].pnl, 0);
+    assert_eq!(engine.accounts[lp as usize].pnl, 0);
     engine.accounts[winner as usize].pnl = 5000; // Young positive PnL
+    engine.accounts[lp as usize].pnl = -5000;
     engine.accounts[winner as usize].warmup_slope_per_step = 10;
 
-    // LP is counterparty
+    // LP is counterparty for positions
     engine.accounts[lp as usize].capital = 10_000;
     engine.accounts[lp as usize].position_size = -100_000;
     engine.accounts[lp as usize].entry_price = 2_000_000;
 
-    // vault += sum(capital) + sum(pnl), then set insurance
+    // vault += sum(capital) only (pnl is zero-sum)
     // sum(capital) = 100 + 5000 + 10000 = 15100
-    // sum(pnl) = 0 + 5000 + 0 = 5000
-    engine.vault += 15100 + 5000;
+    engine.vault += 15100;
     set_insurance(&mut engine, 1000); // At threshold
     assert_conserved(&engine);
 
@@ -2919,16 +2921,20 @@ fn test_force_realize_losses_unpaid_to_adl() {
 fn test_force_realize_losses_warmup_frozen() {
     let mut engine = Box::new(RiskEngine::new(params_with_threshold()));
     let user = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // WHITEBOX: Setup user with positive PnL and warmup.
     engine.accounts[user as usize].capital = 5000;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding for pnl needed)
     assert_eq!(engine.accounts[user as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[counterparty as usize].pnl = -1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
 
-    // Add capital + pnl to vault, then set insurance to threshold
-    engine.vault += 5000 + 1000;
+    // vault += capital only (pnl is zero-sum)
+    engine.vault += 5000;
     set_insurance(&mut engine, 1000); // Exactly at threshold
     engine.current_slot = 50;
     assert_conserved(&engine);
@@ -2977,18 +2983,20 @@ fn test_force_realize_losses_invariant_holds() {
     engine.accounts[user1 as usize].entry_price = 2_000_000;
 
     engine.accounts[user2 as usize].capital = 5000;
+    // Zero-sum PnL: user2 gains, lp loses (no vault funding for pnl needed)
     assert_eq!(engine.accounts[user2 as usize].pnl, 0);
+    assert_eq!(engine.accounts[lp as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 2000; // existing positive PnL
+    engine.accounts[lp as usize].pnl = -2000;
     engine.accounts[user2 as usize].warmup_slope_per_step = 20;
 
     engine.accounts[lp as usize].capital = 10_000;
     engine.accounts[lp as usize].position_size = -10_000;
     engine.accounts[lp as usize].entry_price = 2_000_000;
 
-    // vault += sum(capital) + sum(pnl), then set insurance
+    // vault += sum(capital) only (pnl is zero-sum)
     // sum(capital) = 5000 + 5000 + 10000 = 20000
-    // sum(pnl) = 0 + 2000 + 0 = 2000
-    engine.vault += 20000 + 2000;
+    engine.vault += 20000;
     set_insurance(&mut engine, 1000); // At threshold
     assert_conserved(&engine);
 
