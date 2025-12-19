@@ -1495,9 +1495,13 @@ impl RiskEngine {
                         let idx = block * 64 + bit;
                         w &= w - 1;
 
-                        // Only consider eligible accounts with positive PnL
-                        if self.adl_eligible_scratch[idx] == 1 && self.accounts[idx].pnl > 0 {
+                        // Only consider eligible accounts (don't gate on pnl > 0)
+                        if self.adl_eligible_scratch[idx] == 1 {
                             let rem = self.adl_remainder_scratch[idx];
+                            // Skip zero remainders for robust selection
+                            if rem == 0 {
+                                continue;
+                            }
                             // Prefer larger remainder; if equal, prefer smaller idx (ties)
                             if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
                                 best_rem = rem;
@@ -1515,6 +1519,24 @@ impl RiskEngine {
                         leftover -= 1;
                     }
                     None => break, // No more eligible candidates
+                }
+            }
+
+            // Hygiene: verify all eligible bits consumed after distribution
+            #[cfg(any(test, kani))]
+            {
+                for block in 0..BITMAP_WORDS {
+                    let mut w = self.used[block];
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        let idx = block * 64 + bit;
+                        w &= w - 1;
+                        debug_assert!(
+                            self.adl_eligible_scratch[idx] == 0,
+                            "Eligible bit not consumed for account {}",
+                            idx
+                        );
+                    }
                 }
             }
         }
