@@ -311,13 +311,13 @@ fn test_adl_overflow_to_insurance() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
 
-    // WHITEBOX: Set capital, pnl, and insurance directly. Add to vault (not override) to preserve account fees.
+    // WHITEBOX: Set capital, pnl, and insurance directly.
     engine.accounts[user_idx as usize].capital = 1000;
     engine.accounts[user_idx as usize].pnl = 300; // Only 300 unwrapped PNL
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     let ins_before = engine.insurance_fund.balance;
-    engine.insurance_fund.balance += 500;
-    engine.vault += 1000 + 300 + 500; // capital + pnl + insurance
+    set_insurance(&mut engine, ins_before + 500); // Add 500 to insurance (adjusts vault)
+    engine.vault += 1000 + 300; // capital + pnl
     assert_conserved(&engine);
 
     // Apply ADL loss of 700 (more than unwrapped PNL)
@@ -405,7 +405,10 @@ fn test_trading_opens_position() {
 
     // Setup user with capital
     engine.deposit(user_idx, 10_000).unwrap();
+    // WHITEBOX: Set LP capital directly. Add to vault to preserve conservation.
     engine.accounts[lp_idx as usize].capital = 100_000;
+    engine.vault += 100_000;
+    assert_conserved(&engine);
 
     // Execute trade: user buys 1000 units at $1
     let oracle_price = 1_000_000;
@@ -1006,6 +1009,9 @@ fn test_adl_protects_principal_during_warmup() {
     // === Phase 1: Oracle Manipulation (time < T) ===
     // Attacker manipulates oracle and creates fake $50k profit
     // In reality this would come from trading, but we simulate the result
+    // Assert starting pnl is 0 for both (required for zero-sum to preserve conservation)
+    assert_eq!(engine.accounts[attacker as usize].pnl, 0);
+    assert_eq!(engine.accounts[victim as usize].pnl, 0);
     engine.accounts[attacker as usize].pnl = 50_000;
     engine.accounts[attacker as usize].warmup_slope_per_step = 500; // Will take 100 slots to warm up
     engine.accounts[attacker as usize].warmup_started_at_slot = 0;
@@ -1800,6 +1806,9 @@ fn test_lp_withdraw() {
     set_insurance(&mut engine, 5_000);
 
     // Zero-sum PNL: LP gains 5000, user loses 5000
+    // Assert starting pnl is 0 for both (required for zero-sum to preserve conservation)
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 5_000;
     engine.accounts[user_idx as usize].pnl = -5_000;
 
@@ -2651,6 +2660,7 @@ fn test_force_realize_losses_threshold_gate() {
 
     // Set insurance above threshold (threshold is 1000)
     set_insurance(&mut engine, 5000);
+    assert_conserved(&engine);
 
     // force_realize_losses should fail
     let result = engine.force_realize_losses(1_000_000);
@@ -2659,6 +2669,7 @@ fn test_force_realize_losses_threshold_gate() {
 
     // Set insurance at threshold
     set_insurance(&mut engine, 1000);
+    assert_conserved(&engine);
     let result = engine.force_realize_losses(1_000_000);
     assert!(result.is_ok(), "Should succeed when insurance == threshold");
 
@@ -2666,6 +2677,7 @@ fn test_force_realize_losses_threshold_gate() {
     let mut engine2 = Box::new(RiskEngine::new(params_with_threshold()));
     let _user2 = engine2.add_user(1).unwrap();
     set_insurance(&mut engine2, 500);
+    assert_conserved(&engine2);
     let result = engine2.force_realize_losses(1_000_000);
     assert!(result.is_ok(), "Should succeed when insurance < threshold");
 }
@@ -3041,9 +3053,8 @@ fn test_reserved_monotone_non_decreasing() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
     let user_idx = engine.add_user(1).unwrap();
 
-    // Setup: insurance = 500 with matching vault before deposits
+    // Setup: insurance = 500 (set_insurance adjusts vault automatically)
     set_insurance(&mut engine, 500);
-    engine.vault = 500;
     assert_conserved(&engine);
 
     engine.deposit(lp_idx, 10_000).unwrap();
@@ -3281,9 +3292,8 @@ fn test_audit_b_conservation_after_force_realize_with_rounding() {
     // Conservation: vault = sum(capital) + sum(pnl) + insurance
     // 100_002 = 100_000 + 0 + 2 ✓
     //
-    // Now set insurance to threshold (1000), adjust vault accordingly
+    // Now set insurance to threshold (1000) - set_insurance adjusts vault
     set_insurance(&mut engine, 1000);
-    engine.vault = 100_000 + 1000; // capitals + insurance
     assert_conserved(&engine);
 
     // Create positions with rounding-prone values
@@ -3320,9 +3330,8 @@ fn test_audit_c_reserved_insurance_not_spent_in_adl() {
     let winner_idx = engine.add_user(1).unwrap();
     let loser_idx = engine.add_user(1).unwrap();
 
-    // Setup: Insurance fund has balance above floor
+    // Setup: Insurance fund has balance above floor (set_insurance adjusts vault)
     set_insurance(&mut engine, 500);
-    engine.vault = 500;
     assert_conserved(&engine);
 
     // Winner has positive PnL that will warm up
@@ -3400,7 +3409,6 @@ fn test_audit_c_insurance_floor_plus_reserved_protected() {
 
     // Setup: Insurance = 500, floor = 200, so raw_spendable = 300
     set_insurance(&mut engine, 500);
-    engine.vault = 500;
     assert_conserved(&engine);
 
     engine.deposit(user_idx, 5_000).unwrap();
