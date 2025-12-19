@@ -89,8 +89,20 @@ fn assert_vault_delta(engine: &RiskEngine, before: u128, delta: i128) {
     );
 }
 
+/// Set insurance balance while adjusting vault to preserve conservation.
+/// This models a "top-up" from an external source that deposits to both vault and insurance.
+fn set_insurance(engine: &mut RiskEngine, new_balance: u128) {
+    let old = engine.insurance_fund.balance;
+    engine.insurance_fund.balance = new_balance;
+    if new_balance >= old {
+        engine.vault += new_balance - old;
+    } else {
+        engine.vault = engine.vault.saturating_sub(old - new_balance);
+    }
+}
+
 // ==============================================================================
-// API-LEVEL TESTS (NO DIRECT STATE MUTATION)
+// TESTS (MIXED API + WHITEBOX)
 // ==============================================================================
 
 #[test]
@@ -227,11 +239,14 @@ fn test_withdraw_with_warmed_up_pnl() {
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 500 = 500
-    engine.insurance_fund.balance = 500;
+    set_insurance(&mut engine, 500);
 
     engine.deposit(user_idx, 1000).unwrap();
+    // WHITEBOX: Set positive PnL and adjust vault to match
     engine.accounts[user_idx as usize].pnl = 500;
+    engine.vault += 500; // pnl
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+    assert_conserved(&engine);
 
     // Advance enough slots to warm up 200 PNL
     engine.advance_slot(20);
@@ -241,7 +256,7 @@ fn test_withdraw_with_warmed_up_pnl() {
     engine.withdraw(user_idx, 1200).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].pnl, 300); // 500 - 200 converted
     assert_eq!(engine.accounts[user_idx as usize].capital, 0); // 1000 + 200 - 1200
-    assert_eq!(engine.vault, 0);
+    assert_conserved(&engine);
 }
 #[test]
 fn test_conservation_simple() {
@@ -324,7 +339,9 @@ fn test_adl_insurance_depleted() {
 
     engine.accounts[user_idx as usize].capital = 1000;
     engine.accounts[user_idx as usize].pnl = 100;
-    engine.insurance_fund.balance = 50;
+    engine.vault += 1000 + 100; // capital + pnl
+    set_insurance(&mut engine, 50);
+    assert_conserved(&engine);
 
     // Apply ADL loss of 200
     engine.apply_adl(200).unwrap();
@@ -500,7 +517,7 @@ fn test_multiple_users_adl() {
     // User3: no PNL
     engine.accounts[user3 as usize].capital = 1500;
 
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
 
     // Apply ADL loss of 1000
     engine.apply_adl(1000).unwrap();
@@ -549,6 +566,7 @@ fn test_fee_accumulation() {
     // WHITEBOX: Set LP capital directly. Add to vault (not override) to preserve account fees.
     engine.accounts[lp_idx as usize].capital = 1_000_000;
     engine.vault += 1_000_000;
+    assert_conserved(&engine);
 
     // Track fee revenue and balance BEFORE trades
     let fee_rev_before = engine.insurance_fund.fee_revenue;
@@ -703,8 +721,10 @@ fn test_funding_positive_rate_longs_pay_shorts() {
     // Zero warmup/reserved to avoid side effects from touch_account
     engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
     engine.accounts[user_idx as usize].reserved_pnl = 0;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = engine.current_slot;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = 0;
     engine.accounts[lp_idx as usize].reserved_pnl = 0;
+    engine.accounts[lp_idx as usize].warmup_started_at_slot = engine.current_slot;
     assert_conserved(&engine);
 
     // Accrue positive funding: +10 bps/slot for 1 slot
@@ -767,8 +787,10 @@ fn test_funding_negative_rate_shorts_pay_longs() {
     // Zero warmup/reserved to avoid side effects from touch_account
     engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
     engine.accounts[user_idx as usize].reserved_pnl = 0;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = engine.current_slot;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = 0;
     engine.accounts[lp_idx as usize].reserved_pnl = 0;
+    engine.accounts[lp_idx as usize].warmup_started_at_slot = engine.current_slot;
     assert_conserved(&engine);
 
     // Accrue negative funding: -10 bps/slot
@@ -976,7 +998,7 @@ fn test_adl_protects_principal_during_warmup() {
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 10000 = 10000
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     let attacker_principal = engine.accounts[attacker as usize].capital;
     let victim_principal = engine.accounts[victim as usize].capital;
@@ -1129,7 +1151,7 @@ fn test_warmup_rate_limit_single_user() {
     let mut engine = Box::new(RiskEngine::new(params));
 
     // Add insurance fund: 10,000
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     // Max warmup rate = 10,000 * 5000 / 50 / 10,000 = 10,000 * 0.5 / 50 = 100 per slot
     let expected_max_rate = 10_000 * 5000 / 50 / 10_000;
@@ -1162,7 +1184,7 @@ fn test_warmup_rate_limit_multiple_users() {
     params.max_warmup_rate_fraction_bps = 5000; // 50% in T/2
 
     let mut engine = Box::new(RiskEngine::new(params));
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     // Max total warmup rate = 100 per slot
 
@@ -1195,7 +1217,7 @@ fn test_warmup_rate_released_on_pnl_decrease() {
     params.max_warmup_rate_fraction_bps = 5000;
 
     let mut engine = Box::new(RiskEngine::new(params));
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     let user1 = engine.add_user(100).unwrap();
     let user2 = engine.add_user(100).unwrap();
@@ -1235,7 +1257,7 @@ fn test_warmup_rate_scales_with_insurance_fund() {
     let mut engine = Box::new(RiskEngine::new(params));
 
     // Small insurance fund
-    engine.insurance_fund.balance = 1_000;
+    set_insurance(&mut engine, 1_000);
 
     let user = engine.add_user(100).unwrap();
     engine.deposit(user, 1_000).unwrap();
@@ -1247,7 +1269,7 @@ fn test_warmup_rate_scales_with_insurance_fund() {
     assert_eq!(engine.accounts[user as usize].warmup_slope_per_step, 10);
 
     // Increase insurance fund 10x
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     // Update slope again
     engine.update_warmup_slope(user).unwrap();
@@ -1266,7 +1288,7 @@ fn test_warmup_rate_limit_invariant_maintained() {
     params.max_warmup_rate_fraction_bps = 5000;
 
     let mut engine = Box::new(RiskEngine::new(params));
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     // Add multiple users with varying PNL
     for i in 0..10 {
@@ -1302,7 +1324,7 @@ fn test_risk_reduction_only_mode_triggered_by_loss() {
     engine.deposit(user2, 10_000).unwrap();
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 5_000;
+    set_insurance(&mut engine, 5_000);
 
     // Simulate a loss event that depletes insurance fund
     let loss = 10_000;
@@ -1328,7 +1350,7 @@ fn test_proportional_haircut_on_withdrawal() {
     engine.deposit(user2, 5_000).unwrap();
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 1_000;
+    set_insurance(&mut engine, 1_000);
 
     // Total principal = 15,000
     // Trigger loss that creates 3,000 loss_accum
@@ -1378,9 +1400,8 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     engine.accounts[lp as usize].capital = 50_000;
     engine.vault += 50_000;
 
-    // Set insurance fund balance (and add to vault for conservation)
-    engine.insurance_fund.balance = 5_000;
-    engine.vault += 5_000;
+    // Set insurance fund balance
+    set_insurance(&mut engine, 5_000);
     assert_conserved(&engine);
 
     // User opens long position
@@ -1412,7 +1433,7 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
     engine.accounts[lp as usize].capital = 50_000;
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 1_000;
+    set_insurance(&mut engine, 1_000);
 
     // Trigger withdrawal-only mode
     engine.apply_adl(2_000).unwrap();
@@ -1512,7 +1533,7 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 100 = 100
-    engine.insurance_fund.balance = 100;
+    set_insurance(&mut engine, 100);
 
     // User.pnl=+1000, slope=10, started_at_slot=0
     engine.accounts[user as usize].pnl = 1000;
@@ -1628,7 +1649,7 @@ fn test_top_up_insurance_fund_reduces_loss() {
     engine.deposit(user, 10_000).unwrap();
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 1_000;
+    set_insurance(&mut engine, 1_000);
 
     // Trigger withdrawal-only mode with 4k loss_accum
     engine.apply_adl(5_000).unwrap();
@@ -1661,7 +1682,7 @@ fn test_deposits_allowed_in_withdrawal_mode() {
     engine.deposit(user1, 10_000).unwrap();
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 1_000;
+    set_insurance(&mut engine, 1_000);
 
     // Trigger withdrawal-only mode
     engine.apply_adl(2_000).unwrap();
@@ -1703,7 +1724,7 @@ fn test_fair_unwinding_scenario() {
     engine.deposit(charlie, 10_000).unwrap();
 
     // Set insurance fund balance AFTER adding users (to avoid fee confusion)
-    engine.insurance_fund.balance = 5_000;
+    set_insurance(&mut engine, 5_000);
 
     // Total principal: 40k
     // Insurance fund: 5k
@@ -1776,9 +1797,7 @@ fn test_lp_withdraw() {
 
     // Add insurance to provide warmup budget for converting LP's positive PnL to capital
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 5000 = 5000
-    // WHITEBOX: When setting insurance directly, also add to vault to maintain conservation
-    engine.insurance_fund.balance = 5_000;
-    engine.vault += 5_000;
+    set_insurance(&mut engine, 5_000);
 
     // Zero-sum PNL: LP gains 5000, user loses 5000
     engine.accounts[lp_idx as usize].pnl = 5_000;
@@ -1853,7 +1872,7 @@ fn test_update_lp_warmup_slope() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
 
     // Set insurance fund
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
 
     // LP earns large PNL
     engine.accounts[lp_idx as usize].pnl = 50_000;
@@ -1964,7 +1983,7 @@ fn test_risk_reduction_threshold() {
     engine.deposit(user, 10_000).unwrap();
 
     // Setup: insurance fund has 10k, which is above threshold
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
     assert!(!engine.risk_reduction_only);
 
     // Apply ADL with 3k loss - should bring insurance to 7k (spendable was 5k, used 3k)
@@ -2371,7 +2390,7 @@ fn test_warmup_budget_blocks_positive_without_budget() {
     let user = engine.add_user(1).unwrap();
 
     // Set insurance exactly at floor (no spendable insurance)
-    engine.insurance_fund.balance = 100;
+    set_insurance(&mut engine, 100);
 
     // Setup account with positive PnL, large slope, started_at_slot=0
     engine.accounts[user as usize].pnl = 1000;
@@ -2411,7 +2430,7 @@ fn test_warmup_budget_losses_create_budget_for_profits() {
     let winner = engine.add_user(1).unwrap();
 
     // Set insurance at floor (no spendable insurance)
-    engine.insurance_fund.balance = 0;
+    set_insurance(&mut engine, 0);
 
     // Loser: capital=500, pnl=-500, large cap
     engine.accounts[loser as usize].capital = 500;
@@ -2465,7 +2484,7 @@ fn test_warmup_budget_insurance_allows_profits_without_losses() {
     let user = engine.add_user(1).unwrap();
 
     // Insurance provides budget
-    engine.insurance_fund.balance = 200;
+    set_insurance(&mut engine, 200);
 
     // User has positive PnL
     engine.accounts[user as usize].pnl = 500;
@@ -2505,7 +2524,7 @@ fn test_warmup_budget_frozen_in_risk_mode() {
     let user = engine.add_user(1).unwrap();
 
     // Provide insurance budget
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
 
     // Setup account with positive PnL
     engine.accounts[user as usize].pnl = 500;
@@ -2631,7 +2650,7 @@ fn test_force_realize_losses_threshold_gate() {
     let _user = engine.add_user(1).unwrap();
 
     // Set insurance above threshold (threshold is 1000)
-    engine.insurance_fund.balance = 5000;
+    set_insurance(&mut engine, 5000);
 
     // force_realize_losses should fail
     let result = engine.force_realize_losses(1_000_000);
@@ -2639,14 +2658,14 @@ fn test_force_realize_losses_threshold_gate() {
     assert!(matches!(result.unwrap_err(), RiskError::Unauthorized));
 
     // Set insurance at threshold
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
     let result = engine.force_realize_losses(1_000_000);
     assert!(result.is_ok(), "Should succeed when insurance == threshold");
 
     // Reset and set insurance below threshold
     let mut engine2 = Box::new(RiskEngine::new(params_with_threshold()));
     let _user2 = engine2.add_user(1).unwrap();
-    engine2.insurance_fund.balance = 500;
+    set_insurance(&mut engine2, 500);
     let result = engine2.force_realize_losses(1_000_000);
     assert!(result.is_ok(), "Should succeed when insurance < threshold");
 }
@@ -2670,9 +2689,9 @@ fn test_force_realize_losses_paydown() {
     engine.accounts[lp as usize].position_size = -1000;
     engine.accounts[lp as usize].entry_price = 2_000_000;
 
-    // Set vault = capital + insurance for conservation (no pnl yet)
-    engine.vault = 2000 + 1000;
-    engine.insurance_fund.balance = 1000; // At threshold
+    // Add capital to vault and set insurance for conservation (no pnl yet)
+    engine.vault += 1000 + 1000; // capitals
+    set_insurance(&mut engine, 1000); // At threshold
     assert_conserved(&engine);
 
     let warmed_neg_before = engine.warmed_neg_total;
@@ -2743,12 +2762,11 @@ fn test_force_realize_losses_unpaid_to_adl() {
     engine.accounts[lp as usize].position_size = -100_000;
     engine.accounts[lp as usize].entry_price = 2_000_000;
 
-    // vault = sum(capital) + sum(pnl) + insurance
+    // vault += sum(capital) + sum(pnl), then set insurance
     // sum(capital) = 100 + 5000 + 10000 = 15100
     // sum(pnl) = 0 + 5000 + 0 = 5000
-    // insurance = 1000
-    engine.vault = 15100 + 5000 + 1000;
-    engine.insurance_fund.balance = 1000; // At threshold
+    engine.vault += 15100 + 5000;
+    set_insurance(&mut engine, 1000); // At threshold
     assert_conserved(&engine);
 
     let winner_pnl_before = engine.accounts[winner as usize].pnl;
@@ -2791,13 +2809,9 @@ fn test_force_realize_losses_warmup_frozen() {
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
 
-    // Set insurance to exactly threshold (1000). Must not exceed threshold for force_realize_losses.
-    let ins_before = engine.insurance_fund.balance;
-    engine.insurance_fund.balance = 1000; // Exactly at threshold
-    // Vault adjustment: add capital + pnl, and adjust for insurance change (new - old)
-    engine.vault = engine.vault
-        .saturating_sub(ins_before)
-        .saturating_add(5000 + 1000 + 1000); // capital + pnl + insurance
+    // Add capital + pnl to vault, then set insurance to threshold
+    engine.vault += 5000 + 1000;
+    set_insurance(&mut engine, 1000); // Exactly at threshold
     engine.current_slot = 50;
     assert_conserved(&engine);
 
@@ -2852,12 +2866,11 @@ fn test_force_realize_losses_invariant_holds() {
     engine.accounts[lp as usize].position_size = -10_000;
     engine.accounts[lp as usize].entry_price = 2_000_000;
 
-    // vault = sum(capital) + sum(pnl) + insurance
+    // vault += sum(capital) + sum(pnl), then set insurance
     // sum(capital) = 5000 + 5000 + 10000 = 20000
     // sum(pnl) = 0 + 2000 + 0 = 2000
-    // insurance = 1000
-    engine.vault = 20000 + 2000 + 1000;
-    engine.insurance_fund.balance = 1000; // At threshold
+    engine.vault += 20000 + 2000;
+    set_insurance(&mut engine, 1000); // At threshold
     assert_conserved(&engine);
 
     // Force realize at a price that causes small loss
@@ -2895,7 +2908,7 @@ fn test_reserved_invariant_after_adl_spending() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup: floor=100, insurance=200 (raw spendable = 100)
-    engine.insurance_fund.balance = 200;
+    set_insurance(&mut engine, 200);
 
     // User has positive PnL that can warm immediately
     engine.accounts[user_idx as usize].pnl = 100;
@@ -2947,7 +2960,7 @@ fn test_adl_spends_unreserved_insurance() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup: floor=100, insurance=200 (raw spendable = 100)
-    engine.insurance_fund.balance = 200;
+    set_insurance(&mut engine, 200);
 
     // User has positive PnL
     engine.accounts[user_idx as usize].pnl = 40;
@@ -3029,7 +3042,7 @@ fn test_reserved_monotone_non_decreasing() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup: insurance = 500 with matching vault before deposits
-    engine.insurance_fund.balance = 500;
+    set_insurance(&mut engine, 500);
     engine.vault = 500;
     assert_conserved(&engine);
 
@@ -3066,7 +3079,7 @@ fn test_reserved_monotone_non_decreasing() {
     );
 
     // Force realize losses (need to drain insurance first)
-    engine.insurance_fund.balance = 100; // At floor
+    set_insurance(&mut engine, 100); // At floor
     let _ = engine.force_realize_losses(1_000_000);
     assert!(
         engine.warmup_insurance_reserved >= reserved_after_warmup,
@@ -3100,7 +3113,7 @@ fn test_audit_a_settle_idempotent_when_paused() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup: User has positive PnL with warmup slope
-    engine.insurance_fund.balance = 10_000; // Provide warmup budget
+    set_insurance(&mut engine, 10_000); // Provide warmup budget
     engine.deposit(user_idx, 1_000).unwrap();
     engine.accounts[user_idx as usize].pnl = 500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
@@ -3163,7 +3176,7 @@ fn test_audit_a_settle_idempotent_multiple_times_while_paused() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup
-    engine.insurance_fund.balance = 10_000;
+    set_insurance(&mut engine, 10_000);
     engine.deposit(user_idx, 1_000).unwrap();
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
@@ -3269,7 +3282,7 @@ fn test_audit_b_conservation_after_force_realize_with_rounding() {
     // 100_002 = 100_000 + 0 + 2 ✓
     //
     // Now set insurance to threshold (1000), adjust vault accordingly
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
     engine.vault = 100_000 + 1000; // capitals + insurance
     assert_conserved(&engine);
 
@@ -3308,7 +3321,7 @@ fn test_audit_c_reserved_insurance_not_spent_in_adl() {
     let loser_idx = engine.add_user(1).unwrap();
 
     // Setup: Insurance fund has balance above floor
-    engine.insurance_fund.balance = 500;
+    set_insurance(&mut engine, 500);
     engine.vault = 500;
     assert_conserved(&engine);
 
@@ -3386,7 +3399,7 @@ fn test_audit_c_insurance_floor_plus_reserved_protected() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Setup: Insurance = 500, floor = 200, so raw_spendable = 300
-    engine.insurance_fund.balance = 500;
+    set_insurance(&mut engine, 500);
     engine.vault = 500;
     assert_conserved(&engine);
 
@@ -3527,7 +3540,7 @@ fn test_audit_force_realize_prevents_warmup_repay() {
     engine.accounts[loser_idx as usize].warmup_slope_per_step = 100; // High slope
 
     // Set insurance at floor to enable force_realize
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
 
     // Adjust vault for conservation
     let total_capital =
@@ -3604,7 +3617,7 @@ fn test_audit_force_realize_updates_all_accounts_warmup() {
     engine.accounts[lp_idx as usize].warmup_started_at_slot = 10;
 
     // Set insurance at floor
-    engine.insurance_fund.balance = 1000;
+    set_insurance(&mut engine, 1000);
     let total_capital = engine.accounts[user1 as usize].capital
         + engine.accounts[user2 as usize].capital
         + engine.accounts[lp_idx as usize].capital;
