@@ -3172,9 +3172,13 @@ fn test_no_insurance_minting_on_rounding() {
     assert!(engine.check_conservation(), "Conservation violated");
 }
 
-/// Test 4: Reserved never decreases (monotone counter)
+/// Test 4: Reserved is correctly recomputed after operations
+/// Formula: reserved = min(max(W+ - W-, 0), raw_spendable)
 #[test]
-fn test_reserved_monotone_non_decreasing() {
+fn test_reserved_correctly_recomputed() {
+    // Test that warmup_insurance_reserved is correctly computed as:
+    // reserved = min(max(W+ - W-, 0), raw_spendable)
+    // where raw_spendable = max(0, I - I_min)
     let mut params = default_params();
     params.risk_reduction_threshold = 100;
 
@@ -3206,28 +3210,76 @@ fn test_reserved_monotone_non_decreasing() {
         "Should have reserved some insurance"
     );
 
-    // Run ADL - reserved should not decrease
+    // Verify reserved is correctly computed: min(W+ - W-, raw_spendable)
+    let w_plus = engine.warmed_pos_total;
+    let w_minus = engine.warmed_neg_total;
+    let raw_spendable = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    let expected_reserved = core::cmp::min(
+        w_plus.saturating_sub(w_minus),
+        raw_spendable,
+    );
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected_reserved,
+        "Reserved should match formula after warmup"
+    );
+
+    // Run ADL - reserved should be recomputed correctly
     engine.apply_adl(10).unwrap();
-    assert!(
-        engine.warmup_insurance_reserved >= reserved_after_warmup,
-        "Reserved should not decrease after ADL"
+    let raw_spendable = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    let expected_reserved = core::cmp::min(
+        engine.warmed_pos_total.saturating_sub(engine.warmed_neg_total),
+        raw_spendable,
+    );
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected_reserved,
+        "Reserved should match formula after ADL"
     );
 
     // Run panic_settle with positions
     engine.accounts[lp_idx as usize].position_size = -100;
     engine.accounts[user_idx as usize].position_size = 100;
     engine.panic_settle_all(1_000_000).unwrap();
-    assert!(
-        engine.warmup_insurance_reserved >= reserved_after_warmup,
-        "Reserved should not decrease after panic_settle"
+    let raw_spendable = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    let expected_reserved = core::cmp::min(
+        engine.warmed_pos_total.saturating_sub(engine.warmed_neg_total),
+        raw_spendable,
+    );
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected_reserved,
+        "Reserved should match formula after panic_settle"
     );
 
-    // Force realize losses (need to drain insurance first)
+    // When insurance drops to floor, reserved decreases (raw_spendable = 0)
     set_insurance(&mut engine, 100); // At floor
+    // Manually call recompute since set_insurance doesn't do it
+    let raw_spendable = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    assert_eq!(raw_spendable, 0, "raw_spendable should be 0 at floor");
+    // Note: reserved won't automatically update from set_insurance helper,
+    // but force_realize_losses will recompute it
     let _ = engine.force_realize_losses(1_000_000);
-    assert!(
-        engine.warmup_insurance_reserved >= reserved_after_warmup,
-        "Reserved should not decrease after force_realize_losses"
+    let raw_spendable = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    let expected_reserved = core::cmp::min(
+        engine.warmed_pos_total.saturating_sub(engine.warmed_neg_total),
+        raw_spendable,
+    );
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected_reserved,
+        "Reserved should match formula after force_realize_losses (may be 0 at floor)"
     );
 }
 

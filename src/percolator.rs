@@ -1271,6 +1271,16 @@ impl RiskEngine {
         rhs.saturating_sub(self.warmed_pos_total)
     }
 
+    /// Recompute warmup_insurance_reserved from current W+, W-, and insurance.
+    /// Must be called after any operation that changes insurance or W+/W-.
+    /// Formula: reserved = min(max(W+ - W-, 0), raw_spendable)
+    #[inline]
+    fn recompute_warmup_insurance_reserved(&mut self) {
+        let raw = self.insurance_spendable_raw();
+        let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+        self.warmup_insurance_reserved = core::cmp::min(needed, raw);
+    }
+
     /// Settle warmup: convert PnL to capital with global budget constraint
     ///
     /// This function settles matured PnL into capital:
@@ -1340,11 +1350,8 @@ impl RiskEngine {
         // This is safe even when paused: effective_slot==warmup_pause_slot, so further elapsed==0.
         self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
-        // 3.6 Derive warmup_insurance_reserved from W+ and W- (allows release when losses settle)
-        // reserved = min(max(W+ - W-, 0), raw_spendable)
-        let raw = self.insurance_spendable_raw();
-        let required = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
-        self.warmup_insurance_reserved = core::cmp::min(required, raw);
+        // 3.6 Recompute reserved (W+ or W- may have changed)
+        self.recompute_warmup_insurance_reserved();
 
         // 3.7 Hard invariant assert in debug/kani
         // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
@@ -1377,6 +1384,11 @@ impl RiskEngine {
     /// Pass 2: Recompute each account's unwrapped PNL and apply proportional haircut
     ///
     /// Waterfall: unwrapped PNL first, then insurance fund, then loss_accum
+    ///
+    /// Uses largest-remainder method for exact haircut distribution:
+    /// 1. Compute haircut = (loss * unwrapped) / total for each account
+    /// 2. Track remainder = (loss * unwrapped) % total for each account
+    /// 3. Distribute leftover units to accounts with largest remainder (ties: lowest idx)
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
         // ADL reduces risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
@@ -1403,16 +1415,17 @@ impl RiskEngine {
         // Determine how much loss can be socialized via unwrapped PNL
         let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
 
-        // Pass 2: Apply proportional haircuts by recomputing unwrapped PNL
-        // Track total applied for remainder distribution (fixes rounding-conservation bug)
+        // Track total applied for conservation
         let mut applied_from_pnl: u128 = 0;
 
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            // Track accounts with unwrapped PnL for remainder distribution
-            let mut accounts_with_unwrapped: [usize; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
-            let mut count: usize = 0;
+            // Pass 2: Apply floor(proportional) haircuts and track remainders
+            // We use scan-per-leftover-unit to avoid large stack arrays in production.
+            //
+            // For test/kani builds we can use arrays for efficiency; in production we scan.
+            #[cfg(any(test, kani, feature = "fuzz"))]
+            let mut rems: [u128; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
 
-            // Must use manual iteration since we need self for compute_unwrapped_pnl
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
                 while w != 0 {
@@ -1420,38 +1433,109 @@ impl RiskEngine {
                     let idx = block * 64 + bit;
                     w &= w - 1;
 
-                    // Recompute unwrapped (deterministic - same value as pass 1)
                     let account = &self.accounts[idx];
                     if account.pnl > 0 {
                         let unwrapped = self.compute_unwrapped_pnl(account);
 
                         if unwrapped > 0 {
-                            let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
+                            let numer = loss_to_socialize.saturating_mul(unwrapped);
+                            let haircut = numer / total_unwrapped;
+                            let rem = numer % total_unwrapped;
+
                             self.accounts[idx].pnl =
                                 self.accounts[idx].pnl.saturating_sub(haircut as i128);
                             applied_from_pnl += haircut;
 
-                            // Track for remainder distribution
-                            accounts_with_unwrapped[count] = idx;
-                            count += 1;
+                            #[cfg(any(test, kani, feature = "fuzz"))]
+                            {
+                                rems[idx] = rem;
+                            }
+
+                            #[cfg(not(any(test, kani, feature = "fuzz")))]
+                            {
+                                let _ = rem; // suppress unused warning in production
+                            }
                         }
                     }
                 }
             }
 
-            // Distribute remainder deterministically (1 unit per account in index order)
-            // This fixes the rounding-conservation bug where integer division truncation
-            // causes sum of haircuts < loss_to_socialize
-            let mut remainder = loss_to_socialize.saturating_sub(applied_from_pnl);
-            for &idx in accounts_with_unwrapped.iter().take(count) {
-                if remainder == 0 {
-                    break;
+            // Distribute leftover units using largest-remainder method
+            let mut leftover = loss_to_socialize.saturating_sub(applied_from_pnl);
+
+            #[cfg(any(test, kani, feature = "fuzz"))]
+            {
+                // Use cached remainders for efficiency in test builds
+                while leftover > 0 {
+                    // Find account with max remainder (ties: lowest idx)
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_rem: u128 = 0;
+
+                    for block in 0..BITMAP_WORDS {
+                        let mut w = self.used[block];
+                        while w != 0 {
+                            let bit = w.trailing_zeros() as usize;
+                            let idx = block * 64 + bit;
+                            w &= w - 1;
+
+                            if rems[idx] > best_rem && self.accounts[idx].pnl > 0 {
+                                best_rem = rems[idx];
+                                best_idx = Some(idx);
+                            }
+                        }
+                    }
+
+                    match best_idx {
+                        Some(idx) => {
+                            self.accounts[idx].pnl =
+                                self.accounts[idx].pnl.saturating_sub(1);
+                            applied_from_pnl += 1;
+                            rems[idx] = 0; // Can't win again
+                            leftover -= 1;
+                        }
+                        None => break, // No more candidates
+                    }
                 }
-                // Only apply if account still has positive PnL
-                if self.accounts[idx].pnl > 0 {
-                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
-                    applied_from_pnl += 1;
-                    remainder -= 1;
+            }
+
+            #[cfg(not(any(test, kani, feature = "fuzz")))]
+            {
+                // Production: recompute remainder each iteration (no large arrays)
+                while leftover > 0 {
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_rem: u128 = 0;
+
+                    for block in 0..BITMAP_WORDS {
+                        let mut w = self.used[block];
+                        while w != 0 {
+                            let bit = w.trailing_zeros() as usize;
+                            let idx = block * 64 + bit;
+                            w &= w - 1;
+
+                            let account = &self.accounts[idx];
+                            if account.pnl > 0 {
+                                let unwrapped = self.compute_unwrapped_pnl(account);
+                                if unwrapped > 0 {
+                                    let numer = loss_to_socialize.saturating_mul(unwrapped);
+                                    let rem = numer % total_unwrapped;
+                                    if rem > best_rem {
+                                        best_rem = rem;
+                                        best_idx = Some(idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    match best_idx {
+                        Some(idx) => {
+                            self.accounts[idx].pnl =
+                                self.accounts[idx].pnl.saturating_sub(1);
+                            applied_from_pnl += 1;
+                            leftover -= 1;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
@@ -1466,7 +1550,8 @@ impl RiskEngine {
         );
 
         // Handle remaining loss with insurance fund (respecting floor)
-        let remaining_loss = total_loss.saturating_sub(loss_to_socialize);
+        // BUG FIX: Use applied_from_pnl, not loss_to_socialize
+        let remaining_loss = total_loss.saturating_sub(applied_from_pnl);
 
         if remaining_loss > 0 {
             // Insurance can only spend unreserved amount above the floor
@@ -1488,6 +1573,9 @@ impl RiskEngine {
                 self.enter_risk_reduction_only_mode();
             }
         }
+
+        // Recompute reserved since insurance may have changed
+        self.recompute_warmup_insurance_reserved();
 
         Ok(())
     }
@@ -1610,6 +1698,9 @@ impl RiskEngine {
                 self.settle_warmup_to_capital(idx as u16)?;
             }
         }
+
+        // Recompute reserved after all operations (insurance may have changed)
+        self.recompute_warmup_insurance_reserved();
 
         Ok(())
     }
@@ -1740,6 +1831,9 @@ impl RiskEngine {
             self.apply_adl(total_unpaid_loss)?;
         }
 
+        // Recompute reserved after all operations (W- and insurance may have changed)
+        self.recompute_warmup_insurance_reserved();
+
         Ok(())
     }
 
@@ -1760,6 +1854,9 @@ impl RiskEngine {
             // Add remaining to insurance fund balance
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
 
+            // Recompute reserved after insurance increase
+            self.recompute_warmup_insurance_reserved();
+
             // Exit risk-reduction-only mode if loss is fully covered and above threshold
             let was_in_mode = self.risk_reduction_only;
             self.exit_risk_reduction_only_mode_if_safe();
@@ -1771,6 +1868,9 @@ impl RiskEngine {
         } else {
             // No loss - just add to insurance fund
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
+
+            // Recompute reserved after insurance increase
+            self.recompute_warmup_insurance_reserved();
 
             // Check if we can exit risk-reduction mode (may have been triggered by threshold, not loss)
             let was_in_mode = self.risk_reduction_only;
