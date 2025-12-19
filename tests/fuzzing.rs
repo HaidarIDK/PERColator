@@ -210,7 +210,25 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         );
     }
 
-    // 4. Account local sanity (for each used account)
+    // 4. Derived reserved check: reserved == min(max(W+ - W-, 0), raw)
+    let expected_reserved = {
+        let required = engine
+            .warmed_pos_total
+            .saturating_sub(engine.warmed_neg_total);
+        core::cmp::min(required, raw_spendable)
+    };
+    assert!(
+        engine.warmup_insurance_reserved == expected_reserved,
+        "{}: Reserved invariant violated: actual={} expected=min(max({}-{},0),{})={}",
+        context,
+        engine.warmup_insurance_reserved,
+        engine.warmed_pos_total,
+        engine.warmed_neg_total,
+        raw_spendable,
+        expected_reserved
+    );
+
+    // 5. Account local sanity (for each used account)
     let n = account_count(engine);
     for i in 0..n {
         if is_account_used(engine, i as u16) {
@@ -226,6 +244,10 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
                 acc.reserved_pnl,
                 positive_pnl
             );
+
+            // Note: slope >= 1 when positive_pnl > 0 is enforced by debug_assert in
+            // update_warmup_slope() itself. We don't check it here because accounts
+            // can have positive PnL from trading without having called update_warmup_slope yet.
         }
     }
 }

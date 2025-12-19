@@ -738,11 +738,26 @@ impl RiskEngine {
         let positive_pnl = clamp_pos_i128(account.pnl);
 
         // Calculate slope: pnl / warmup_period
+        // Ensure slope >= 1 when positive_pnl > 0 to prevent "zero forever" bug
         let slope = if self.params.warmup_period_slots > 0 {
-            positive_pnl / (self.params.warmup_period_slots as u128)
+            let base = positive_pnl / (self.params.warmup_period_slots as u128);
+            if positive_pnl > 0 {
+                core::cmp::max(1, base)
+            } else {
+                0
+            }
         } else {
             positive_pnl // Instant warmup if period is 0
         };
+
+        // Verify slope >= 1 when positive PnL exists
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            slope >= 1 || positive_pnl == 0,
+            "Warmup slope bug: slope {} with positive_pnl {}",
+            slope,
+            positive_pnl
+        );
 
         // Update slope
         account.warmup_slope_per_step = slope;
@@ -1184,10 +1199,10 @@ impl RiskEngine {
     // ADL (Auto-Deleveraging) - Scan-Based
     // ========================================
 
-    /// Calculate unwrapped PNL for an account (inline helper for ADL)
-    /// Unwrapped = positive_pnl - withdrawable - reserved
+    /// Calculate withdrawable PnL for an account (inline helper)
+    /// withdrawable = min(available_pnl, warmed_up_cap)
     #[inline]
-    fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
+    fn compute_withdrawable_pnl(&self, account: &Account) -> u128 {
         if account.pnl <= 0 {
             return 0;
         }
@@ -1202,15 +1217,30 @@ impl RiskEngine {
             self.current_slot
         };
 
-        // Calculate withdrawable inline
+        // Calculate warmed capacity
         let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
         let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
-        let withdrawable = core::cmp::min(available_pnl, warmed_up_cap);
 
-        // Unwrapped = positive_pnl - withdrawable - reserved
+        core::cmp::min(available_pnl, warmed_up_cap)
+    }
+
+    /// Calculate unwrapped PNL for an account (inline helper for ADL)
+    /// unwrapped = max(0, positive_pnl - reserved_pnl - withdrawable_pnl)
+    /// This is PnL that hasn't yet warmed and isn't reserved - subject to ADL haircuts
+    #[inline]
+    fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
+        if account.pnl <= 0 {
+            return 0;
+        }
+
+        let positive_pnl = account.pnl as u128;
+        let reserved = account.reserved_pnl;
+        let withdrawable = self.compute_withdrawable_pnl(account);
+
+        // unwrapped = positive_pnl - reserved - withdrawable (all saturating)
         positive_pnl
+            .saturating_sub(reserved)
             .saturating_sub(withdrawable)
-            .saturating_sub(account.reserved_pnl)
     }
 
     /// Returns insurance balance above the floor (raw spendable, before reservations)
@@ -1282,8 +1312,8 @@ impl RiskEngine {
             }
         }
 
-        // 3.3 Compute budget from losses (how much positive PnL can warm without insurance)
-        let losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
+        // 3.3 Budget from losses (currently unused but documents the design)
+        let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
         let pnl = self.accounts[idx as usize].pnl;
@@ -1297,18 +1327,6 @@ impl RiskEngine {
                 let x = core::cmp::min(cap, core::cmp::min(avail, budget));
 
                 if x > 0 {
-                    // Portion of x that is not covered by matured-loss budget must be backed by insurance.
-                    // Reserve that insurance so it cannot later be spent in ADL.
-                    let covered_by_losses = core::cmp::min(x, losses_budget);
-                    let needs_insurance = x - covered_by_losses;
-
-                    if needs_insurance > 0 {
-                        // Reserve from unreserved spendable insurance (must be available by construction of x)
-                        self.warmup_insurance_reserved = self
-                            .warmup_insurance_reserved
-                            .saturating_add(needs_insurance);
-                    }
-
                     self.accounts[idx as usize].pnl =
                         self.accounts[idx as usize].pnl.saturating_sub(x as i128);
                     self.accounts[idx as usize].capital =
@@ -1322,7 +1340,13 @@ impl RiskEngine {
         // This is safe even when paused: effective_slot==warmup_pause_slot, so further elapsed==0.
         self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
-        // 3.6 Hard invariant assert in debug/kani
+        // 3.6 Derive warmup_insurance_reserved from W+ and W- (allows release when losses settle)
+        // reserved = min(max(W+ - W-, 0), raw_spendable)
+        let raw = self.insurance_spendable_raw();
+        let required = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+        self.warmup_insurance_reserved = core::cmp::min(required, raw);
+
+        // 3.7 Hard invariant assert in debug/kani
         // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
         // Also: reserved ≤ raw_spendable (can't reserve more than exists)
         // Also: insurance >= floor + reserved (reserved portion protected)
@@ -1380,7 +1404,14 @@ impl RiskEngine {
         let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
 
         // Pass 2: Apply proportional haircuts by recomputing unwrapped PNL
+        // Track total applied for remainder distribution (fixes rounding-conservation bug)
+        let mut applied_from_pnl: u128 = 0;
+
         if loss_to_socialize > 0 && total_unwrapped > 0 {
+            // Track accounts with unwrapped PnL for remainder distribution
+            let mut accounts_with_unwrapped: [usize; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+            let mut count: usize = 0;
+
             // Must use manual iteration since we need self for compute_unwrapped_pnl
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
@@ -1398,11 +1429,41 @@ impl RiskEngine {
                             let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
                             self.accounts[idx].pnl =
                                 self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                            applied_from_pnl += haircut;
+
+                            // Track for remainder distribution
+                            accounts_with_unwrapped[count] = idx;
+                            count += 1;
                         }
                     }
                 }
             }
+
+            // Distribute remainder deterministically (1 unit per account in index order)
+            // This fixes the rounding-conservation bug where integer division truncation
+            // causes sum of haircuts < loss_to_socialize
+            let mut remainder = loss_to_socialize.saturating_sub(applied_from_pnl);
+            for &idx in accounts_with_unwrapped.iter().take(count) {
+                if remainder == 0 {
+                    break;
+                }
+                // Only apply if account still has positive PnL
+                if self.accounts[idx].pnl > 0 {
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                    applied_from_pnl += 1;
+                    remainder -= 1;
+                }
+            }
         }
+
+        // Verify exact socialization in test/kani builds
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            applied_from_pnl == loss_to_socialize,
+            "ADL rounding bug: applied {} != socialized {}",
+            applied_from_pnl,
+            loss_to_socialize
+        );
 
         // Handle remaining loss with insurance fund (respecting floor)
         let remaining_loss = total_loss.saturating_sub(loss_to_socialize);

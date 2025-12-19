@@ -49,10 +49,10 @@ where `S = max(0, I - I_min) - R` (saturating) = unreserved spendable insurance.
 - `W⁻` = `warmed_neg_total` - cumulative negative PnL paid from capital
 - `I` = `insurance_fund.balance` - current insurance fund balance
 - `I_min` = `risk_reduction_threshold` - minimum insurance floor (protected)
-- `R` = `warmup_insurance_reserved` - insurance above the floor committed to backing warmed profits (monotone counter)
+- `R` = `warmup_insurance_reserved` - derived value: `min(max(W⁺ - W⁻, 0), raw_spendable)` where `raw_spendable = max(0, I - I_min)`
 - `S` = `max(0, I - I_min) - R` (saturating) = unreserved spendable insurance
 
-`R` reserves part of the spendable insurance above the floor to back already-warmed profits. ADL can only spend unreserved insurance (`S`), leaving reserved insurance intact to back warmed profits.
+`R` is a derived value that automatically releases when losses are settled (W⁻ increases). ADL can only spend unreserved insurance (`S`), leaving reserved insurance intact to back warmed profits.
 
 **Enforcement:** The invariant is enforced at the moment PnL would be converted into capital (warmup settlement), and losses are settled before gains.
 
@@ -67,7 +67,17 @@ where `S = max(0, I - I_min) - R` (saturating) = unreserved spendable insurance.
 2. Spend only unreserved insurance above the protected floor: `max(0, I - I_min) - R`
 3. Any remaining loss is added to `loss_accum`
 
+**ADL Exact Haircut Property:** The sum of all haircuts equals exactly `loss_to_socialize` with no rounding dust. Integer division remainders are distributed deterministically (1 unit per account in index order).
+
+**Unwrapped PnL Definition:** For each account:
+```
+unwrapped_pnl = max(0, positive_pnl - reserved_pnl - withdrawable_pnl)
+```
+Where `withdrawable_pnl` is the portion that has completed warmup and can be withdrawn.
+
 Insurance spending is capped: the engine will only spend unreserved insurance above `I_min` to cover losses. Reserved insurance (`R`) backs already-warmed profits and cannot be spent by ADL.
+
+**Warmup Slope Invariant:** When `update_warmup_slope()` is called for an account with `positive_pnl > 0`, the slope is always `>= 1`. This prevents the "zero forever" bug where small PnL would never warm up.
 
 **Risk-Reduction-Only Mode:** Triggered when insurance fund at or below threshold:
 - Warmup frozen (no more PNL vests)

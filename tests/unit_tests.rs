@@ -322,7 +322,7 @@ fn test_adl_haircut_unwrapped_pnl() {
     // WHITEBOX: Set capital and pnl directly. Add to vault (not override) to preserve account fees.
     engine.accounts[user_idx as usize].capital = 1000;
     engine.vault += 1000; // capital only
-    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+                          // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500; // All unwrapped (warmup not started)
@@ -347,7 +347,7 @@ fn test_adl_overflow_to_insurance() {
     // WHITEBOX: Set capital, pnl, and insurance directly.
     engine.accounts[user_idx as usize].capital = 1000;
     engine.vault += 1000; // capital only
-    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+                          // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 300; // Only 300 unwrapped PNL
@@ -377,7 +377,7 @@ fn test_adl_insurance_depleted() {
 
     engine.accounts[user_idx as usize].capital = 1000;
     engine.vault += 1000; // capital only
-    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+                          // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 100;
@@ -3871,5 +3871,246 @@ fn api_sequence_conservation_smoke_test() {
 
     // Withdraw (should succeed since position is closed)
     engine.withdraw(user, 1_000).unwrap();
+    assert_conserved(&engine);
+}
+
+// ==============================================================================
+// INVARIANT UNIT TESTS (Step 6 of ADL/Warmup correctness plan)
+// ==============================================================================
+
+/// Test that ADL distributes haircuts exactly, including remainder distribution.
+/// Create 3 accounts with unwrapped PnL, apply ADL with a loss that causes remainder.
+#[test]
+fn test_adl_exact_haircut_distribution() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Create 3 users with positive PnL that will have unwrapped amounts
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(2).unwrap();
+    let user3 = engine.add_user(3).unwrap();
+
+    // Deposit capital
+    engine.deposit(user1, 10_000).unwrap();
+    engine.deposit(user2, 10_000).unwrap();
+    engine.deposit(user3, 10_000).unwrap();
+
+    // Create counterparty for zero-sum pnl
+    let loser = engine.add_user(4).unwrap();
+    engine.deposit(loser, 50_000).unwrap();
+
+    // Set up positive PnL on each user (will be unwrapped since no warmup time)
+    // Use values that will cause remainder: 100 + 100 + 100 = 300 total unwrapped
+    // Zero-sum pattern: net_pnl = 0, so no vault funding needed
+    engine.accounts[user1 as usize].pnl = 100;
+    engine.accounts[user2 as usize].pnl = 100;
+    engine.accounts[user3 as usize].pnl = 100;
+    engine.accounts[loser as usize].pnl = -300; // Zero-sum counterparty
+
+    assert_conserved(&engine);
+
+    // Record PnL before ADL
+    let pnl1_before = engine.accounts[user1 as usize].pnl;
+    let pnl2_before = engine.accounts[user2 as usize].pnl;
+    let pnl3_before = engine.accounts[user3 as usize].pnl;
+
+    // Apply ADL with a loss of 7 (will cause remainder since 7/3 = 2 with remainder 1)
+    let loss = 7u128;
+    engine.apply_adl(loss).unwrap();
+
+    // Calculate total haircut applied
+    let haircut1 = (pnl1_before - engine.accounts[user1 as usize].pnl) as u128;
+    let haircut2 = (pnl2_before - engine.accounts[user2 as usize].pnl) as u128;
+    let haircut3 = (pnl3_before - engine.accounts[user3 as usize].pnl) as u128;
+    let total_haircut = haircut1 + haircut2 + haircut3;
+
+    // Verify that the total haircut exactly equals the loss
+    assert_eq!(
+        total_haircut, loss,
+        "ADL must distribute exact loss: got {} expected {}",
+        total_haircut, loss
+    );
+
+    assert_conserved(&engine);
+}
+
+/// Test that warmup slope is always >= 1 when positive PnL exists.
+/// Set positive_pnl = 1 (below warmup period), verify slope = 1 after update.
+#[test]
+fn test_warmup_slope_nonzero() {
+    let params = RiskParams {
+        warmup_period_slots: 1000, // Large period so pnl=1 would normally give slope=0
+        ..default_params()
+    };
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user = engine.add_user(1).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Set minimal positive PnL (1 unit, less than warmup_period_slots)
+    engine.accounts[user as usize].pnl = 1;
+
+    // Create counterparty for zero-sum
+    // Zero-sum pattern: net_pnl = 0, so no vault funding needed
+    let loser = engine.add_user(2).unwrap();
+    engine.deposit(loser, 10_000).unwrap();
+    engine.accounts[loser as usize].pnl = -1;
+
+    assert_conserved(&engine);
+
+    // Update warmup slope
+    engine.update_warmup_slope(user).unwrap();
+
+    // Verify slope is at least 1 (not 0)
+    let slope = engine.accounts[user as usize].warmup_slope_per_step;
+    assert!(
+        slope >= 1,
+        "Slope must be >= 1 when positive PnL exists, got {}",
+        slope
+    );
+
+    assert_conserved(&engine);
+}
+
+/// Test that warmup_insurance_reserved can decrease when losses are settled.
+/// Settle profits first (increases reserved), then settle losses (should decrease reserved).
+#[test]
+fn test_warmup_reserve_release() {
+    let params = RiskParams {
+        warmup_period_slots: 10,
+        risk_reduction_threshold: 100,
+        ..default_params()
+    };
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Fund insurance (using helper to properly update vault)
+    set_insurance(&mut engine, 1000);
+
+    let winner = engine.add_user(1).unwrap();
+    let loser = engine.add_user(2).unwrap();
+
+    engine.deposit(winner, 10_000).unwrap();
+    engine.deposit(loser, 10_000).unwrap();
+
+    // Set up zero-sum PnL
+    // Zero-sum pattern: net_pnl = 0, so no vault funding needed
+    engine.accounts[winner as usize].pnl = 500;
+    engine.accounts[loser as usize].pnl = -500;
+
+    assert_conserved(&engine);
+
+    // Update warmup slope for winner
+    engine.update_warmup_slope(winner).unwrap();
+
+    // For the loser, we need to manually set warmup capacity to allow losses to settle.
+    // update_warmup_slope only calculates slope from positive PnL (returns 0 for negative).
+    // To settle losses, we give the loser a warmup_slope based on the loss magnitude.
+    engine.accounts[loser as usize].warmup_slope_per_step = 50; // 500/10 = 50 per slot
+    engine.accounts[loser as usize].warmup_started_at_slot = 0;
+
+    // Advance time to allow full warmup
+    engine.current_slot = 100;
+
+    // Settle the winner's profits first (should reserve insurance since no losses settled yet)
+    engine.settle_warmup_to_capital(winner).unwrap();
+    let reserved_after_profit = engine.warmup_insurance_reserved;
+
+    // Now settle the loser's losses (W- increases, should release some reserved)
+    engine.settle_warmup_to_capital(loser).unwrap();
+    let reserved_after_loss = engine.warmup_insurance_reserved;
+
+    // Reserved should have decreased (or stayed same if losses >= profits)
+    assert!(
+        reserved_after_loss <= reserved_after_profit,
+        "Reserved should decrease when losses settle: before {} after {}",
+        reserved_after_profit,
+        reserved_after_loss
+    );
+
+    // Since W+ = 500 and now W- = 500, reserved should be 0
+    assert_eq!(reserved_after_loss, 0, "Reserved should be 0 when W+ == W-");
+
+    assert_conserved(&engine);
+}
+
+/// Test the precise definition of unwrapped PnL.
+/// unwrapped = max(0, positive_pnl - reserved_pnl - withdrawable_pnl)
+#[test]
+fn test_unwrapped_definition() {
+    let params = RiskParams {
+        warmup_period_slots: 100,
+        ..default_params()
+    };
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user = engine.add_user(1).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Create counterparty for zero-sum
+    // Zero-sum pattern: net_pnl = 0, so no vault funding needed
+    let loser = engine.add_user(2).unwrap();
+    engine.deposit(loser, 10_000).unwrap();
+    engine.accounts[loser as usize].pnl = -1000;
+
+    // Set positive PnL and reserved
+    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].reserved_pnl = 200;
+
+    // Update slope to establish warmup rate
+    engine.update_warmup_slope(user).unwrap();
+
+    assert_conserved(&engine);
+
+    // At t=0, nothing is warmed yet, so:
+    // withdrawable = 0
+    // unwrapped = 1000 - 200 - 0 = 800
+    let account = &engine.accounts[user as usize];
+    let positive_pnl = account.pnl as u128;
+    let reserved = account.reserved_pnl;
+
+    // Compute withdrawable manually (same logic as compute_withdrawable_pnl)
+    let available = positive_pnl - reserved; // 800
+    let elapsed = engine
+        .current_slot
+        .saturating_sub(account.warmup_started_at_slot);
+    let warmed_cap = account.warmup_slope_per_step * (elapsed as u128);
+    let withdrawable = core::cmp::min(available, warmed_cap);
+
+    // Expected unwrapped
+    let expected_unwrapped = positive_pnl
+        .saturating_sub(reserved)
+        .saturating_sub(withdrawable);
+
+    // Test: at t=0, withdrawable should be 0, unwrapped should be 800
+    assert_eq!(withdrawable, 0, "No time elapsed, withdrawable should be 0");
+    assert_eq!(expected_unwrapped, 800, "Unwrapped should be 800 at t=0");
+
+    // Advance time to allow partial warmup (50 slots = 50% of 100)
+    engine.current_slot = 50;
+
+    // Recalculate
+    let account = &engine.accounts[user as usize];
+    let elapsed = engine
+        .current_slot
+        .saturating_sub(account.warmup_started_at_slot);
+    let warmed_cap = account.warmup_slope_per_step * (elapsed as u128);
+    let available = positive_pnl - reserved; // 800
+    let withdrawable_now = core::cmp::min(available, warmed_cap);
+
+    // With slope=10 (1000/100) and 50 slots, warmed_cap = 500
+    // withdrawable = min(800, 500) = 500
+    // unwrapped = 1000 - 200 - 500 = 300
+    let expected_unwrapped_now = positive_pnl
+        .saturating_sub(reserved)
+        .saturating_sub(withdrawable_now);
+
+    assert_eq!(
+        withdrawable_now, 500,
+        "After 50 slots, withdrawable should be 500"
+    );
+    assert_eq!(
+        expected_unwrapped_now, 300,
+        "After 50 slots, unwrapped should be 300"
+    );
+
     assert_conserved(&engine);
 }

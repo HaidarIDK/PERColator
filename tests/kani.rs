@@ -2845,3 +2845,130 @@ fn audit_force_realize_updates_warmup_start() {
         "AUDIT PROOF FAILED: PnL changed after settle post-force_realize"
     );
 }
+
+// ============================================================================
+// ADL/Warmup Correctness Proofs (Step 8 of the fix plan)
+// ============================================================================
+
+/// Proof: update_warmup_slope sets slope >= 1 when positive_pnl > 0
+/// This prevents the "zero forever" warmup bug where small PnL never warms up.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_warmup_slope_nonzero_when_positive_pnl() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Arbitrary positive PnL (bounded for tractability)
+    let positive_pnl: i128 = kani::any();
+    kani::assume(positive_pnl > 0 && positive_pnl < 10_000);
+
+    // Setup account with positive PnL
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[user_idx as usize].pnl = positive_pnl;
+    engine.vault = 10_000 + positive_pnl as u128;
+
+    // Call update_warmup_slope
+    let _ = engine.update_warmup_slope(user_idx);
+
+    // PROOF: slope must be >= 1 when positive_pnl > 0
+    // This is enforced by the debug_assert in the function, but we verify here too
+    let slope = engine.accounts[user_idx as usize].warmup_slope_per_step;
+    assert!(
+        slope >= 1,
+        "Warmup slope must be >= 1 when positive_pnl > 0"
+    );
+}
+
+/// Proof: warmup_insurance_reserved equals the derived formula after settlement
+/// reserved = min(max(W+ - W-, 0), raw_spendable)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_reserved_equals_derived_formula() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Arbitrary values (bounded for tractability)
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let insurance: u128 = kani::any();
+    let current_slot: u64 = kani::any();
+
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(pnl > 0 && pnl < 5_000);
+    kani::assume(insurance > 0 && insurance < 5_000);
+    kani::assume(current_slot > 100 && current_slot < 1_000);
+
+    // Setup account
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = pnl;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = (pnl as u128) / 100;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+    engine.insurance_fund.balance = insurance;
+    engine.vault = capital + pnl as u128 + insurance;
+    engine.current_slot = current_slot;
+
+    // Settle warmup (this should update reserved)
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // PROOF: reserved == min(max(W+ - W-, 0), raw_spendable)
+    let raw_spendable = engine.insurance_spendable_raw();
+    let required = engine
+        .warmed_pos_total
+        .saturating_sub(engine.warmed_neg_total);
+    let expected_reserved = core::cmp::min(required, raw_spendable);
+
+    assert!(
+        engine.warmup_insurance_reserved == expected_reserved,
+        "Reserved must equal derived formula"
+    );
+}
+
+/// Proof: ADL applies exact haircuts (debug_assert verifies sum == loss_to_socialize)
+/// This proof verifies that apply_adl completes without triggering the debug_assert
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_adl_exact_haircut_distribution() {
+    let mut engine = RiskEngine::new(test_params());
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(2).unwrap();
+
+    // Setup two accounts with positive PnL (unwrapped)
+    let pnl1: u128 = kani::any();
+    let pnl2: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(pnl1 > 0 && pnl1 < 1_000);
+    kani::assume(pnl2 > 0 && pnl2 < 1_000);
+    kani::assume(loss > 0 && loss < pnl1 + pnl2);
+
+    engine.accounts[user1 as usize].capital = 10_000;
+    engine.accounts[user1 as usize].pnl = pnl1 as i128;
+
+    engine.accounts[user2 as usize].capital = 10_000;
+    engine.accounts[user2 as usize].pnl = pnl2 as i128;
+
+    engine.vault = 20_000 + pnl1 + pnl2;
+    engine.insurance_fund.balance = 1_000;
+
+    let total_pnl_before =
+        (engine.accounts[user1 as usize].pnl + engine.accounts[user2 as usize].pnl) as u128;
+
+    // Apply ADL - the debug_assert inside will verify sum of haircuts == loss_to_socialize
+    let _ = engine.apply_adl(loss);
+
+    let total_pnl_after =
+        (engine.accounts[user1 as usize].pnl + engine.accounts[user2 as usize].pnl) as u128;
+
+    // PROOF: Total PnL reduced by exactly the socialized loss
+    let total_unwrapped = pnl1 + pnl2; // All PnL is unwrapped (no warmup time elapsed)
+    let expected_loss = core::cmp::min(loss, total_unwrapped);
+
+    assert!(
+        total_pnl_before.saturating_sub(total_pnl_after) == expected_loss,
+        "ADL must reduce total PnL by exactly the socialized loss"
+    );
+}
