@@ -1503,7 +1503,7 @@ impl RiskEngine {
                                 continue;
                             }
                             // Prefer larger remainder; if equal, prefer smaller idx (ties)
-                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
+                            if rem > best_rem || (rem == best_rem && rem != 0 && best_idx.map_or(true, |b| idx < b)) {
                                 best_rem = rem;
                                 best_idx = Some(idx);
                             }
