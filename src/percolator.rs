@@ -822,12 +822,23 @@ impl RiskEngine {
 
         if delta_f != 0 && account.position_size != 0 {
             // payment = position × ΔF / 1e6
-            let payment = account
+            // Round UP for positive payments (account pays), truncate for negative (account receives)
+            // This ensures vault always has at least what's owed (one-sided conservation slack).
+            let raw = account
                 .position_size
                 .checked_mul(delta_f)
-                .ok_or(RiskError::Overflow)?
-                .checked_div(1_000_000)
                 .ok_or(RiskError::Overflow)?;
+
+            let payment = if raw > 0 {
+                // Account is paying: round UP to ensure vault gets at least theoretical amount
+                raw.checked_add(999_999)
+                    .ok_or(RiskError::Overflow)?
+                    .checked_div(1_000_000)
+                    .ok_or(RiskError::Overflow)?
+            } else {
+                // Account is receiving: truncate towards zero to give at most theoretical amount
+                raw.checked_div(1_000_000).ok_or(RiskError::Overflow)?
+            };
 
             // Longs pay when funding positive: pnl -= payment
             account.pnl = account
@@ -1715,10 +1726,10 @@ impl RiskEngine {
     ///
     /// # Rounding Slack
     ///
-    /// We allow `|actual - expected| <= MAX_ROUNDING_SLACK` because integer division
-    /// truncation in funding calculations can cause small discrepancies in either
-    /// direction. This is bounded by `MAX_ROUNDING_SLACK` (one unit per account
-    /// worst-case) to prevent unbounded drift and catch accidental minting bugs.
+    /// We require `actual >= expected` (vault has at least what is owed) and
+    /// `(actual - expected) <= MAX_ROUNDING_SLACK` (bounded dust). Funding payments
+    /// are rounded UP when accounts pay, ensuring the vault never has less than
+    /// what's owed. The bounded dust check catches accidental minting bugs.
     pub fn check_conservation(&self) -> bool {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
@@ -1728,15 +1739,19 @@ impl RiskEngine {
             total_capital = add_u128(total_capital, account.capital);
 
             // Compute "would-be settled" PNL for this account
-            // This accounts for lazy funding settlement
+            // This accounts for lazy funding settlement with same rounding as settle_account_funding
             let mut settled_pnl = account.pnl;
             if account.position_size != 0 {
                 let delta_f = global_index.saturating_sub(account.funding_index);
                 if delta_f != 0 {
-                    // payment = position × ΔF / 1e6 (longs pay when funding positive)
-                    let payment = account.position_size
-                        .saturating_mul(delta_f)
-                        .saturating_div(1_000_000);
+                    // payment = position × ΔF / 1e6
+                    // Round UP for positive (account pays), truncate for negative (account receives)
+                    let raw = account.position_size.saturating_mul(delta_f);
+                    let payment = if raw > 0 {
+                        raw.saturating_add(999_999).saturating_div(1_000_000)
+                    } else {
+                        raw.saturating_div(1_000_000)
+                    };
                     settled_pnl = settled_pnl.saturating_sub(payment);
                 }
             }
@@ -1744,15 +1759,14 @@ impl RiskEngine {
         });
 
         // Conservation formula:
-        // vault + loss_accum ≈ sum(capital) + sum(settled_pnl) + insurance
+        // vault + loss_accum >= sum(capital) + sum(settled_pnl) + insurance
         //
         // Where:
         // - loss_accum: value that "left" the system (unrecoverable losses)
         // - settled_pnl: pnl after accounting for unsettled funding
         //
-        // The slack between actual and expected should be bounded by MAX_ROUNDING_SLACK.
-        // Positive slack means unclaimed dust in vault (safe).
-        // Small negative slack can occur from integer truncation in funding (acceptable).
+        // Funding payments are rounded UP when accounts pay, so the vault always has
+        // at least what's owed. The slack (dust) is bounded by MAX_ROUNDING_SLACK.
         let base = add_u128(total_capital, self.insurance_fund.balance);
 
         let expected = if net_pnl >= 0 {
@@ -1763,15 +1777,14 @@ impl RiskEngine {
 
         let actual = add_u128(self.vault, self.loss_accum);
 
-        // Conservation check with bounded two-sided slack tolerance:
-        // |actual - expected| <= MAX_ROUNDING_SLACK
-        //
-        // Integer truncation in funding calculations can cause small discrepancies
-        // in either direction. Both positive slack (dust in vault) and small
-        // negative slack (rounding deficit) are acceptable within tolerance.
-        let slack: i128 = (actual as i128) - (expected as i128);
-        let max_slack = MAX_ROUNDING_SLACK as i128;
-        slack >= -max_slack && slack <= max_slack
+        // One-sided conservation check:
+        // actual >= expected (vault has at least what is owed)
+        // (actual - expected) <= MAX_ROUNDING_SLACK (bounded dust)
+        if actual < expected {
+            return false;
+        }
+        let slack = actual - expected;
+        slack <= MAX_ROUNDING_SLACK
     }
 
     /// Advance to next slot (for testing warmup)

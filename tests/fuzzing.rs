@@ -95,13 +95,17 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
                 total_capital += acc.capital;
 
                 // Compute settled PNL (same formula as check_conservation)
+                // Round UP for positive payments (account pays), truncate for negative (account receives)
                 let mut settled_pnl = acc.pnl;
                 if acc.position_size != 0 {
                     let delta_f = global_index.saturating_sub(acc.funding_index);
                     if delta_f != 0 {
-                        let payment = acc.position_size
-                            .saturating_mul(delta_f)
-                            .saturating_div(1_000_000);
+                        let raw = acc.position_size.saturating_mul(delta_f);
+                        let payment = if raw > 0 {
+                            raw.saturating_add(999_999).saturating_div(1_000_000)
+                        } else {
+                            raw.saturating_div(1_000_000)
+                        };
                         settled_pnl = settled_pnl.saturating_sub(payment);
                     }
                 }
@@ -1228,8 +1232,15 @@ proptest! {
         let total_pnl_after = engine.accounts[user_idx as usize].pnl
             + engine.accounts[lp_idx as usize].pnl;
 
-        prop_assert_eq!(total_pnl_after, total_pnl_before,
-                        "Funding should be zero-sum");
+        // Funding payments round UP when account pays, so total PNL may decrease
+        // (vault keeps rounding dust). This ensures one-sided conservation slack.
+        // The change should never be positive (no value created from thin air).
+        let change = total_pnl_after - total_pnl_before;
+        prop_assert!(change <= 0,
+                     "Funding should not create value: change={}", change);
+        // The absolute change should be bounded by rounding (at most 2 per account pair)
+        prop_assert!(change >= -2,
+                     "Funding change should be bounded: change={}", change);
     }
 }
 
@@ -1348,13 +1359,17 @@ fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u
             total_capital += acc.capital;
 
             // Compute settled PNL (same formula as check_conservation)
+            // Round UP for positive payments (account pays), truncate for negative (account receives)
             let mut settled_pnl = acc.pnl;
             if acc.position_size != 0 {
                 let delta_f = global_index.saturating_sub(acc.funding_index);
                 if delta_f != 0 {
-                    let payment = acc.position_size
-                        .saturating_mul(delta_f)
-                        .saturating_div(1_000_000);
+                    let raw = acc.position_size.saturating_mul(delta_f);
+                    let payment = if raw > 0 {
+                        raw.saturating_add(999_999).saturating_div(1_000_000)
+                    } else {
+                        raw.saturating_div(1_000_000)
+                    };
                     settled_pnl = settled_pnl.saturating_sub(payment);
                 }
             }
