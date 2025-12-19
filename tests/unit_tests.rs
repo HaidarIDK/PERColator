@@ -258,15 +258,18 @@ fn test_withdraw_pnl_not_warmed_up() {
 fn test_withdraw_with_warmed_up_pnl() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Add insurance to provide warmup budget for converting positive PnL to capital
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 500 = 500
     set_insurance(&mut engine, 500);
 
     engine.deposit(user_idx, 1000).unwrap();
-    // WHITEBOX: Set positive PnL and adjust vault to match
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
-    engine.vault += 500; // pnl
+    engine.accounts[counterparty as usize].pnl = -500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     assert_conserved(&engine);
 
@@ -314,12 +317,17 @@ fn test_conservation_simple() {
 fn test_adl_haircut_unwrapped_pnl() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // WHITEBOX: Set capital and pnl directly. Add to vault (not override) to preserve account fees.
     engine.accounts[user_idx as usize].capital = 1000;
+    engine.vault += 1000; // capital only
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500; // All unwrapped (warmup not started)
+    engine.accounts[counterparty as usize].pnl = -500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
-    engine.vault += 1000 + 500; // capital + pnl
     assert_conserved(&engine);
 
     // Apply ADL loss of 200
@@ -334,14 +342,19 @@ fn test_adl_haircut_unwrapped_pnl() {
 fn test_adl_overflow_to_insurance() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // WHITEBOX: Set capital, pnl, and insurance directly.
     engine.accounts[user_idx as usize].capital = 1000;
+    engine.vault += 1000; // capital only
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 300; // Only 300 unwrapped PNL
+    engine.accounts[counterparty as usize].pnl = -300;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     let ins_before = engine.insurance_fund.balance;
     set_insurance(&mut engine, ins_before + 500); // Add 500 to insurance (adjusts vault)
-    engine.vault += 1000 + 300; // capital + pnl
     assert_conserved(&engine);
 
     // Apply ADL loss of 700 (more than unwrapped PNL)
@@ -360,10 +373,15 @@ fn test_adl_overflow_to_insurance() {
 fn test_adl_insurance_depleted() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     engine.accounts[user_idx as usize].capital = 1000;
+    engine.vault += 1000; // capital only
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 100;
-    engine.vault += 1000 + 100; // capital + pnl
+    engine.accounts[counterparty as usize].pnl = -100;
     set_insurance(&mut engine, 50);
     assert_conserved(&engine);
 
@@ -2232,11 +2250,14 @@ fn test_panic_settle_freezes_warmup() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
     engine.deposit(user_idx, 10_000).unwrap();
 
-    // User has positive PNL with warmup slope (vault funds it)
-    engine.vault += 1000;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
+    engine.accounts[counterparty as usize].pnl = -1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     assert_conserved(&engine);
@@ -2993,13 +3014,16 @@ fn test_reserved_invariant_after_adl_spending() {
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Setup: floor=100, insurance=200 (raw spendable = 100)
     set_insurance(&mut engine, 200);
 
-    // User has positive PnL that can warm immediately (vault funds it)
-    engine.vault += 100;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 100;
+    engine.accounts[counterparty as usize].pnl = -100;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     engine.current_slot = 10;
@@ -3047,13 +3071,16 @@ fn test_adl_spends_unreserved_insurance() {
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Setup: floor=100, insurance=200 (raw spendable = 100)
     set_insurance(&mut engine, 200);
 
-    // User has positive PnL (vault funds it)
-    engine.vault += 40;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 40;
+    engine.accounts[counterparty as usize].pnl = -40;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     engine.current_slot = 10;
@@ -3139,9 +3166,11 @@ fn test_reserved_monotone_non_decreasing() {
     engine.deposit(lp_idx, 10_000).unwrap();
     engine.deposit(user_idx, 1_000).unwrap();
 
-    // Warm some profits (vault funds it)
-    engine.vault += 50;
+    // Zero-sum PnL: user gains, lp loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 50;
+    engine.accounts[lp_idx as usize].pnl = -50;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     engine.current_slot = 10;
@@ -3203,13 +3232,16 @@ fn test_audit_a_settle_idempotent_when_paused() {
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Setup: User has positive PnL with warmup slope
     set_insurance(&mut engine, 10_000); // Provide warmup budget
     engine.deposit(user_idx, 1_000).unwrap();
-    // vault funds the pnl
-    engine.vault += 500;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
+    engine.accounts[counterparty as usize].pnl = -500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     assert_conserved(&engine);
@@ -3269,13 +3301,16 @@ fn test_audit_a_settle_idempotent_multiple_times_while_paused() {
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Setup
     set_insurance(&mut engine, 10_000);
     engine.deposit(user_idx, 1_000).unwrap();
-    // vault funds the pnl
-    engine.vault += 1000;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
+    engine.accounts[counterparty as usize].pnl = -1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     assert_conserved(&engine);
@@ -3421,17 +3456,19 @@ fn test_audit_c_reserved_insurance_not_spent_in_adl() {
     set_insurance(&mut engine, 500);
     assert_conserved(&engine);
 
-    // Winner has positive PnL that will warm up (vault funds it)
+    // Winner has positive PnL that will warm up
     engine.deposit(winner_idx, 1_000).unwrap();
-    engine.vault += 200;
+    // Loser has no capital PnL to haircut (but provides zero-sum for winner's pnl)
+    engine.deposit(loser_idx, 1_000).unwrap();
+    // Zero-sum PnL: winner gains, loser loses (no vault funding needed)
+    assert_eq!(engine.accounts[winner_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[loser_idx as usize].pnl, 0);
     engine.accounts[winner_idx as usize].pnl = 200;
+    engine.accounts[loser_idx as usize].pnl = -200;
     engine.accounts[winner_idx as usize].warmup_slope_per_step = 1000;
     engine.accounts[winner_idx as usize].warmup_started_at_slot = 0;
     engine.current_slot = 10;
     assert_conserved(&engine);
-
-    // Loser has no PnL to haircut
-    engine.deposit(loser_idx, 1_000).unwrap();
 
     // Warm up the winner's PnL (this should reserve insurance)
     engine.settle_warmup_to_capital(winner_idx).unwrap();
@@ -3495,15 +3532,18 @@ fn test_audit_c_insurance_floor_plus_reserved_protected() {
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     // Setup: Insurance = 500, floor = 200, so raw_spendable = 300
     set_insurance(&mut engine, 500);
     assert_conserved(&engine);
 
     engine.deposit(user_idx, 5_000).unwrap();
-    // vault funds the pnl
-    engine.vault += 100;
+    // Zero-sum PnL: user gains, counterparty loses (no vault funding needed)
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 100;
+    engine.accounts[counterparty as usize].pnl = -100;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     engine.current_slot = 10;
