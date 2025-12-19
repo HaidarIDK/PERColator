@@ -65,6 +65,11 @@ fn default_params() -> RiskParams {
 // TEST HELPERS (MANDATORY)
 // ==============================================================================
 
+// IMPORTANT: check_conservation() enforces bounded slack (MAX_ROUNDING_SLACK).
+// Therefore tests MUST NOT "fund" pnl by increasing vault unless the same value
+// is represented in expected accounting terms (capital/insurance/loss_accum or net_pnl).
+// Prefer zero-sum pnl setups over direct vault mutation.
+
 fn assert_conserved(engine: &RiskEngine) {
     assert!(
         engine.check_conservation(),
@@ -170,12 +175,14 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
 fn test_pnl_warmup() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
-    // Give user some positive PNL
+    // Zero-sum PNL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
-    engine.vault += 1000;
+    engine.accounts[counterparty as usize].pnl = -1000;
     assert_conserved(&engine);
 
     // At slot 0, nothing is warmed up yet
@@ -203,12 +210,15 @@ fn test_pnl_warmup() {
 fn test_pnl_warmup_with_reserved() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
+    // Zero-sum PNL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].reserved_pnl = 300; // 300 reserved for pending withdrawal
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
-    engine.vault += 1000;
+    engine.accounts[counterparty as usize].pnl = -1000;
     assert_conserved(&engine);
 
     // Advance 100 slots
@@ -228,11 +238,14 @@ fn test_pnl_warmup_with_reserved() {
 fn test_withdraw_pnl_not_warmed_up() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
+    // Zero-sum PNL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
-    engine.vault += 500;
+    engine.accounts[counterparty as usize].pnl = -500;
     assert_conserved(&engine);
 
     // Try to withdraw more than principal + warmed up PNL
@@ -556,10 +569,15 @@ fn test_multiple_users_adl() {
 fn test_warmup_monotonicity() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
+    let counterparty = engine.add_user(1).unwrap();
 
+    // Zero-sum PNL: user gains, counterparty loses (no vault funding needed)
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[counterparty as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
+    engine.accounts[counterparty as usize].pnl = -1000;
+    assert_conserved(&engine);
 
     // Get withdrawable at different time points
     let w0 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
@@ -642,10 +660,14 @@ fn test_lp_warmup_initial_state() {
 fn test_lp_warmup_monotonic() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+    let user = engine.add_user(1).unwrap();
 
-    // Give LP some positive PNL
+    // Zero-sum PNL: LP gains, user loses (no vault funding needed)
     assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 10_000;
+    engine.accounts[user as usize].pnl = -10_000;
+    assert_conserved(&engine);
 
     // At slot 0
     let w0 = engine.withdrawable_pnl(&engine.accounts[lp_idx as usize]);
@@ -677,10 +699,14 @@ fn test_lp_warmup_monotonic() {
 fn test_lp_warmup_bounded() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
+    let user = engine.add_user(1).unwrap();
 
-    // Give LP some positive PNL
+    // Zero-sum PNL: LP gains, user loses (no vault funding needed)
     assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 5_000;
+    engine.accounts[user as usize].pnl = -5_000;
+    assert_conserved(&engine);
 
     // Reserve some PNL
     engine.accounts[lp_idx as usize].reserved_pnl = 1_000;
@@ -2479,9 +2505,9 @@ fn test_warmup_budget_losses_create_budget_for_profits() {
     set_insurance(&mut engine, 0);
 
     // Loser: capital=500, pnl=-500
-    // Winner: pnl=+500
-    // Zero-sum PnL: winner's claim is backed by loser's liability (net_pnl = 0)
-    // Only fund the loser's capital
+    // Winner: capital=0, pnl=+500
+    // Zero-sum PnL: loser's loss backs winner's gain (net_pnl = 0)
+    // Only fund loser's capital
     engine.vault += 500;
     engine.accounts[loser as usize].capital = 500;
     assert_eq!(engine.accounts[loser as usize].pnl, 0);
