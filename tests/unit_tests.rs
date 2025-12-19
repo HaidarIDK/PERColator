@@ -172,6 +172,7 @@ fn test_pnl_warmup() {
     let user_idx = engine.add_user(1).unwrap();
 
     // Give user some positive PNL
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
 
@@ -201,6 +202,7 @@ fn test_pnl_warmup_with_reserved() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
 
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].reserved_pnl = 300; // 300 reserved for pending withdrawal
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
@@ -224,6 +226,7 @@ fn test_withdraw_pnl_not_warmed_up() {
     let user_idx = engine.add_user(1).unwrap();
 
     engine.deposit(user_idx, 1000).unwrap();
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
 
     // Try to withdraw more than principal + warmed up PNL
@@ -364,6 +367,7 @@ fn test_collateral_calculation() {
     let user_idx = engine.add_user(1).unwrap();
 
     engine.accounts[user_idx as usize].capital = 1000;
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 500;
 
     assert_eq!(
@@ -473,6 +477,7 @@ fn test_user_isolation() {
 
     // Operate on user1
     engine.withdraw(user1, 500).unwrap();
+    assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 300;
 
     // User2 should be unchanged
@@ -490,6 +495,7 @@ fn test_principal_never_reduced_by_adl() {
 
     let initial_principal = 5000u128;
     engine.accounts[user_idx as usize].capital = initial_principal;
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 100;
 
     // Apply massive ADL
@@ -511,11 +517,13 @@ fn test_multiple_users_adl() {
 
     // User1: has unwrapped PNL
     engine.accounts[user1 as usize].capital = 1000;
+    assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 500;
     engine.accounts[user1 as usize].warmup_slope_per_step = 10;
 
     // User2: has unwrapped PNL
     engine.accounts[user2 as usize].capital = 2000;
+    assert_eq!(engine.accounts[user2 as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 800;
     engine.accounts[user2 as usize].warmup_slope_per_step = 10;
 
@@ -543,6 +551,7 @@ fn test_warmup_monotonicity() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let user_idx = engine.add_user(1).unwrap();
 
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
 
@@ -629,6 +638,7 @@ fn test_lp_warmup_monotonic() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // Give LP some positive PNL
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 10_000;
 
     // At slot 0
@@ -663,6 +673,7 @@ fn test_lp_warmup_bounded() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // Give LP some positive PNL
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 5_000;
 
     // Reserve some PNL
@@ -686,6 +697,7 @@ fn test_lp_warmup_with_negative_pnl() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 10000).unwrap();
 
     // LP has negative PNL
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = -3_000;
 
     // Advance time
@@ -1116,6 +1128,7 @@ fn test_adl_haircuts_unwrapped_before_warmed() {
     let user_idx = engine.add_user(10000).unwrap();
 
     engine.accounts[user_idx as usize].capital = 10_000;
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 10_000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
 
@@ -1169,6 +1182,7 @@ fn test_warmup_rate_limit_single_user() {
     engine.deposit(user, 1_000).unwrap();
 
     // Give user 20,000 PNL (would need slope of 200 without limit)
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 20_000;
 
     // Update warmup slope
@@ -1203,12 +1217,14 @@ fn test_warmup_rate_limit_multiple_users() {
     engine.deposit(user2, 1_000).unwrap();
 
     // User1 gets 6,000 PNL (would want slope of 60)
+    assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 6_000;
     engine.update_warmup_slope(user1).unwrap();
     assert_eq!(engine.accounts[user1 as usize].warmup_slope_per_step, 60);
     assert_eq!(engine.total_warmup_rate, 60);
 
     // User2 gets 8,000 PNL (would want slope of 80)
+    assert_eq!(engine.accounts[user2 as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 8_000;
     engine.update_warmup_slope(user2).unwrap();
 
@@ -1234,11 +1250,13 @@ fn test_warmup_rate_released_on_pnl_decrease() {
     engine.deposit(user2, 1_000).unwrap();
 
     // User1 uses all capacity
+    assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 15_000;
     engine.update_warmup_slope(user1).unwrap();
     assert_eq!(engine.total_warmup_rate, 100);
 
     // User2 can't get any capacity
+    assert_eq!(engine.accounts[user2 as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 5_000;
     engine.update_warmup_slope(user2).unwrap();
     assert_eq!(engine.accounts[user2 as usize].warmup_slope_per_step, 0);
@@ -1270,6 +1288,7 @@ fn test_warmup_rate_scales_with_insurance_fund() {
     let user = engine.add_user(100).unwrap();
     engine.deposit(user, 1_000).unwrap();
 
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 10_000;
     engine.update_warmup_slope(user).unwrap();
 
@@ -1463,6 +1482,7 @@ fn test_warmup_freezes_in_risk_mode() {
     engine.deposit(user, 10_000).unwrap();
 
     // Setup: user has pnl=+1000, slope=10, started_at_slot=0
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -1519,6 +1539,7 @@ fn test_risk_mode_pending_pnl_cannot_be_withdrawn() {
     let user = engine.add_user(100).unwrap();
 
     // User has NO capital, only pending PNL
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = engine.current_slot;
@@ -1543,7 +1564,8 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
     // Budget = warmed_neg_total + insurance_spendable_raw() = 0 + 100 = 100
     set_insurance(&mut engine, 100);
 
-    // User.pnl=+1000, slope=10, started_at_slot=0
+    // User.pnl=+1000, slope=10, started_at_slot=0 (vault funds it)
+    engine.vault += 1000;
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -1909,6 +1931,8 @@ fn test_adl_proportional_haircut_users_and_lps() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
 
     // Both have unwrapped PNL
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 10_000; // User has 10k unwrapped
     engine.accounts[lp_idx as usize].pnl = 10_000; // LP has 10k unwrapped
 
@@ -1935,6 +1959,8 @@ fn test_adl_fairness_different_amounts() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
 
     // User has more unwrapped PNL than LP
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[user_idx as usize].pnl = 15_000; // User: 15k
     engine.accounts[lp_idx as usize].pnl = 5_000; // LP: 5k
                                                   // Total: 20k
@@ -1961,6 +1987,7 @@ fn test_lp_capital_never_reduced_by_adl() {
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
 
     engine.deposit(lp_idx, 10_000).unwrap();
+    assert_eq!(engine.accounts[lp_idx as usize].pnl, 0);
     engine.accounts[lp_idx as usize].pnl = 5_000;
 
     let capital_before = engine.accounts[lp_idx as usize].capital;
@@ -2174,7 +2201,8 @@ fn test_panic_settle_freezes_warmup() {
     let user_idx = engine.add_user(1).unwrap();
     engine.deposit(user_idx, 10_000).unwrap();
 
-    // User has positive PNL with warmup slope
+    // User has positive PNL with warmup slope (vault funds it)
+    engine.vault += 1000;
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -2404,6 +2432,8 @@ fn test_warmup_budget_blocks_positive_without_budget() {
     set_insurance(&mut engine, 100);
 
     // Setup account with positive PnL, large slope, started_at_slot=0
+    // vault funds the pnl
+    engine.vault += 1000;
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 100;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -2444,7 +2474,12 @@ fn test_warmup_budget_losses_create_budget_for_profits() {
     set_insurance(&mut engine, 0);
 
     // Loser: capital=500, pnl=-500, large cap
+    // vault funds the capital (no deposit, so we add directly)
+    engine.vault += 500;
     engine.accounts[loser as usize].capital = 500;
+    // Zero-sum pnl: loser -500, winner +500
+    assert_eq!(engine.accounts[loser as usize].pnl, 0);
+    assert_eq!(engine.accounts[winner as usize].pnl, 0);
     engine.accounts[loser as usize].pnl = -500;
     engine.accounts[loser as usize].warmup_slope_per_step = 1000;
     engine.accounts[loser as usize].warmup_started_at_slot = 0;
@@ -2497,7 +2532,8 @@ fn test_warmup_budget_insurance_allows_profits_without_losses() {
     // Insurance provides budget
     set_insurance(&mut engine, 200);
 
-    // User has positive PnL
+    // User has positive PnL (vault funds it)
+    engine.vault += 500;
     engine.accounts[user as usize].pnl = 500;
     engine.accounts[user as usize].warmup_slope_per_step = 1000;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -2537,7 +2573,8 @@ fn test_warmup_budget_frozen_in_risk_mode() {
     // Provide insurance budget
     set_insurance(&mut engine, 1000);
 
-    // Setup account with positive PnL
+    // Setup account with positive PnL (vault funds it)
+    engine.vault += 500;
     engine.accounts[user as usize].pnl = 500;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -2768,6 +2805,7 @@ fn test_force_realize_losses_unpaid_to_adl() {
 
     // Winner has positive PnL (young, subject to ADL)
     engine.accounts[winner as usize].capital = 5000;
+    assert_eq!(engine.accounts[winner as usize].pnl, 0);
     engine.accounts[winner as usize].pnl = 5000; // Young positive PnL
     engine.accounts[winner as usize].warmup_slope_per_step = 10;
 
@@ -2819,6 +2857,7 @@ fn test_force_realize_losses_warmup_frozen() {
 
     // WHITEBOX: Setup user with positive PnL and warmup.
     engine.accounts[user as usize].capital = 5000;
+    assert_eq!(engine.accounts[user as usize].pnl, 0);
     engine.accounts[user as usize].pnl = 1000;
     engine.accounts[user as usize].warmup_slope_per_step = 10;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
@@ -2873,6 +2912,7 @@ fn test_force_realize_losses_invariant_holds() {
     engine.accounts[user1 as usize].entry_price = 2_000_000;
 
     engine.accounts[user2 as usize].capital = 5000;
+    assert_eq!(engine.accounts[user2 as usize].pnl, 0);
     engine.accounts[user2 as usize].pnl = 2000; // existing positive PnL
     engine.accounts[user2 as usize].warmup_slope_per_step = 20;
 
@@ -2924,7 +2964,8 @@ fn test_reserved_invariant_after_adl_spending() {
     // Setup: floor=100, insurance=200 (raw spendable = 100)
     set_insurance(&mut engine, 200);
 
-    // User has positive PnL that can warm immediately
+    // User has positive PnL that can warm immediately (vault funds it)
+    engine.vault += 100;
     engine.accounts[user_idx as usize].pnl = 100;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -2976,7 +3017,8 @@ fn test_adl_spends_unreserved_insurance() {
     // Setup: floor=100, insurance=200 (raw spendable = 100)
     set_insurance(&mut engine, 200);
 
-    // User has positive PnL
+    // User has positive PnL (vault funds it)
+    engine.vault += 40;
     engine.accounts[user_idx as usize].pnl = 40;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -3062,7 +3104,8 @@ fn test_reserved_monotone_non_decreasing() {
     engine.deposit(lp_idx, 10_000).unwrap();
     engine.deposit(user_idx, 1_000).unwrap();
 
-    // Warm some profits
+    // Warm some profits (vault funds it)
+    engine.vault += 50;
     engine.accounts[user_idx as usize].pnl = 50;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -3128,6 +3171,8 @@ fn test_audit_a_settle_idempotent_when_paused() {
     // Setup: User has positive PnL with warmup slope
     set_insurance(&mut engine, 10_000); // Provide warmup budget
     engine.deposit(user_idx, 1_000).unwrap();
+    // vault funds the pnl
+    engine.vault += 500;
     engine.accounts[user_idx as usize].pnl = 500;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10; // 10 per slot
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -3191,6 +3236,8 @@ fn test_audit_a_settle_idempotent_multiple_times_while_paused() {
     // Setup
     set_insurance(&mut engine, 10_000);
     engine.deposit(user_idx, 1_000).unwrap();
+    // vault funds the pnl
+    engine.vault += 1000;
     engine.accounts[user_idx as usize].pnl = 1000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -3336,8 +3383,9 @@ fn test_audit_c_reserved_insurance_not_spent_in_adl() {
     set_insurance(&mut engine, 500);
     assert_conserved(&engine);
 
-    // Winner has positive PnL that will warm up
+    // Winner has positive PnL that will warm up (vault funds it)
     engine.deposit(winner_idx, 1_000).unwrap();
+    engine.vault += 200;
     engine.accounts[winner_idx as usize].pnl = 200;
     engine.accounts[winner_idx as usize].warmup_slope_per_step = 1000;
     engine.accounts[winner_idx as usize].warmup_started_at_slot = 0;
@@ -3414,6 +3462,8 @@ fn test_audit_c_insurance_floor_plus_reserved_protected() {
     assert_conserved(&engine);
 
     engine.deposit(user_idx, 5_000).unwrap();
+    // vault funds the pnl
+    engine.vault += 100;
     engine.accounts[user_idx as usize].pnl = 100;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 10000;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
