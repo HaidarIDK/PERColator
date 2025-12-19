@@ -143,9 +143,16 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
              total_capital={}, insurance={}, net_settled_pnl={}, expected={}\n\
              global_funding_index={}, slack={}\n\
              Accounts:\n{}",
-            context, engine.vault, engine.loss_accum, actual,
-            total_capital, engine.insurance_fund.balance, net_settled_pnl, expected,
-            global_index, slack,
+            context,
+            engine.vault,
+            engine.loss_accum,
+            actual,
+            total_capital,
+            engine.insurance_fund.balance,
+            net_settled_pnl,
+            expected,
+            global_index,
+            slack,
             account_details.join("\n")
         );
     }
@@ -276,18 +283,47 @@ enum IdxSel {
 /// Selectors are resolved at runtime in execute()
 #[derive(Clone, Debug)]
 enum Action {
-    AddUser { fee_payment: u128 },
-    AddLp { fee_payment: u128 },
-    Deposit { who: IdxSel, amount: u128 },
-    Withdraw { who: IdxSel, amount: u128 },
-    AdvanceSlot { dt: u64 },
-    AccrueFunding { dt: u64, oracle_price: u64, rate_bps: i64 },
-    Touch { who: IdxSel },
-    ExecuteTrade { lp: IdxSel, user: IdxSel, oracle_price: u64, size: i128 },
+    AddUser {
+        fee_payment: u128,
+    },
+    AddLp {
+        fee_payment: u128,
+    },
+    Deposit {
+        who: IdxSel,
+        amount: u128,
+    },
+    Withdraw {
+        who: IdxSel,
+        amount: u128,
+    },
+    AdvanceSlot {
+        dt: u64,
+    },
+    AccrueFunding {
+        dt: u64,
+        oracle_price: u64,
+        rate_bps: i64,
+    },
+    Touch {
+        who: IdxSel,
+    },
+    ExecuteTrade {
+        lp: IdxSel,
+        user: IdxSel,
+        oracle_price: u64,
+        size: i128,
+    },
     // Note: ApplyAdl removed - it's internal and tested via PanicSettleAll/ForceRealizeLosses
-    PanicSettleAll { oracle_price: u64 },
-    ForceRealizeLosses { oracle_price: u64 },
-    TopUpInsurance { amount: u128 },
+    PanicSettleAll {
+        oracle_price: u64,
+    },
+    ForceRealizeLosses {
+        oracle_price: u64,
+    },
+    TopUpInsurance {
+        amount: u128,
+    },
 }
 
 /// Strategy for generating index selectors
@@ -381,7 +417,9 @@ impl FuzzState {
                 // Single-pass selection to avoid Vec allocation:
                 // 1. Count non-LP accounts
                 // 2. Pick kth candidate
-                let count = self.live_accounts.iter()
+                let count = self
+                    .live_accounts
+                    .iter()
                     .filter(|&&x| Some(x) != self.lp_idx)
                     .count();
                 if count == 0 {
@@ -393,16 +431,15 @@ impl FuzzState {
                     idx
                 } else {
                     let k = self.next_rng() as usize % count;
-                    self.live_accounts.iter()
+                    self.live_accounts
+                        .iter()
                         .copied()
                         .filter(|&x| Some(x) != self.lp_idx)
                         .nth(k)
                         .unwrap_or(0)
                 }
             }
-            IdxSel::Lp => {
-                self.lp_idx.unwrap_or(0)
-            }
+            IdxSel::Lp => self.lp_idx.unwrap_or(0),
             IdxSel::Random(idx) => *idx,
         }
     }
@@ -426,7 +463,11 @@ impl FuzzState {
                 match result {
                     Ok(idx) => {
                         // Postconditions for Ok
-                        assert!(is_account_used(&self.engine, idx), "{}: account not marked used", context);
+                        assert!(
+                            is_account_used(&self.engine, idx),
+                            "{}: account not marked used",
+                            context
+                        );
                         assert_eq!(
                             self.count_used(),
                             num_used_before + 1,
@@ -473,7 +514,11 @@ impl FuzzState {
 
                 match result {
                     Ok(idx) => {
-                        assert!(is_account_used(&self.engine, idx), "{}: LP not marked used", context);
+                        assert!(
+                            is_account_used(&self.engine, idx),
+                            "{}: LP not marked used",
+                            context
+                        );
                         assert_eq!(
                             self.count_used(),
                             num_used_before + 1,
@@ -575,7 +620,9 @@ impl FuzzState {
                 let last_slot_before = self.engine.last_funding_slot;
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
-                let result = self.engine.accrue_funding(now_slot, *oracle_price, *rate_bps);
+                let result = self
+                    .engine
+                    .accrue_funding(now_slot, *oracle_price, *rate_bps);
 
                 match result {
                     Ok(()) => {
@@ -676,11 +723,9 @@ impl FuzzState {
                         for idx in 0..n {
                             if is_account_used(&self.engine, idx as u16) {
                                 assert_eq!(
-                                    self.engine.accounts[idx].position_size,
-                                    0,
+                                    self.engine.accounts[idx].position_size, 0,
                                     "{}: position not closed for account {}",
-                                    context,
-                                    idx
+                                    context, idx
                                 );
                             }
                         }
@@ -716,11 +761,9 @@ impl FuzzState {
                         for idx in 0..n {
                             if is_account_used(&self.engine, idx as u16) {
                                 assert_eq!(
-                                    self.engine.accounts[idx].position_size,
-                                    0,
+                                    self.engine.accounts[idx].position_size, 0,
                                     "{}: position not closed for account {}",
-                                    context,
-                                    idx
+                                    context, idx
                                 );
                             }
                         }
@@ -1262,7 +1305,9 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Rng { state: if seed == 0 { 1 } else { seed } }
+        Rng {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     fn next(&mut self) -> u64 {
@@ -1275,34 +1320,43 @@ impl Rng {
     }
 
     fn u64(&mut self, lo: u64, hi: u64) -> u64 {
-        if lo >= hi { return lo; }
+        if lo >= hi {
+            return lo;
+        }
         lo + (self.next() % (hi - lo + 1))
     }
 
     fn u128(&mut self, lo: u128, hi: u128) -> u128 {
-        if lo >= hi { return lo; }
+        if lo >= hi {
+            return lo;
+        }
         lo + ((self.next() as u128) % (hi - lo + 1))
     }
 
     fn i128(&mut self, lo: i128, hi: i128) -> i128 {
-        if lo >= hi { return lo; }
+        if lo >= hi {
+            return lo;
+        }
         // Avoid overflow: use u64 directly and cast safely
         let range = (hi - lo + 1) as u128;
         lo + ((self.next() as u128 % range) as i128)
     }
 
     fn i64(&mut self, lo: i64, hi: i64) -> i64 {
-        if lo >= hi { return lo; }
+        if lo >= hi {
+            return lo;
+        }
         // Avoid overflow: use u64 directly and cast safely
         let range = (hi - lo + 1) as u64;
         lo + ((self.next() % range) as i64)
     }
 
     fn usize(&mut self, lo: usize, hi: usize) -> usize {
-        if lo >= hi { return lo; }
+        if lo >= hi {
+            return lo;
+        }
         lo + ((self.next() as usize) % (hi - lo + 1))
     }
-
 }
 
 /// Generate a random selector using RNG
@@ -1321,15 +1375,19 @@ fn random_action(rng: &mut Rng) -> (Action, String) {
     let action_type = rng.usize(0, 10);
 
     let action = match action_type {
-        0 => Action::AddUser { fee_payment: rng.u128(1, 100) },
-        1 => Action::AddLp { fee_payment: rng.u128(1, 100) },
+        0 => Action::AddUser {
+            fee_payment: rng.u128(1, 100),
+        },
+        1 => Action::AddLp {
+            fee_payment: rng.u128(1, 100),
+        },
         2 => Action::Deposit {
             who: random_selector(rng),
-            amount: rng.u128(0, 50_000)
+            amount: rng.u128(0, 50_000),
         },
         3 => Action::Withdraw {
             who: random_selector(rng),
-            amount: rng.u128(0, 50_000)
+            amount: rng.u128(0, 50_000),
         },
         4 => Action::AdvanceSlot { dt: rng.u64(0, 10) },
         5 => Action::AccrueFunding {
@@ -1337,16 +1395,24 @@ fn random_action(rng: &mut Rng) -> (Action, String) {
             oracle_price: rng.u64(100_000, 10_000_000),
             rate_bps: rng.i64(-100, 100),
         },
-        6 => Action::Touch { who: random_selector(rng) },
+        6 => Action::Touch {
+            who: random_selector(rng),
+        },
         7 => Action::ExecuteTrade {
             lp: IdxSel::Lp,
             user: IdxSel::ExistingNonLp,
             oracle_price: rng.u64(100_000, 10_000_000),
             size: rng.i128(-5_000, 5_000),
         },
-        8 => Action::PanicSettleAll { oracle_price: rng.u64(100_000, 10_000_000) },
-        9 => Action::ForceRealizeLosses { oracle_price: rng.u64(100_000, 10_000_000) },
-        _ => Action::TopUpInsurance { amount: rng.u128(0, 10_000) },
+        8 => Action::PanicSettleAll {
+            oracle_price: rng.u64(100_000, 10_000_000),
+        },
+        9 => Action::ForceRealizeLosses {
+            oracle_price: rng.u64(100_000, 10_000_000),
+        },
+        _ => Action::TopUpInsurance {
+            amount: rng.u128(0, 10_000),
+        },
     };
 
     let desc = format!("{:?}", action);
@@ -1385,11 +1451,22 @@ fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u
     };
     let actual = engine.vault + engine.loss_accum;
     let slack = actual as i128 - expected as i128;
-    (slack, total_capital, net_settled_pnl, engine.insurance_fund.balance, actual)
+    (
+        slack,
+        total_capital,
+        net_settled_pnl,
+        engine.insurance_fund.balance,
+        actual,
+    )
 }
 
 /// Run deterministic fuzzer for a single regime
-fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::ops::Range<u64>, steps: usize) {
+fn run_deterministic_fuzzer(
+    params: RiskParams,
+    regime_name: &str,
+    seeds: std::ops::Range<u64>,
+    steps: usize,
+) {
     for seed in seeds {
         let mut rng = Rng::new(seed);
         let mut state = FuzzState::new(params.clone());
@@ -1401,13 +1478,17 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
         if let Ok(idx) = state.engine.add_lp([0u8; 32], [0u8; 32], 1) {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
-            state.account_ids.push(state.engine.accounts[idx as usize].account_id);
+            state
+                .account_ids
+                .push(state.engine.accounts[idx as usize].account_id);
         }
 
         for _ in 0..2 {
             if let Ok(idx) = state.engine.add_user(1) {
                 state.live_accounts.push(idx);
-                state.account_ids.push(state.engine.accounts[idx as usize].account_id);
+                state
+                    .account_ids
+                    .push(state.engine.accounts[idx as usize].account_id);
             }
         }
 
@@ -1427,11 +1508,17 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
         // Verify conservation after setup
         if !state.engine.check_conservation() {
             eprintln!("Conservation failed after setup for seed {}", seed);
-            eprintln!("  vault={}, insurance={}", state.engine.vault, state.engine.insurance_fund.balance);
+            eprintln!(
+                "  vault={}, insurance={}",
+                state.engine.vault, state.engine.insurance_fund.balance
+            );
             eprintln!("  live_accounts={:?}", state.live_accounts);
             let mut total_cap = 0u128;
             for &idx in &state.live_accounts {
-                eprintln!("  account[{}]: capital={}", idx, state.engine.accounts[idx as usize].capital);
+                eprintln!(
+                    "  account[{}]: capital={}",
+                    idx, state.engine.accounts[idx as usize].capital
+                );
                 total_cap += state.engine.accounts[idx as usize].capital;
             }
             eprintln!("  total_capital={}", total_cap);
@@ -1460,7 +1547,8 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
             }));
 
             // Track slack changes
-            let (slack_after, total_cap, net_pnl, ins, actual) = compute_conservation_slack(&state.engine);
+            let (slack_after, total_cap, net_pnl, ins, actual) =
+                compute_conservation_slack(&state.engine);
             let slack_delta = slack_after - slack_before;
             if verbose && slack_delta != 0 {
                 eprintln!(
@@ -1481,7 +1569,10 @@ fn run_deterministic_fuzzer(params: RiskParams, regime_name: &str, seeds: std::o
                 for (i, act) in action_history.iter().enumerate() {
                     eprintln!("  {}: {}", step.saturating_sub(9) + i, act);
                 }
-                eprintln!("\nTo reproduce: run with seed={}, stop at step={}", seed, step);
+                eprintln!(
+                    "\nTo reproduce: run with seed={}, stop at step={}",
+                    seed, step
+                );
                 panic!("Deterministic fuzzer failed - see above for repro");
             }
             // Note: live_accounts tracking is now handled inside execute() via the returned idx
@@ -1703,19 +1794,27 @@ fn panic_settle_preserves_conservation_with_lazy_funding() {
     engine.deposit(user_idx, 100_000).unwrap();
 
     // Execute a trade to create positions
-    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000)
+        .unwrap();
 
     // Accrue significant funding WITHOUT touching accounts
     engine.accrue_funding(1000, 1_000_000, 1000).unwrap();
 
     // Verify conservation holds before panic settle (uses settled_pnl)
-    assert!(engine.check_conservation(), "Conservation should hold before panic_settle");
+    assert!(
+        engine.check_conservation(),
+        "Conservation should hold before panic_settle"
+    );
 
     // Panic settle
     engine.panic_settle_all(1_000_000).unwrap();
 
     // Verify conservation still holds
-    assert!(engine.check_conservation(), "Conservation must hold after panic_settle");
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after panic_settle"
+    );
 
     // All positions should be closed
     assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
@@ -1735,7 +1834,9 @@ fn conservation_uses_settled_pnl_regression() {
     engine.deposit(user_idx, 100_000).unwrap();
 
     // Execute trade to create positions
-    engine.execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000)
+        .unwrap();
 
     // Accrue significant funding WITHOUT touching accounts
     // This creates a gap between account.pnl and settled_pnl
@@ -1776,9 +1877,13 @@ fn conservation_uses_settled_pnl_regression() {
     let actual = engine.vault + engine.loss_accum;
 
     // Verify our manual computation matches engine's check
-    assert!(engine.check_conservation(),
-            "check_conservation failed: actual={}, expected={}, diff={}",
-            actual, expected, (actual as i128) - (expected as i128));
+    assert!(
+        engine.check_conservation(),
+        "check_conservation failed: actual={}, expected={}, diff={}",
+        actual,
+        expected,
+        (actual as i128) - (expected as i128)
+    );
 
     // Also verify our formula matches (within rounding tolerance)
     let diff = if actual >= expected {
@@ -1786,9 +1891,13 @@ fn conservation_uses_settled_pnl_regression() {
     } else {
         expected - actual
     };
-    assert!(diff <= 100, // MAX_ROUNDING_SLACK is typically small
-            "Manual settled_pnl formula doesn't match engine: actual={}, expected={}, diff={}",
-            actual, expected, diff);
+    assert!(
+        diff <= 100, // MAX_ROUNDING_SLACK is typically small
+        "Manual settled_pnl formula doesn't match engine: actual={}, expected={}, diff={}",
+        actual,
+        expected,
+        diff
+    );
 }
 
 /// Verify the test harness correctly simulates Solana atomicity
@@ -1819,7 +1928,10 @@ fn harness_rollback_simulation_test() {
 
     // Try to withdraw more than available - will fail
     let result = engine.withdraw(user_idx, 999_999);
-    assert!(result.is_err(), "Withdraw should fail with insufficient balance");
+    assert!(
+        result.is_err(),
+        "Withdraw should fail with insufficient balance"
+    );
 
     // Simulate Solana rollback (this is what the harness does)
     // Deep restore of RiskEngine contents
@@ -1827,17 +1939,34 @@ fn harness_rollback_simulation_test() {
 
     // Verify state is exactly restored
     assert_eq!(engine.vault, expected_vault, "vault must be restored");
-    assert_eq!(engine.accounts[user_idx as usize].capital, expected_capital,
-               "capital must be restored");
-    assert_eq!(engine.accounts[user_idx as usize].pnl, expected_pnl,
-               "pnl must be restored");
-    assert_eq!(engine.accounts[user_idx as usize].funding_index, expected_funding_index,
-               "funding_index must be restored");
-    assert_eq!(engine.warmed_pos_total, expected_warmed_pos, "warmed_pos_total must be restored");
-    assert_eq!(engine.warmed_neg_total, expected_warmed_neg, "warmed_neg_total must be restored");
-    assert_eq!(engine.warmup_insurance_reserved, expected_warmup_reserved,
-               "warmup_insurance_reserved must be restored");
+    assert_eq!(
+        engine.accounts[user_idx as usize].capital, expected_capital,
+        "capital must be restored"
+    );
+    assert_eq!(
+        engine.accounts[user_idx as usize].pnl, expected_pnl,
+        "pnl must be restored"
+    );
+    assert_eq!(
+        engine.accounts[user_idx as usize].funding_index, expected_funding_index,
+        "funding_index must be restored"
+    );
+    assert_eq!(
+        engine.warmed_pos_total, expected_warmed_pos,
+        "warmed_pos_total must be restored"
+    );
+    assert_eq!(
+        engine.warmed_neg_total, expected_warmed_neg,
+        "warmed_neg_total must be restored"
+    );
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected_warmup_reserved,
+        "warmup_insurance_reserved must be restored"
+    );
 
     // Conservation must still hold after rollback
-    assert!(engine.check_conservation(), "Conservation must hold after harness rollback");
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after harness rollback"
+    );
 }

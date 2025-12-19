@@ -28,10 +28,10 @@ extern crate kani;
 // Use smaller array size for Kani verification, fuzz testing, and debug builds
 // to avoid stack overflow (RiskEngine is ~6MB at 4096 accounts). Production (release) uses 4096.
 #[cfg(kani)]
-pub const MAX_ACCOUNTS: usize = 8;  // Small for fast formal verification
+pub const MAX_ACCOUNTS: usize = 8; // Small for fast formal verification
 
 #[cfg(all(any(feature = "fuzz", debug_assertions), not(kani)))]
-pub const MAX_ACCOUNTS: usize = 64;  // Small to avoid stack overflow in tests
+pub const MAX_ACCOUNTS: usize = 64; // Small to avoid stack overflow in tests
 
 #[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
 pub const MAX_ACCOUNTS: usize = 4096;
@@ -76,7 +76,6 @@ pub struct Account {
     // ========================================
     // Capital & PNL (universal)
     // ========================================
-
     /// Deposited capital (user principal or LP capital)
     /// NEVER reduced by ADL/socialization (Invariant I1)
     pub capital: u128,
@@ -90,7 +89,6 @@ pub struct Account {
     // ========================================
     // Warmup (embedded, no separate struct)
     // ========================================
-
     /// Slot when warmup started
     pub warmup_started_at_slot: u64,
 
@@ -100,7 +98,6 @@ pub struct Account {
     // ========================================
     // Position (universal)
     // ========================================
-
     /// Current position size (+ long, - short)
     pub position_size: i128,
 
@@ -110,14 +107,12 @@ pub struct Account {
     // ========================================
     // Funding (universal)
     // ========================================
-
     /// Funding index snapshot (quote per base, 1e6 scale)
     pub funding_index: i128,
 
     // ========================================
     // LP-specific (only meaningful for LP kind)
     // ========================================
-
     /// Matching engine program ID (zero for user accounts)
     pub matcher_program: [u8; 32],
 
@@ -234,7 +229,6 @@ pub struct RiskEngine {
     // ========================================
     // Warmup Budget Tracking
     // ========================================
-
     /// Cumulative positive PnL converted to capital (W+)
     pub warmed_pos_total: u128,
 
@@ -247,7 +241,6 @@ pub struct RiskEngine {
     // ========================================
     // Slab Management
     // ========================================
-
     /// Occupancy bitmap (4096 bits = 64 u64 words)
     pub used: [u64; BITMAP_WORDS],
 
@@ -347,12 +340,20 @@ fn div_u128(a: u128, b: u128) -> Result<u128> {
 
 #[inline]
 fn clamp_pos_i128(val: i128) -> u128 {
-    if val > 0 { val as u128 } else { 0 }
+    if val > 0 {
+        val as u128
+    } else {
+        0
+    }
 }
 
 #[inline]
 fn clamp_neg_i128(val: i128) -> u128 {
-    if val < 0 { (-val) as u128 } else { 0 }
+    if val < 0 {
+        (-val) as u128
+    } else {
+        0
+    }
 }
 
 /// Saturating absolute value for i128 (handles i128::MIN without overflow)
@@ -718,10 +719,7 @@ impl RiskEngine {
         let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
 
         // Calculate warmed up cap: slope * elapsed_slots
-        let warmed_up_cap = mul_u128(
-            account.warmup_slope_per_step,
-            elapsed_slots as u128
-        );
+        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
 
         // Return minimum of available and warmed up
         core::cmp::min(available_pnl, warmed_up_cap)
@@ -933,13 +931,11 @@ impl RiskEngine {
         if account.position_size != 0 {
             let position_notional = mul_u128(
                 saturating_abs_i128(account.position_size) as u128,
-                account.entry_price as u128
+                account.entry_price as u128,
             ) / 1_000_000;
 
-            let initial_margin_required = mul_u128(
-                position_notional,
-                self.params.initial_margin_bps as u128
-            ) / 10_000;
+            let initial_margin_required =
+                mul_u128(position_notional, self.params.initial_margin_bps as u128) / 10_000;
 
             if new_collateral < initial_margin_required {
                 return Err(RiskError::Undercollateralized);
@@ -969,14 +965,12 @@ impl RiskEngine {
         // Calculate position value at current price
         let position_value = mul_u128(
             saturating_abs_i128(account.position_size) as u128,
-            oracle_price as u128
+            oracle_price as u128,
         ) / 1_000_000;
 
         // Maintenance margin requirement
-        let margin_required = mul_u128(
-            position_value,
-            self.params.maintenance_margin_bps as u128
-        ) / 10_000;
+        let margin_required =
+            mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
 
         collateral > margin_required
     }
@@ -1038,7 +1032,8 @@ impl RiskEngine {
         let exec_size = execution.size;
 
         // Calculate fee
-        let notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
+        let notional =
+            mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
         // Access both accounts
@@ -1059,7 +1054,10 @@ impl RiskEngine {
             let old_entry = user.entry_price;
 
             if (old_position > 0 && exec_size < 0) || (old_position < 0 && exec_size > 0) {
-                let close_size = core::cmp::min(saturating_abs_i128(old_position), saturating_abs_i128(exec_size));
+                let close_size = core::cmp::min(
+                    saturating_abs_i128(old_position),
+                    saturating_abs_i128(exec_size),
+                );
                 let price_diff = if old_position > 0 {
                     (exec_price as i128).saturating_sub(old_entry as i128)
                 } else {
@@ -1067,7 +1065,9 @@ impl RiskEngine {
                 };
 
                 // Use saturating arithmetic (no overflow errors needed with Solana atomicity)
-                let pnl = price_diff.saturating_mul(close_size).saturating_div(1_000_000);
+                let pnl = price_diff
+                    .saturating_mul(close_size)
+                    .saturating_div(1_000_000);
                 user_pnl_delta = pnl;
                 lp_pnl_delta = -pnl;
             }
@@ -1083,10 +1083,14 @@ impl RiskEngine {
 
         // Update user entry price
         if (user.position_size > 0 && exec_size > 0) || (user.position_size < 0 && exec_size < 0) {
-            let old_notional = mul_u128(saturating_abs_i128(user.position_size) as u128, user.entry_price as u128);
+            let old_notional = mul_u128(
+                saturating_abs_i128(user.position_size) as u128,
+                user.entry_price as u128,
+            );
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = saturating_abs_i128(user.position_size).saturating_add(saturating_abs_i128(exec_size));
+            let total_size = saturating_abs_i128(user.position_size)
+                .saturating_add(saturating_abs_i128(exec_size));
             if total_size != 0 {
                 new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
@@ -1097,22 +1101,32 @@ impl RiskEngine {
         // Update LP entry price
         if lp.position_size == 0 {
             new_lp_entry = exec_price;
-        } else if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
-                  (lp.position_size < 0 && new_lp_position < lp.position_size) {
-            let old_notional = mul_u128(saturating_abs_i128(lp.position_size) as u128, lp.entry_price as u128);
+        } else if (lp.position_size > 0 && new_lp_position > lp.position_size)
+            || (lp.position_size < 0 && new_lp_position < lp.position_size)
+        {
+            let old_notional = mul_u128(
+                saturating_abs_i128(lp.position_size) as u128,
+                lp.entry_price as u128,
+            );
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = saturating_abs_i128(lp.position_size).saturating_add(saturating_abs_i128(exec_size));
+            let total_size = saturating_abs_i128(lp.position_size)
+                .saturating_add(saturating_abs_i128(exec_size));
             if total_size != 0 {
                 new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if saturating_abs_i128(lp.position_size) < saturating_abs_i128(new_lp_position)
-                  && ((lp.position_size > 0 && new_lp_position < 0) || (lp.position_size < 0 && new_lp_position > 0)) {
+            && ((lp.position_size > 0 && new_lp_position < 0)
+                || (lp.position_size < 0 && new_lp_position > 0))
+        {
             new_lp_entry = exec_price;
         }
 
         // Compute final PNL values
-        let new_user_pnl = user.pnl.saturating_add(user_pnl_delta).saturating_sub(fee as i128);
+        let new_user_pnl = user
+            .pnl
+            .saturating_add(user_pnl_delta)
+            .saturating_sub(fee as i128);
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
         // Check user maintenance margin
@@ -1120,12 +1134,10 @@ impl RiskEngine {
             let user_collateral = add_u128(user.capital, clamp_pos_i128(new_user_pnl));
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
-                oracle_price as u128
+                oracle_price as u128,
             ) / 1_000_000;
-            let margin_required = mul_u128(
-                position_value,
-                self.params.maintenance_margin_bps as u128
-            ) / 10_000;
+            let margin_required =
+                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
             if user_collateral <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
@@ -1136,12 +1148,10 @@ impl RiskEngine {
             let lp_collateral = add_u128(lp.capital, clamp_pos_i128(new_lp_pnl));
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
-                oracle_price as u128
+                oracle_price as u128,
             ) / 1_000_000;
-            let margin_required = mul_u128(
-                position_value,
-                self.params.maintenance_margin_bps as u128
-            ) / 10_000;
+            let margin_required =
+                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
             if lp_collateral <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
@@ -1217,14 +1227,16 @@ impl RiskEngine {
     /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
     #[inline]
     pub fn insurance_spendable_unreserved(&self) -> u128 {
-        self.insurance_spendable_raw().saturating_sub(self.warmup_insurance_reserved)
+        self.insurance_spendable_raw()
+            .saturating_sub(self.warmup_insurance_reserved)
     }
 
     /// Returns remaining warmup budget for converting positive PnL to capital
     /// Budget = max(0, warmed_neg_total + unreserved_spendable_insurance - warmed_pos_total)
     #[inline]
     pub fn warmup_budget_remaining(&self) -> u128 {
-        let rhs = self.warmed_neg_total
+        let rhs = self
+            .warmed_neg_total
             .saturating_add(self.insurance_spendable_unreserved());
         rhs.saturating_sub(self.warmed_pos_total)
     }
@@ -1292,8 +1304,9 @@ impl RiskEngine {
 
                     if needs_insurance > 0 {
                         // Reserve from unreserved spendable insurance (must be available by construction of x)
-                        self.warmup_insurance_reserved =
-                            self.warmup_insurance_reserved.saturating_add(needs_insurance);
+                        self.warmup_insurance_reserved = self
+                            .warmup_insurance_reserved
+                            .saturating_add(needs_insurance);
                     }
 
                     self.accounts[idx as usize].pnl =
@@ -1383,7 +1396,8 @@ impl RiskEngine {
 
                         if unwrapped > 0 {
                             let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
-                            self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                            self.accounts[idx].pnl =
+                                self.accounts[idx].pnl.saturating_sub(haircut as i128);
                         }
                     }
                 }
@@ -1408,7 +1422,8 @@ impl RiskEngine {
             }
 
             // Enter risk-reduction-only mode if we've hit the floor or have uncovered losses
-            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold {
+            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold
+            {
                 self.enter_risk_reduction_only_mode();
             }
         }

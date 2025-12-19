@@ -6,12 +6,12 @@ use percolator::*;
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
-        maintenance_margin_bps: 500,      // 5%
-        initial_margin_bps: 1000,         // 10%
-        trading_fee_bps: 10,              // 0.1%
+        maintenance_margin_bps: 500, // 5%
+        initial_margin_bps: 1000,    // 10%
+        trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        account_fee_bps: 10000,           // 1%
-        risk_reduction_threshold: 0,      // Default: only trigger on full depletion
+        account_fee_bps: 10000,      // 1%
+        risk_reduction_threshold: 0, // Default: only trigger on full depletion
     }
 }
 
@@ -40,7 +40,11 @@ const MATCHER: AMMatcher = AMMatcher;
 
 // Helper function to clamp to positive values
 fn clamp_pos_i128(val: i128) -> u128 {
-    if val > 0 { val as u128 } else { 0 }
+    if val > 0 {
+        val as u128
+    } else {
+        0
+    }
 }
 
 // ============================================================================
@@ -74,10 +78,14 @@ fn test_e2e_complete_user_journey() {
 
     // Alice opens long position at $1000
     let oracle_price = 1_000_000; // $1 in 6 decimal scale
-    engine.execute_trade(&MATCHER, lp, alice, oracle_price, 5_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, alice, oracle_price, 5_000)
+        .unwrap();
 
     // Bob opens short position at $1000
-    engine.execute_trade(&MATCHER, lp, bob, oracle_price, -3_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, bob, oracle_price, -3_000)
+        .unwrap();
 
     // Check positions
     assert_eq!(engine.accounts[alice as usize].position_size, 5_000);
@@ -90,7 +98,9 @@ fn test_e2e_complete_user_journey() {
     let new_price = 1_200_000;
 
     // Alice closes half her position, realizing profit
-    engine.execute_trade(&MATCHER, lp, alice, new_price, -2_500).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, alice, new_price, -2_500)
+        .unwrap();
 
     // Alice should have positive PNL from the closed portion
     // Profit = (1.20 - 1.00) × 2500 = 500
@@ -101,7 +111,9 @@ fn test_e2e_complete_user_journey() {
 
     // Accrue funding rate (longs pay shorts)
     engine.advance_slot(10);
-    engine.accrue_funding(engine.current_slot, new_price, 100).unwrap(); // 100 bps/slot, longs pay
+    engine
+        .accrue_funding(engine.current_slot, new_price, 100)
+        .unwrap(); // 100 bps/slot, longs pay
 
     // Settle funding for users
     engine.touch_account(alice).unwrap();
@@ -131,7 +143,15 @@ fn test_e2e_complete_user_journey() {
     // === Phase 5: Withdrawal ===
 
     // Alice closes her remaining position first
-    engine.execute_trade(&MATCHER, lp, alice, new_price, -engine.accounts[alice as usize].position_size).unwrap();
+    engine
+        .execute_trade(
+            &MATCHER,
+            lp,
+            alice,
+            new_price,
+            -engine.accounts[alice as usize].position_size,
+        )
+        .unwrap();
 
     // Advance time for full warmup
     engine.advance_slot(100);
@@ -144,7 +164,11 @@ fn test_e2e_complete_user_journey() {
         engine.withdraw(alice, alice_withdrawal).unwrap();
 
         // Alice should have minimal remaining balance
-        assert!(engine.accounts[alice as usize].capital + clamp_pos_i128(engine.accounts[alice as usize].pnl) < 100);
+        assert!(
+            engine.accounts[alice as usize].capital
+                + clamp_pos_i128(engine.accounts[alice as usize].pnl)
+                < 100
+        );
     }
 
     // === Phase 6: Panic Settle All ===
@@ -156,17 +180,38 @@ fn test_e2e_complete_user_journey() {
     engine.panic_settle_all(settle_price).unwrap();
 
     // All positions should be closed
-    assert_eq!(engine.accounts[alice as usize].position_size, 0, "Alice position should be closed");
-    assert_eq!(engine.accounts[bob as usize].position_size, 0, "Bob position should be closed");
-    assert_eq!(engine.accounts[lp as usize].position_size, 0, "LP position should be closed");
+    assert_eq!(
+        engine.accounts[alice as usize].position_size, 0,
+        "Alice position should be closed"
+    );
+    assert_eq!(
+        engine.accounts[bob as usize].position_size, 0,
+        "Bob position should be closed"
+    );
+    assert_eq!(
+        engine.accounts[lp as usize].position_size, 0,
+        "LP position should be closed"
+    );
 
     // System should be in risk-reduction mode
-    assert!(engine.risk_reduction_only, "Should be in risk-reduction mode after panic settle");
+    assert!(
+        engine.risk_reduction_only,
+        "Should be in risk-reduction mode after panic settle"
+    );
 
     // All PNLs should be >= 0 (negative PNL clamped and socialized)
-    assert!(engine.accounts[alice as usize].pnl >= 0, "Alice PNL should be >= 0");
-    assert!(engine.accounts[bob as usize].pnl >= 0, "Bob PNL should be >= 0");
-    assert!(engine.accounts[lp as usize].pnl >= 0, "LP PNL should be >= 0");
+    assert!(
+        engine.accounts[alice as usize].pnl >= 0,
+        "Alice PNL should be >= 0"
+    );
+    assert!(
+        engine.accounts[bob as usize].pnl >= 0,
+        "Bob PNL should be >= 0"
+    );
+    assert!(
+        engine.accounts[lp as usize].pnl >= 0,
+        "LP PNL should be >= 0"
+    );
 
     println!("✅ E2E test passed: Complete user journey works correctly");
 }
@@ -197,18 +242,24 @@ fn test_e2e_multi_user_with_adl() {
 
     // Users 0-3 open long positions at $1000
     for i in 0..4 {
-        engine.execute_trade(&MATCHER, lp, users[i], 1_000_000, 2_000).unwrap();
+        engine
+            .execute_trade(&MATCHER, lp, users[i], 1_000_000, 2_000)
+            .unwrap();
     }
 
     // User 4 opens short position
-    engine.execute_trade(&MATCHER, lp, users[4], 1_000_000, -8_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, users[4], 1_000_000, -8_000)
+        .unwrap();
 
     // Price moves to $1.10 - all longs profit, short loses
     let new_price = 1_100_000;
 
     // Close some positions to realize PNL
     for i in 0..4 {
-        engine.execute_trade(&MATCHER, lp, users[i], new_price, -2_000).unwrap();
+        engine
+            .execute_trade(&MATCHER, lp, users[i], new_price, -2_000)
+            .unwrap();
     }
 
     // Users 0-3 should have positive PNL
@@ -223,13 +274,14 @@ fn test_e2e_multi_user_with_adl() {
     // Verify ADL haircutted unwrapped PNL first
     // Users should still have their principal intact
     for i in 0..4 {
-        assert_eq!(engine.accounts[users[i] as usize].capital, 10_000, "Principal protected by I1");
+        assert_eq!(
+            engine.accounts[users[i] as usize].capital, 10_000,
+            "Principal protected by I1"
+        );
     }
 
     // Total PNL should be reduced by ADL
-    let total_pnl_after: i128 = users.iter()
-        .map(|&u| engine.accounts[u as usize].pnl)
-        .sum();
+    let total_pnl_after: i128 = users.iter().map(|&u| engine.accounts[u as usize].pnl).sum();
 
     // Some PNL should remain (not all haircutted)
     println!("Total PNL after ADL: {}", total_pnl_after);
@@ -362,12 +414,18 @@ fn test_e2e_funding_complete_cycle() {
     engine.vault = 140_000;
 
     // Alice goes long, Bob goes short
-    engine.execute_trade(&MATCHER, lp, alice, 1_000_000, 10_000).unwrap();
-    engine.execute_trade(&MATCHER, lp, bob, 1_000_000, -10_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, alice, 1_000_000, 10_000)
+        .unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, bob, 1_000_000, -10_000)
+        .unwrap();
 
     // Advance time and accrue funding (longs pay shorts)
     engine.advance_slot(20);
-    engine.accrue_funding(engine.current_slot, 1_000_000, 50).unwrap(); // 50 bps/slot
+    engine
+        .accrue_funding(engine.current_slot, 1_000_000, 50)
+        .unwrap(); // 50 bps/slot
 
     // Settle funding
     engine.touch_account(alice).unwrap();
@@ -378,19 +436,26 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice (long) paid, Bob (short) received
     assert!(alice_pnl_after_funding < 0); // Paid funding
-    assert!(bob_pnl_after_funding > 0);   // Received funding
+    assert!(bob_pnl_after_funding > 0); // Received funding
 
     // Verify zero-sum property (approximately, minus rounding)
     let total_funding = alice_pnl_after_funding + bob_pnl_after_funding;
-    assert!(total_funding.abs() < 100, "Funding should be approximately zero-sum");
+    assert!(
+        total_funding.abs() < 100,
+        "Funding should be approximately zero-sum"
+    );
 
     // === Positions Flip ===
 
     // Alice closes long and opens short
-    engine.execute_trade(&MATCHER, lp, alice, 1_000_000, -20_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, alice, 1_000_000, -20_000)
+        .unwrap();
 
     // Bob closes short and opens long
-    engine.execute_trade(&MATCHER, lp, bob, 1_000_000, 20_000).unwrap();
+    engine
+        .execute_trade(&MATCHER, lp, bob, 1_000_000, 20_000)
+        .unwrap();
 
     // Now Alice is short and Bob is long
     assert!(engine.accounts[alice as usize].position_size < 0);
@@ -398,7 +463,9 @@ fn test_e2e_funding_complete_cycle() {
 
     // Advance time and accrue more funding (now Alice receives, Bob pays)
     engine.advance_slot(20);
-    engine.accrue_funding(engine.current_slot, 1_000_000, 50).unwrap();
+    engine
+        .accrue_funding(engine.current_slot, 1_000_000, 50)
+        .unwrap();
 
     engine.touch_account(alice).unwrap();
     engine.touch_account(bob).unwrap();

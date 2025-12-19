@@ -28,7 +28,7 @@ fn test_params() -> RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
-        max_accounts: 8, // Match Kani's MAX_ACCOUNTS
+        max_accounts: 8,    // Match Kani's MAX_ACCOUNTS
         account_fee_bps: 0, // Zero fees to avoid vault/insurance mutations during add_user/add_lp
         risk_reduction_threshold: 0,
     }
@@ -67,8 +67,10 @@ fn i1_adl_never_reduces_principal() {
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.accounts[user_idx as usize].capital == principal_before,
-            "I1: ADL must NEVER reduce user principal");
+    assert!(
+        engine.accounts[user_idx as usize].capital == principal_before,
+        "I1: ADL must NEVER reduce user principal"
+    );
 }
 
 // ============================================================================
@@ -91,8 +93,10 @@ fn i2_deposit_preserves_conservation() {
 
     let _ = engine.deposit(user_idx, amount);
 
-    assert!(engine.check_conservation(),
-            "I2: Deposit must preserve conservation");
+    assert!(
+        engine.check_conservation(),
+        "I2: Deposit must preserve conservation"
+    );
 }
 
 #[kani::proof]
@@ -115,8 +119,10 @@ fn i2_withdraw_preserves_conservation() {
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation(),
-            "I2: Withdrawal must preserve conservation");
+    assert!(
+        engine.check_conservation(),
+        "I2: Withdrawal must preserve conservation"
+    );
 }
 
 // ============================================================================
@@ -149,8 +155,7 @@ fn i5_warmup_determinism() {
     let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
     let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(w1 == w2,
-            "I5: Withdrawable PNL must be deterministic");
+    assert!(w1 == w2, "I5: Withdrawable PNL must be deterministic");
 }
 
 #[kani::proof]
@@ -180,8 +185,10 @@ fn i5_warmup_monotonicity() {
     engine.current_slot = slots2;
     let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(w2 >= w1,
-            "I5: Warmup must be monotonically increasing over time");
+    assert!(
+        w2 >= w1,
+        "I5: Warmup must be monotonically increasing over time"
+    );
 }
 
 #[kani::proof]
@@ -210,8 +217,10 @@ fn i5_warmup_bounded_by_pnl() {
     let positive_pnl = pnl as u128;
     let available = positive_pnl.saturating_sub(reserved);
 
-    assert!(withdrawable <= available,
-            "I5: Withdrawable must not exceed available PNL");
+    assert!(
+        withdrawable <= available,
+        "I5: Withdrawable must not exceed available PNL"
+    );
 }
 
 // ============================================================================
@@ -242,10 +251,14 @@ fn i7_user_isolation_deposit() {
     let _ = engine.deposit(user1, 100);
 
     // User2 should be unchanged
-    assert!(engine.accounts[user2 as usize].capital == user2_principal,
-            "I7: User2 principal unchanged by user1 deposit");
-    assert!(engine.accounts[user2 as usize].pnl == user2_pnl,
-            "I7: User2 PNL unchanged by user1 deposit");
+    assert!(
+        engine.accounts[user2 as usize].capital == user2_principal,
+        "I7: User2 principal unchanged by user1 deposit"
+    );
+    assert!(
+        engine.accounts[user2 as usize].pnl == user2_pnl,
+        "I7: User2 PNL unchanged by user1 deposit"
+    );
 }
 
 #[kani::proof]
@@ -272,10 +285,14 @@ fn i7_user_isolation_withdrawal() {
     let _ = engine.withdraw(user1, 50);
 
     // User2 should be unchanged
-    assert!(engine.accounts[user2 as usize].capital == user2_principal,
-            "I7: User2 principal unchanged by user1 withdrawal");
-    assert!(engine.accounts[user2 as usize].pnl == user2_pnl,
-            "I7: User2 PNL unchanged by user1 withdrawal");
+    assert!(
+        engine.accounts[user2 as usize].capital == user2_principal,
+        "I7: User2 principal unchanged by user1 withdrawal"
+    );
+    assert!(
+        engine.accounts[user2 as usize].pnl == user2_pnl,
+        "I7: User2 PNL unchanged by user1 withdrawal"
+    );
 }
 
 // ============================================================================
@@ -301,8 +318,10 @@ fn i8_collateral_with_positive_pnl() {
     let collateral = engine.account_collateral(&engine.accounts[user_idx as usize]);
     let expected = principal.saturating_add(pnl as u128);
 
-    assert!(collateral == expected,
-            "I8: Collateral = principal + positive PNL");
+    assert!(
+        collateral == expected,
+        "I8: Collateral = principal + positive PNL"
+    );
 }
 
 #[kani::proof]
@@ -323,8 +342,10 @@ fn i8_collateral_with_negative_pnl() {
 
     let collateral = engine.account_collateral(&engine.accounts[user_idx as usize]);
 
-    assert!(collateral == principal,
-            "I8: Collateral = principal when PNL is negative");
+    assert!(
+        collateral == principal,
+        "I8: Collateral = principal when PNL is negative"
+    );
 }
 
 // ============================================================================
@@ -375,13 +396,16 @@ fn i4_adl_haircuts_unwrapped_first() {
     // With slope=0 and slot=0, withdrawable=0, so all PnL is unwrapped
     // If loss <= unwrapped PNL, insurance should be untouched
     if loss <= pnl as u128 {
-        assert!(engine.insurance_fund.balance == insurance_before,
-                "I4: ADL should haircut PNL before touching insurance");
-        assert!(engine.accounts[user_idx as usize].pnl == pnl_before - (loss as i128),
-                "I4: PNL should be reduced by loss amount");
+        assert!(
+            engine.insurance_fund.balance == insurance_before,
+            "I4: ADL should haircut PNL before touching insurance"
+        );
+        assert!(
+            engine.accounts[user_idx as usize].pnl == pnl_before - (loss as i128),
+            "I4: PNL should be reduced by loss amount"
+        );
     }
 }
-
 
 // ============================================================================
 // Withdrawal Safety
@@ -406,8 +430,10 @@ fn withdrawal_requires_sufficient_balance() {
 
     let result = engine.withdraw(user_idx, withdraw);
 
-    assert!(result.is_err(),
-            "Withdrawal of more than available must fail");
+    assert!(
+        result.is_err(),
+        "Withdrawal of more than available must fail"
+    );
 }
 
 #[kani::proof]
@@ -437,8 +463,10 @@ fn pnl_withdrawal_requires_warmup() {
     // Trying to withdraw should fail (no principal, no warmed PNL)
     if withdraw > 0 {
         let result = engine.withdraw(user_idx, withdraw);
-        assert!(result.is_err(),
-                "Cannot withdraw when no principal and PNL not warmed up");
+        assert!(
+            result.is_err(),
+            "Cannot withdraw when no principal and PNL not warmed up"
+        );
     }
 }
 
@@ -476,12 +504,15 @@ fn multiple_users_adl_preserves_all_principals() {
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.accounts[user1 as usize].capital == p1,
-            "Multi-user ADL: User1 principal preserved");
-    assert!(engine.accounts[user2 as usize].capital == p2,
-            "Multi-user ADL: User2 principal preserved");
+    assert!(
+        engine.accounts[user1 as usize].capital == p1,
+        "Multi-user ADL: User1 principal preserved"
+    );
+    assert!(
+        engine.accounts[user2 as usize].capital == p2,
+        "Multi-user ADL: User2 principal preserved"
+    );
 }
-
 
 // ============================================================================
 // Arithmetic Safety
@@ -496,13 +527,14 @@ fn saturating_arithmetic_prevents_overflow() {
 
     // Test saturating add
     let result = a.saturating_add(b);
-    assert!(result >= a && result >= b,
-            "Saturating add should not overflow");
+    assert!(
+        result >= a && result >= b,
+        "Saturating add should not overflow"
+    );
 
     // Test saturating sub
     let result = a.saturating_sub(b);
-    assert!(result <= a,
-            "Saturating sub should not underflow");
+    assert!(result <= a, "Saturating sub should not underflow");
 }
 
 // ============================================================================
@@ -521,8 +553,7 @@ fn zero_pnl_withdrawable_is_zero() {
 
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(withdrawable == 0,
-            "Zero PNL means zero withdrawable");
+    assert!(withdrawable == 0, "Zero PNL means zero withdrawable");
 }
 
 #[kani::proof]
@@ -540,8 +571,7 @@ fn negative_pnl_withdrawable_is_zero() {
 
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(withdrawable == 0,
-            "Negative PNL means zero withdrawable");
+    assert!(withdrawable == 0, "Negative PNL means zero withdrawable");
 }
 
 // ============================================================================
@@ -585,12 +615,16 @@ fn funding_p1_settlement_idempotent() {
     let _ = engine.touch_account(user_idx);
 
     // PNL should be unchanged
-    assert!(engine.accounts[user_idx as usize].pnl == pnl_after_first,
-            "Second settlement should not change PNL");
+    assert!(
+        engine.accounts[user_idx as usize].pnl == pnl_after_first,
+        "Second settlement should not change PNL"
+    );
 
     // Snapshot should equal global index
-    assert!(engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
-            "Snapshot should equal global index");
+    assert!(
+        engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
+        "Snapshot should equal global index"
+    );
 }
 
 #[kani::proof]
@@ -622,8 +656,10 @@ fn funding_p2_never_touches_principal() {
     let _ = engine.touch_account(user_idx);
 
     // Principal must be unchanged
-    assert!(engine.accounts[user_idx as usize].capital == principal,
-            "Funding must never modify principal");
+    assert!(
+        engine.accounts[user_idx as usize].capital == principal,
+        "Funding must never modify principal"
+    );
 }
 
 #[kani::proof]
@@ -666,15 +702,14 @@ fn funding_p3_bounded_drift_between_opposite_positions() {
 
     // If both settlements succeeded, check bounded drift
     if user_result.is_ok() && lp_result.is_ok() {
-        let total_after = engine.accounts[user_idx as usize].pnl + engine.accounts[lp_idx as usize].pnl;
+        let total_after =
+            engine.accounts[user_idx as usize].pnl + engine.accounts[lp_idx as usize].pnl;
         let change = total_after - total_before;
 
         // Funding should not create value (vault keeps rounding dust)
-        assert!(change <= 0,
-                "Funding must not create value");
+        assert!(change <= 0, "Funding must not create value");
         // Change should be bounded by rounding (at most -2 per account pair)
-        assert!(change >= -2,
-                "Funding drift must be bounded");
+        assert!(change >= -2, "Funding drift must be bounded");
     }
 }
 
@@ -722,8 +757,10 @@ fn funding_p4_settle_before_position_change() {
     // - delta1 to initial_pos
     // - delta2 to new_pos
     // Snapshot should equal global index
-    assert!(engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
-            "Snapshot must track global index");
+    assert!(
+        engine.accounts[user_idx as usize].funding_index == engine.funding_index_qpb_e6,
+        "Snapshot must track global index"
+    );
 }
 
 #[kani::proof]
@@ -752,8 +789,10 @@ fn funding_p5_bounded_operations_no_overflow() {
 
     // Either succeeds or returns Overflow error (never panics)
     if result.is_err() {
-        assert!(matches!(result.unwrap_err(), RiskError::Overflow),
-                "Only Overflow error allowed");
+        assert!(
+            matches!(result.unwrap_err(), RiskError::Overflow),
+            "Only Overflow error allowed"
+        );
     }
 }
 
@@ -782,8 +821,10 @@ fn funding_zero_position_no_change() {
     let _ = engine.touch_account(user_idx);
 
     // PNL should be unchanged
-    assert!(engine.accounts[user_idx as usize].pnl == pnl_before,
-            "Zero position should not pay or receive funding");
+    assert!(
+        engine.accounts[user_idx as usize].pnl == pnl_before,
+        "Zero position should not pay or receive funding"
+    );
 }
 
 // ============================================================================
@@ -928,17 +969,22 @@ fn i10_risk_mode_triggers_at_floor() {
 
     // If loss exceeds what we can cover, should enter risk mode with loss_accum
     if loss > unreserved_spendable {
-        assert!(engine.risk_reduction_only,
-                "I10: Risk mode must activate when losses exceed coverage");
+        assert!(
+            engine.risk_reduction_only,
+            "I10: Risk mode must activate when losses exceed coverage"
+        );
         // Insurance should be at floor, not zero
-        assert!(engine.insurance_fund.balance >= floor,
-                "I10: Insurance must not drop below floor");
+        assert!(
+            engine.insurance_fund.balance >= floor,
+            "I10: Insurance must not drop below floor"
+        );
         // Excess loss goes to loss_accum
-        assert!(engine.loss_accum > 0,
-                "I10: loss_accum must be > 0 for uncovered losses");
+        assert!(
+            engine.loss_accum > 0,
+            "I10: loss_accum must be > 0 for uncovered losses"
+        );
     }
 }
-
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
@@ -1038,8 +1084,10 @@ fn i10_withdrawal_mode_blocks_position_increase() {
 
     // Should fail when trying to increase position
     if new_size.abs() > position.abs() {
-        assert!(result.is_err(),
-                "I10: Cannot increase position in withdrawal-only mode");
+        assert!(
+            result.is_err(),
+            "I10: Cannot increase position in withdrawal-only mode"
+        );
     }
 }
 
@@ -1079,8 +1127,10 @@ fn i10_withdrawal_mode_allows_position_decrease() {
     let result = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, reduce);
 
     // Closing/reducing should be allowed
-    assert!(result.is_ok(),
-            "I10: Position reduction should be allowed in withdrawal-only mode");
+    assert!(
+        result.is_ok(),
+        "I10: Position reduction should be allowed in withdrawal-only mode"
+    );
 }
 
 /*
@@ -1171,10 +1221,16 @@ fn i10_top_up_exits_withdrawal_mode_when_loss_zero() {
 
     assert!(result.is_ok(), "Top-up should succeed");
     assert!(engine.loss_accum == 0, "Loss should be fully covered");
-    assert!(!engine.risk_reduction_only, "I10: Should exit withdrawal mode when loss_accum = 0");
+    assert!(
+        !engine.risk_reduction_only,
+        "I10: Should exit withdrawal mode when loss_accum = 0"
+    );
 
     if let Ok(exited) = result {
-        assert!(exited, "I10: Should return true when exiting withdrawal mode");
+        assert!(
+            exited,
+            "I10: Should return true when exiting withdrawal mode"
+        );
     }
 }
 
@@ -1202,15 +1258,18 @@ fn i10_withdrawal_mode_preserves_conservation() {
     engine.risk_reduction_only = true;
     engine.loss_accum = 0;
 
-    assert!(engine.check_conservation(),
-            "Conservation before withdrawal");
+    assert!(
+        engine.check_conservation(),
+        "Conservation before withdrawal"
+    );
 
     let _ = engine.withdraw(user_idx, withdraw);
 
-    assert!(engine.check_conservation(),
-            "I10: Withdrawal mode must preserve conservation");
+    assert!(
+        engine.check_conservation(),
+        "I10: Withdrawal mode must preserve conservation"
+    );
 }
-
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
@@ -1283,10 +1342,11 @@ fn i1_lp_adl_never_reduces_capital() {
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.accounts[lp_idx as usize].capital == capital_before,
-            "I1-LP: ADL must NEVER reduce LP capital");
+    assert!(
+        engine.accounts[lp_idx as usize].capital == capital_before,
+        "I1-LP: ADL must NEVER reduce LP capital"
+    );
 }
-
 
 // Previously slow - now fast with 8 accounts
 #[kani::proof]
@@ -1327,10 +1387,11 @@ fn adl_is_proportional_for_user_and_lp() {
     let lp_loss = lp_pnl_before - engine.accounts[lp_idx as usize].pnl;
 
     // Both should lose the same amount (proportional means equal when starting equal)
-    assert!(user_loss == lp_loss,
-            "ADL: User and LP with equal unwrapped PNL must receive equal haircuts");
+    assert!(
+        user_loss == lp_loss,
+        "ADL: User and LP with equal unwrapped PNL must receive equal haircuts"
+    );
 }
-
 
 // Previously slow - now fast with 8 accounts
 #[kani::proof]
@@ -1381,12 +1442,17 @@ fn adl_proportionality_general() {
 
     // Allow for rounding error of up to (total_pnl) due to integer division
     let total_pnl = (user_pnl + lp_pnl) as u128;
-    let diff = if cross1 > cross2 { cross1 - cross2 } else { cross2 - cross1 };
+    let diff = if cross1 > cross2 {
+        cross1 - cross2
+    } else {
+        cross2 - cross1
+    };
 
-    assert!(diff <= total_pnl,
-            "ADL: Haircuts must be proportional (within rounding tolerance)");
+    assert!(
+        diff <= total_pnl,
+        "ADL: Haircuts must be proportional (within rounding tolerance)"
+    );
 }
-
 
 /*
 // NOTE: Commented out - tests old withdrawal haircut logic which was removed
@@ -1478,12 +1544,15 @@ fn multiple_lps_adl_preserves_all_capitals() {
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.accounts[lp1 as usize].capital == c1,
-            "Multi-LP ADL: LP1 capital preserved");
-    assert!(engine.accounts[lp2 as usize].capital == c2,
-            "Multi-LP ADL: LP2 capital preserved");
+    assert!(
+        engine.accounts[lp1 as usize].capital == c1,
+        "Multi-LP ADL: LP1 capital preserved"
+    );
+    assert!(
+        engine.accounts[lp2 as usize].capital == c2,
+        "Multi-LP ADL: LP2 capital preserved"
+    );
 }
-
 
 // Previously slow - now fast with 8 accounts
 #[kani::proof]
@@ -1516,12 +1585,15 @@ fn mixed_users_and_lps_adl_preserves_all_capitals() {
 
     let _ = engine.apply_adl(loss);
 
-    assert!(engine.accounts[user_idx as usize].capital == user_capital,
-            "Mixed ADL: User capital preserved");
-    assert!(engine.accounts[lp_idx as usize].capital == lp_capital,
-            "Mixed ADL: LP capital preserved");
+    assert!(
+        engine.accounts[user_idx as usize].capital == user_capital,
+        "Mixed ADL: User capital preserved"
+    );
+    assert!(
+        engine.accounts[lp_idx as usize].capital == lp_capital,
+        "Mixed ADL: LP capital preserved"
+    );
 }
-
 
 // ============================================================================
 // Risk-Reduction-Only Mode Proofs
@@ -1566,8 +1638,10 @@ fn proof_warmup_frozen_when_paused() {
     let withdrawable_later = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
     // PROOF: Withdrawable PNL does not increase when warmup is paused
-    assert!(withdrawable_later == withdrawable_at_pause,
-            "Warmup should not advance while paused");
+    assert!(
+        withdrawable_later == withdrawable_at_pause,
+        "Warmup should not advance while paused"
+    );
 }
 
 // Proof 2: In risk mode, withdraw never decreases PNL directly (only via warmup conversion)
@@ -1612,10 +1686,14 @@ fn proof_withdraw_only_decreases_via_conversion() {
     // PROOF: PNL only decreases by the warmed conversion amount
     // pnl_after should be >= pnl_before - warmed
     // and pnl_after should be <= pnl_before
-    assert!(pnl_after >= pnl_before - (warmed as i128),
-            "PNL should not decrease more than warmed amount");
-    assert!(pnl_after <= pnl_before,
-            "PNL should not increase during withdrawal");
+    assert!(
+        pnl_after >= pnl_before - (warmed as i128),
+        "PNL should not decrease more than warmed amount"
+    );
+    assert!(
+        pnl_after <= pnl_before,
+        "PNL should not increase during withdrawal"
+    );
 }
 
 // Proof 3: Risk-increasing trades are rejected in risk mode
@@ -1653,7 +1731,10 @@ fn proof_risk_increasing_trades_rejected() {
 
     // PROOF: If trade increases absolute exposure, it must be rejected in risk mode
     if user_increases {
-        assert!(result.is_err(), "Risk-increasing trades must fail in risk mode");
+        assert!(
+            result.is_err(),
+            "Risk-increasing trades must fail in risk mode"
+        );
     }
 }
 
@@ -1699,10 +1780,14 @@ fn panic_settle_closes_all_positions() {
 
     // PROOF: If successful, all positions must be zero
     if result.is_ok() {
-        assert!(engine.accounts[user_idx as usize].position_size == 0,
-                "PS1: User position must be closed after panic settle");
-        assert!(engine.accounts[lp_idx as usize].position_size == 0,
-                "PS1: LP position must be closed after panic settle");
+        assert!(
+            engine.accounts[user_idx as usize].position_size == 0,
+            "PS1: User position must be closed after panic settle"
+        );
+        assert!(
+            engine.accounts[lp_idx as usize].position_size == 0,
+            "PS1: LP position must be closed after panic settle"
+        );
     }
 }
 
@@ -1747,10 +1832,14 @@ fn panic_settle_clamps_negative_pnl() {
 
     // PROOF: If successful, all PNLs must be >= 0
     if result.is_ok() {
-        assert!(engine.accounts[user_idx as usize].pnl >= 0,
-                "PS2: User PNL must be >= 0 after panic settle");
-        assert!(engine.accounts[lp_idx as usize].pnl >= 0,
-                "PS2: LP PNL must be >= 0 after panic settle");
+        assert!(
+            engine.accounts[user_idx as usize].pnl >= 0,
+            "PS2: User PNL must be >= 0 after panic settle"
+        );
+        assert!(
+            engine.accounts[lp_idx as usize].pnl >= 0,
+            "PS2: LP PNL must be >= 0 after panic settle"
+        );
     }
 }
 
@@ -1779,10 +1868,14 @@ fn panic_settle_enters_risk_mode() {
 
     // PROOF: After panic_settle, we must be in risk-reduction-only mode
     if result.is_ok() {
-        assert!(engine.risk_reduction_only,
-                "PS3: Must be in risk-reduction-only mode after panic settle");
-        assert!(engine.warmup_paused,
-                "PS3: Warmup must be paused after panic settle");
+        assert!(
+            engine.risk_reduction_only,
+            "PS3: Must be in risk-reduction-only mode after panic settle"
+        );
+        assert!(
+            engine.warmup_paused,
+            "PS3: Warmup must be paused after panic settle"
+        );
     }
 }
 
@@ -1834,8 +1927,10 @@ fn panic_settle_preserves_conservation() {
 
     // PROOF: Conservation must hold after panic_settle
     if result.is_ok() {
-        assert!(engine.check_conservation(),
-                "PS4: Conservation must hold after panic settle");
+        assert!(
+            engine.check_conservation(),
+            "PS4: Conservation must hold after panic settle"
+        );
     }
 }
 
@@ -1900,8 +1995,10 @@ fn warmup_budget_a_invariant_holds_after_settlement() {
 
     // PROOF: Warmup budget invariant must hold
     let raw = engine.insurance_spendable_raw();
-    assert!(engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw),
-            "WB-A: W+ <= W- + raw_spendable must hold after settlement");
+    assert!(
+        engine.warmed_pos_total <= engine.warmed_neg_total.saturating_add(raw),
+        "WB-A: W+ <= W- + raw_spendable must hold after settlement"
+    );
 }
 
 // Proof B: Settling negative PNL cannot increase warmed_pos_total
@@ -1940,8 +2037,10 @@ fn warmup_budget_b_negative_settlement_no_increase_pos() {
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF: warmed_pos_total should not increase when settling negative PNL
-    assert!(engine.warmed_pos_total == warmed_pos_before,
-            "WB-B: Settling negative PNL must not increase warmed_pos_total");
+    assert!(
+        engine.warmed_pos_total == warmed_pos_before,
+        "WB-B: Settling negative PNL must not increase warmed_pos_total"
+    );
 }
 
 // Proof C: Settling positive PNL cannot exceed available budget
@@ -1987,8 +2086,10 @@ fn warmup_budget_c_positive_settlement_bounded_by_budget() {
     // PROOF: The increase in warmed_pos_total must not exceed available budget
     // This is the exact safety property: delta <= budget_before
     let delta = engine.warmed_pos_total.saturating_sub(warmed_pos_before);
-    assert!(delta <= budget_before,
-            "WB-C: Δwarmed_pos must not exceed budget_before");
+    assert!(
+        delta <= budget_before,
+        "WB-C: Δwarmed_pos must not exceed budget_before"
+    );
 }
 
 // Proof D: In warmup-paused mode, settlement result is unchanged by time
@@ -2029,19 +2130,27 @@ fn warmup_budget_d_paused_settlement_time_invariant() {
     // Compute vested amount at slot1 (inline calculation)
     engine.current_slot = settle_slot1;
     let effective_slot1 = core::cmp::min(engine.current_slot, engine.warmup_pause_slot);
-    let elapsed1 = effective_slot1.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
-    let vested1 = engine.accounts[user_idx as usize].warmup_slope_per_step.saturating_mul(elapsed1 as u128);
+    let elapsed1 =
+        effective_slot1.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
+    let vested1 = engine.accounts[user_idx as usize]
+        .warmup_slope_per_step
+        .saturating_mul(elapsed1 as u128);
 
     // Compute vested amount at later slot2 (inline calculation)
     engine.current_slot = settle_slot2;
     let effective_slot2 = core::cmp::min(engine.current_slot, engine.warmup_pause_slot);
-    let elapsed2 = effective_slot2.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
-    let vested2 = engine.accounts[user_idx as usize].warmup_slope_per_step.saturating_mul(elapsed2 as u128);
+    let elapsed2 =
+        effective_slot2.saturating_sub(engine.accounts[user_idx as usize].warmup_started_at_slot);
+    let vested2 = engine.accounts[user_idx as usize]
+        .warmup_slope_per_step
+        .saturating_mul(elapsed2 as u128);
 
     // PROOF: Vested amount should not change when warmup is paused
     // (both should be capped at pause_slot)
-    assert!(vested1 == vested2,
-            "WB-D: Vested amount must be time-invariant when warmup is paused");
+    assert!(
+        vested1 == vested2,
+        "WB-D: Vested amount must be time-invariant when warmup is paused"
+    );
 }
 
 // ============================================================================
@@ -2117,16 +2226,26 @@ fn audit_settle_idempotent_when_paused() {
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF: All state must be identical after second settlement
-    assert!(engine.accounts[user_idx as usize].capital == capital_after_first,
-            "AUDIT PROOF FAILED: Capital changed on second settlement (double-settlement bug)");
-    assert!(engine.accounts[user_idx as usize].pnl == pnl_after_first,
-            "AUDIT PROOF FAILED: PnL changed on second settlement (double-settlement bug)");
-    assert!(engine.warmed_pos_total == warmed_pos_after_first,
-            "AUDIT PROOF FAILED: warmed_pos_total changed (double-settlement bug)");
-    assert!(engine.warmed_neg_total == warmed_neg_after_first,
-            "AUDIT PROOF FAILED: warmed_neg_total changed (double-settlement bug)");
-    assert!(engine.warmup_insurance_reserved == reserved_after_first,
-            "AUDIT PROOF FAILED: reserved changed (double-settlement bug)");
+    assert!(
+        engine.accounts[user_idx as usize].capital == capital_after_first,
+        "AUDIT PROOF FAILED: Capital changed on second settlement (double-settlement bug)"
+    );
+    assert!(
+        engine.accounts[user_idx as usize].pnl == pnl_after_first,
+        "AUDIT PROOF FAILED: PnL changed on second settlement (double-settlement bug)"
+    );
+    assert!(
+        engine.warmed_pos_total == warmed_pos_after_first,
+        "AUDIT PROOF FAILED: warmed_pos_total changed (double-settlement bug)"
+    );
+    assert!(
+        engine.warmed_neg_total == warmed_neg_after_first,
+        "AUDIT PROOF FAILED: warmed_neg_total changed (double-settlement bug)"
+    );
+    assert!(
+        engine.warmup_insurance_reserved == reserved_after_first,
+        "AUDIT PROOF FAILED: reserved changed (double-settlement bug)"
+    );
 }
 
 /// Proof: warmup_started_at_slot is updated to effective_slot after settlement
@@ -2174,8 +2293,10 @@ fn audit_warmup_started_at_updated_to_effective_slot() {
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF: warmup_started_at_slot must equal effective_slot
-    assert!(engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
-            "AUDIT PROOF FAILED: warmup_started_at_slot not updated to effective_slot");
+    assert!(
+        engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
+        "AUDIT PROOF FAILED: warmup_started_at_slot not updated to effective_slot"
+    );
 }
 
 /// Proof: Multiple settlements when paused all produce same result
@@ -2244,10 +2365,14 @@ fn audit_multiple_settlements_when_paused_idempotent() {
     );
 
     // PROOF: All states must be identical
-    assert!(state_after_first == state_after_second,
-            "AUDIT PROOF FAILED: State changed between first and second settlement");
-    assert!(state_after_second == state_after_third,
-            "AUDIT PROOF FAILED: State changed between second and third settlement");
+    assert!(
+        state_after_first == state_after_second,
+        "AUDIT PROOF FAILED: State changed between first and second settlement"
+    );
+    assert!(
+        state_after_second == state_after_third,
+        "AUDIT PROOF FAILED: State changed between second and third settlement"
+    );
 }
 
 /// Proof R1: ADL never spends reserved insurance
@@ -2291,20 +2416,26 @@ fn proof_r1_adl_never_spends_reserved() {
     engine.vault = 10_000 + insurance;
 
     // Verify the unreserved spendable equals extra before ADL
-    assert!(engine.insurance_spendable_unreserved() == extra,
-            "R1 PRECONDITION: unreserved spendable should equal extra");
+    assert!(
+        engine.insurance_spendable_unreserved() == extra,
+        "R1 PRECONDITION: unreserved spendable should equal extra"
+    );
 
     // Apply ADL - with no unwrapped PnL, it must use insurance
     let _ = engine.apply_adl(loss);
 
     // PROOF R1: Insurance must be >= floor + reserved
     // ADL can only spend the "extra" portion, not the reserved portion
-    assert!(engine.insurance_fund.balance >= floor + reserved,
-            "R1 FAILED: ADL spent reserved insurance!");
+    assert!(
+        engine.insurance_fund.balance >= floor + reserved,
+        "R1 FAILED: ADL spent reserved insurance!"
+    );
 
     // Corollary: reserved should not decrease
-    assert!(engine.warmup_insurance_reserved >= reserved,
-            "R1 FAILED: Reserved decreased after ADL");
+    assert!(
+        engine.warmup_insurance_reserved >= reserved,
+        "R1 FAILED: Reserved decreased after ADL"
+    );
 }
 
 /// Proof R2: Reserved never exceeds raw spendable and is monotonically non-decreasing
@@ -2353,20 +2484,26 @@ fn proof_r2_reserved_bounded_and_monotone() {
     let raw_spendable = engine.insurance_spendable_raw();
 
     // PROOF R2a: Reserved <= raw spendable
-    assert!(reserved_after_first <= raw_spendable,
-            "R2 FAILED: Reserved exceeds raw spendable");
+    assert!(
+        reserved_after_first <= raw_spendable,
+        "R2 FAILED: Reserved exceeds raw spendable"
+    );
 
     // PROOF R2b: Reserved is monotonically non-decreasing
-    assert!(reserved_after_first >= reserved_before,
-            "R2 FAILED: Reserved decreased after settle");
+    assert!(
+        reserved_after_first >= reserved_before,
+        "R2 FAILED: Reserved decreased after settle"
+    );
 
     // Second settle (should be idempotent when paused, but let's check monotonicity)
     engine.current_slot = slots + 10;
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // Reserved should not decrease
-    assert!(engine.warmup_insurance_reserved >= reserved_after_first,
-            "R2 FAILED: Reserved decreased on second settle");
+    assert!(
+        engine.warmup_insurance_reserved >= reserved_after_first,
+        "R2 FAILED: Reserved decreased on second settle"
+    );
 }
 
 /// Proof R3: Warmup reservation safety
@@ -2411,8 +2548,10 @@ fn proof_r3_warmup_reservation_safety() {
     let _ = engine.settle_warmup_to_capital(user_idx);
 
     // PROOF R3: Insurance must cover floor + reserved
-    assert!(engine.insurance_fund.balance >= floor + engine.warmup_insurance_reserved,
-            "R3 FAILED: Insurance does not cover floor + reserved");
+    assert!(
+        engine.insurance_fund.balance >= floor + engine.warmup_insurance_reserved,
+        "R3 FAILED: Insurance does not cover floor + reserved"
+    );
 }
 
 /// Proof PS5: panic_settle_all does not increase insurance (no minting from rounding)
@@ -2465,8 +2604,10 @@ fn proof_ps5_panic_settle_no_insurance_minting() {
     let _ = engine.panic_settle_all(oracle_price);
 
     // PROOF PS5: Insurance should not increase (may decrease due to ADL)
-    assert!(engine.insurance_fund.balance <= insurance_before,
-            "PS5 FAILED: Insurance increased after panic_settle (minting bug)");
+    assert!(
+        engine.insurance_fund.balance <= insurance_before,
+        "PS5 FAILED: Insurance increased after panic_settle (minting bug)"
+    );
 }
 
 /// Proof C1: Conservation slack is bounded after panic_settle_all
@@ -2514,8 +2655,8 @@ fn proof_c1_conservation_bounded_slack_panic_settle() {
     let _ = engine.panic_settle_all(oracle_price);
 
     // Compute expected value
-    let total_capital = engine.accounts[user_idx as usize].capital
-        + engine.accounts[lp_idx as usize].capital;
+    let total_capital =
+        engine.accounts[user_idx as usize].capital + engine.accounts[lp_idx as usize].capital;
     let user_pnl = engine.accounts[user_idx as usize].pnl;
     let lp_pnl = engine.accounts[lp_idx as usize].pnl;
     let net_pnl = user_pnl.saturating_add(lp_pnl);
@@ -2530,19 +2671,27 @@ fn proof_c1_conservation_bounded_slack_panic_settle() {
     let actual = engine.vault + engine.loss_accum;
 
     // PROOF 1: No under-collateralization
-    assert!(actual >= expected,
-            "AUDIT PROOF FAILED: Vault under-collateralized after panic_settle");
+    assert!(
+        actual >= expected,
+        "AUDIT PROOF FAILED: Vault under-collateralized after panic_settle"
+    );
 
     // PROOF 2: Slack is bounded
     let slack = actual - expected;
-    assert!(slack <= MAX_ROUNDING_SLACK,
-            "C1 FAILED: Slack exceeds MAX_ROUNDING_SLACK after panic_settle");
+    assert!(
+        slack <= MAX_ROUNDING_SLACK,
+        "C1 FAILED: Slack exceeds MAX_ROUNDING_SLACK after panic_settle"
+    );
 
     // PROOF 3: Positions are closed
-    assert!(engine.accounts[user_idx as usize].position_size == 0,
-            "C1 FAILED: User position not closed");
-    assert!(engine.accounts[lp_idx as usize].position_size == 0,
-            "C1 FAILED: LP position not closed");
+    assert!(
+        engine.accounts[user_idx as usize].position_size == 0,
+        "C1 FAILED: User position not closed"
+    );
+    assert!(
+        engine.accounts[lp_idx as usize].position_size == 0,
+        "C1 FAILED: LP position not closed"
+    );
 }
 
 /// Proof C1b: Conservation slack is bounded after force_realize_losses
@@ -2589,8 +2738,8 @@ fn proof_c1_conservation_bounded_slack_force_realize() {
     let _ = engine.force_realize_losses(oracle_price);
 
     // Compute expected value
-    let total_capital = engine.accounts[user_idx as usize].capital
-        + engine.accounts[lp_idx as usize].capital;
+    let total_capital =
+        engine.accounts[user_idx as usize].capital + engine.accounts[lp_idx as usize].capital;
     let user_pnl = engine.accounts[user_idx as usize].pnl;
     let lp_pnl = engine.accounts[lp_idx as usize].pnl;
     let net_pnl = user_pnl.saturating_add(lp_pnl);
@@ -2605,13 +2754,17 @@ fn proof_c1_conservation_bounded_slack_force_realize() {
     let actual = engine.vault + engine.loss_accum;
 
     // PROOF 1: No under-collateralization
-    assert!(actual >= expected,
-            "C1b FAILED: Vault under-collateralized after force_realize");
+    assert!(
+        actual >= expected,
+        "C1b FAILED: Vault under-collateralized after force_realize"
+    );
 
     // PROOF 2: Slack is bounded
     let slack = actual - expected;
-    assert!(slack <= MAX_ROUNDING_SLACK,
-            "C1b FAILED: Slack exceeds MAX_ROUNDING_SLACK after force_realize");
+    assert!(
+        slack <= MAX_ROUNDING_SLACK,
+        "C1b FAILED: Slack exceeds MAX_ROUNDING_SLACK after force_realize"
+    );
 }
 
 /// Proof: force_realize_losses updates warmup_started_at_slot
@@ -2667,10 +2820,14 @@ fn audit_force_realize_updates_warmup_start() {
     let effective_slot = engine.warmup_pause_slot;
 
     // PROOF: Both accounts should have updated warmup_started_at_slot
-    assert!(engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
-            "AUDIT PROOF FAILED: User warmup_started_at_slot not updated");
-    assert!(engine.accounts[lp_idx as usize].warmup_started_at_slot == effective_slot,
-            "AUDIT PROOF FAILED: LP warmup_started_at_slot not updated");
+    assert!(
+        engine.accounts[user_idx as usize].warmup_started_at_slot == effective_slot,
+        "AUDIT PROOF FAILED: User warmup_started_at_slot not updated"
+    );
+    assert!(
+        engine.accounts[lp_idx as usize].warmup_started_at_slot == effective_slot,
+        "AUDIT PROOF FAILED: LP warmup_started_at_slot not updated"
+    );
 
     // PROOF: Subsequent settle should be idempotent (no change)
     let capital_before = engine.accounts[user_idx as usize].capital;
@@ -2679,9 +2836,12 @@ fn audit_force_realize_updates_warmup_start() {
     engine.current_slot = current_slot + 100; // Advance time
     let _ = engine.settle_warmup_to_capital(user_idx);
 
-    assert!(engine.accounts[user_idx as usize].capital == capital_before,
-            "AUDIT PROOF FAILED: Capital changed after settle post-force_realize");
-    assert!(engine.accounts[user_idx as usize].pnl == pnl_before,
-            "AUDIT PROOF FAILED: PnL changed after settle post-force_realize");
+    assert!(
+        engine.accounts[user_idx as usize].capital == capital_before,
+        "AUDIT PROOF FAILED: Capital changed after settle post-force_realize"
+    );
+    assert!(
+        engine.accounts[user_idx as usize].pnl == pnl_before,
+        "AUDIT PROOF FAILED: PnL changed after settle post-force_realize"
+    );
 }
-
