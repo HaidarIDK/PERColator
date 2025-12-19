@@ -1515,10 +1515,14 @@ impl RiskEngine {
                     Some(idx) => {
                         self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
                         applied_from_pnl += 1;
-                        self.adl_eligible_scratch[idx] = 0; // Consume winner (can't win again)
+                        self.adl_eligible_scratch[idx] = 0;
                         leftover -= 1;
                     }
-                    None => break, // No more eligible candidates
+                    None => {
+                        #[cfg(any(test, kani))]
+                        debug_assert!(false, "ADL leftover distribution ran out of eligible candidates");
+                        break;
+                    }
                 }
             }
 
