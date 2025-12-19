@@ -239,6 +239,18 @@ pub struct RiskEngine {
     pub warmup_insurance_reserved: u128,
 
     // ========================================
+    // ADL Scratch (production stack-safe)
+    // ========================================
+    /// Scratch: per-account remainders used by ADL largest-remainder distribution.
+    /// Stored in slab to avoid stack allocation in production.
+    /// Only meaningful for used accounts; others must be zeroed when not used.
+    pub adl_remainder_scratch: [u128; MAX_ACCOUNTS],
+
+    /// Scratch: per-account "eligible" bit for ADL remainder distribution.
+    /// 0 = not eligible / already consumed; 1 = eligible.
+    pub adl_eligible_scratch: [u8; MAX_ACCOUNTS],
+
+    // ========================================
     // Slab Management
     // ========================================
     /// Occupancy bitmap (4096 bits = 64 u64 words)
@@ -457,6 +469,8 @@ impl RiskEngine {
             warmed_pos_total: 0,
             warmed_neg_total: 0,
             warmup_insurance_reserved: 0,
+            adl_remainder_scratch: [0; MAX_ACCOUNTS],
+            adl_eligible_scratch: [0; MAX_ACCOUNTS],
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1275,7 +1289,7 @@ impl RiskEngine {
     /// Must be called after any operation that changes insurance or W+/W-.
     /// Formula: reserved = min(max(W+ - W-, 0), raw_spendable)
     #[inline]
-    fn recompute_warmup_insurance_reserved(&mut self) {
+    pub fn recompute_warmup_insurance_reserved(&mut self) {
         let raw = self.insurance_spendable_raw();
         let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
         self.warmup_insurance_reserved = core::cmp::min(needed, raw);
@@ -1355,19 +1369,23 @@ impl RiskEngine {
 
         // 3.7 Hard invariant assert in debug/kani
         // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
-        // Also: reserved ≤ raw_spendable (can't reserve more than exists)
+        // Reserved equality: reserved == min(max(W+ - W-, 0), raw)
         // Also: insurance >= floor + reserved (reserved portion protected)
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
             let floor = self.params.risk_reduction_threshold;
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmed_pos_total <= self.warmed_neg_total.saturating_add(raw),
                 "Warmup budget invariant violated: W+ > W- + raw"
             );
             debug_assert!(
-                self.warmup_insurance_reserved <= raw,
-                "Reserved exceeds raw spendable"
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved equality invariant violated: {} != {}",
+                self.warmup_insurance_reserved,
+                expect_reserved
             );
             debug_assert!(
                 self.insurance_fund.balance >= floor.saturating_add(self.warmup_insurance_reserved),
@@ -1419,13 +1437,20 @@ impl RiskEngine {
         let mut applied_from_pnl: u128 = 0;
 
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            // Pass 2: Apply floor(proportional) haircuts and track remainders
-            // We use scan-per-leftover-unit to avoid large stack arrays in production.
-            //
-            // For test/kani builds we can use arrays for efficiency; in production we scan.
-            #[cfg(any(test, kani, feature = "fuzz"))]
-            let mut rems: [u128; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+            // Step 1: Zero scratch arrays for used accounts only (via bitmap)
+            for block in 0..BITMAP_WORDS {
+                let mut w = self.used[block];
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block * 64 + bit;
+                    w &= w - 1;
 
+                    self.adl_remainder_scratch[idx] = 0;
+                    self.adl_eligible_scratch[idx] = 0;
+                }
+            }
+
+            // Step 2: Compute floor haircuts, store remainders, mark eligible
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
                 while w != 0 {
@@ -1446,96 +1471,50 @@ impl RiskEngine {
                                 self.accounts[idx].pnl.saturating_sub(haircut as i128);
                             applied_from_pnl += haircut;
 
-                            #[cfg(any(test, kani, feature = "fuzz"))]
-                            {
-                                rems[idx] = rem;
-                            }
-
-                            #[cfg(not(any(test, kani, feature = "fuzz")))]
-                            {
-                                let _ = rem; // suppress unused warning in production
-                            }
+                            // Store remainder and mark eligible if rem > 0
+                            self.adl_remainder_scratch[idx] = rem;
+                            self.adl_eligible_scratch[idx] = if rem > 0 { 1 } else { 0 };
                         }
                     }
                 }
             }
 
-            // Distribute leftover units using largest-remainder method
-            let mut leftover = loss_to_socialize.saturating_sub(applied_from_pnl);
+            // Step 3: Distribute leftover using largest-remainder method
+            // Each account can receive at most +1 leftover (correct for largest-remainder)
+            let mut leftover = loss_to_socialize - applied_from_pnl;
 
-            #[cfg(any(test, kani, feature = "fuzz"))]
-            {
-                // Use cached remainders for efficiency in test builds
-                while leftover > 0 {
-                    // Find account with max remainder (ties: lowest idx)
-                    let mut best_idx: Option<usize> = None;
-                    let mut best_rem: u128 = 0;
+            while leftover > 0 {
+                // Find account with max remainder; ties: lowest idx wins
+                let mut best_idx: Option<usize> = None;
+                let mut best_rem: u128 = 0;
 
-                    for block in 0..BITMAP_WORDS {
-                        let mut w = self.used[block];
-                        while w != 0 {
-                            let bit = w.trailing_zeros() as usize;
-                            let idx = block * 64 + bit;
-                            w &= w - 1;
+                for block in 0..BITMAP_WORDS {
+                    let mut w = self.used[block];
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        let idx = block * 64 + bit;
+                        w &= w - 1;
 
-                            if rems[idx] > best_rem && self.accounts[idx].pnl > 0 {
-                                best_rem = rems[idx];
+                        // Only consider eligible accounts with positive PnL
+                        if self.adl_eligible_scratch[idx] == 1 && self.accounts[idx].pnl > 0 {
+                            let rem = self.adl_remainder_scratch[idx];
+                            // Prefer larger remainder; if equal, prefer smaller idx (ties)
+                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
+                                best_rem = rem;
                                 best_idx = Some(idx);
                             }
                         }
                     }
-
-                    match best_idx {
-                        Some(idx) => {
-                            self.accounts[idx].pnl =
-                                self.accounts[idx].pnl.saturating_sub(1);
-                            applied_from_pnl += 1;
-                            rems[idx] = 0; // Can't win again
-                            leftover -= 1;
-                        }
-                        None => break, // No more candidates
-                    }
                 }
-            }
 
-            #[cfg(not(any(test, kani, feature = "fuzz")))]
-            {
-                // Production: recompute remainder each iteration (no large arrays)
-                while leftover > 0 {
-                    let mut best_idx: Option<usize> = None;
-                    let mut best_rem: u128 = 0;
-
-                    for block in 0..BITMAP_WORDS {
-                        let mut w = self.used[block];
-                        while w != 0 {
-                            let bit = w.trailing_zeros() as usize;
-                            let idx = block * 64 + bit;
-                            w &= w - 1;
-
-                            let account = &self.accounts[idx];
-                            if account.pnl > 0 {
-                                let unwrapped = self.compute_unwrapped_pnl(account);
-                                if unwrapped > 0 {
-                                    let numer = loss_to_socialize.saturating_mul(unwrapped);
-                                    let rem = numer % total_unwrapped;
-                                    if rem > best_rem {
-                                        best_rem = rem;
-                                        best_idx = Some(idx);
-                                    }
-                                }
-                            }
-                        }
+                match best_idx {
+                    Some(idx) => {
+                        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                        applied_from_pnl += 1;
+                        self.adl_eligible_scratch[idx] = 0; // Consume winner (can't win again)
+                        leftover -= 1;
                     }
-
-                    match best_idx {
-                        Some(idx) => {
-                            self.accounts[idx].pnl =
-                                self.accounts[idx].pnl.saturating_sub(1);
-                            applied_from_pnl += 1;
-                            leftover -= 1;
-                        }
-                        None => break,
-                    }
+                    None => break, // No more eligible candidates
                 }
             }
         }
@@ -1550,7 +1529,6 @@ impl RiskEngine {
         );
 
         // Handle remaining loss with insurance fund (respecting floor)
-        // BUG FIX: Use applied_from_pnl, not loss_to_socialize
         let remaining_loss = total_loss.saturating_sub(applied_from_pnl);
 
         if remaining_loss > 0 {
@@ -1576,6 +1554,18 @@ impl RiskEngine {
 
         // Recompute reserved since insurance may have changed
         self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in apply_adl"
+            );
+        }
 
         Ok(())
     }
@@ -1701,6 +1691,18 @@ impl RiskEngine {
 
         // Recompute reserved after all operations (insurance may have changed)
         self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in panic_settle_all"
+            );
+        }
 
         Ok(())
     }
@@ -1834,6 +1836,18 @@ impl RiskEngine {
         // Recompute reserved after all operations (W- and insurance may have changed)
         self.recompute_warmup_insurance_reserved();
 
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in force_realize_losses"
+            );
+        }
+
         Ok(())
     }
 
@@ -1857,6 +1871,18 @@ impl RiskEngine {
             // Recompute reserved after insurance increase
             self.recompute_warmup_insurance_reserved();
 
+            // Assert reserved equality invariant in test/kani
+            #[cfg(any(test, kani))]
+            {
+                let raw = self.insurance_spendable_raw();
+                let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+                let expect_reserved = core::cmp::min(needed, raw);
+                debug_assert!(
+                    self.warmup_insurance_reserved == expect_reserved,
+                    "Reserved invariant violated in top_up_insurance_fund (loss branch)"
+                );
+            }
+
             // Exit risk-reduction-only mode if loss is fully covered and above threshold
             let was_in_mode = self.risk_reduction_only;
             self.exit_risk_reduction_only_mode_if_safe();
@@ -1871,6 +1897,18 @@ impl RiskEngine {
 
             // Recompute reserved after insurance increase
             self.recompute_warmup_insurance_reserved();
+
+            // Assert reserved equality invariant in test/kani
+            #[cfg(any(test, kani))]
+            {
+                let raw = self.insurance_spendable_raw();
+                let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+                let expect_reserved = core::cmp::min(needed, raw);
+                debug_assert!(
+                    self.warmup_insurance_reserved == expect_reserved,
+                    "Reserved invariant violated in top_up_insurance_fund (no-loss branch)"
+                );
+            }
 
             // Check if we can exit risk-reduction mode (may have been triggered by threshold, not loss)
             let was_in_mode = self.risk_reduction_only;

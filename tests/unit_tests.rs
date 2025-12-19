@@ -4166,3 +4166,190 @@ fn test_unwrapped_definition() {
 
     assert_conserved(&engine);
 }
+
+// ============================================================================
+// ADL LARGEST-REMAINDER TESTS
+// ============================================================================
+
+/// Test 1: ADL exactness - sum of haircuts equals min(total_loss, total_unwrapped) exactly
+#[test]
+fn test_adl_largest_remainder_exactness() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Create LP to take the opposite side of PnL (zero-sum)
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    engine.deposit(lp, 10_000).unwrap();
+
+    // Create 3 accounts with uneven unwrapped PnL amounts
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(2).unwrap();
+    let user3 = engine.add_user(3).unwrap();
+
+    // Deposit capital
+    engine.deposit(user1, 1000).unwrap();
+    engine.deposit(user2, 1000).unwrap();
+    engine.deposit(user3, 1000).unwrap();
+
+    // Assign uneven positive PnL (unwrapped since no warmup yet)
+    // Total = 100 + 200 + 300 = 600
+    // Zero-sum: LP takes the opposite side
+    engine.accounts[user1 as usize].pnl = 100;
+    engine.accounts[user2 as usize].pnl = 200;
+    engine.accounts[user3 as usize].pnl = 300;
+    engine.accounts[lp as usize].pnl = -600; // LP loses what users gain
+
+    assert_conserved(&engine);
+
+    // Record initial PnLs
+    let initial_pnl1 = engine.accounts[user1 as usize].pnl;
+    let initial_pnl2 = engine.accounts[user2 as usize].pnl;
+    let initial_pnl3 = engine.accounts[user3 as usize].pnl;
+    let total_initial_pnl = initial_pnl1 + initial_pnl2 + initial_pnl3;
+
+    // Apply ADL with a loss that requires remainder distribution
+    // Using 250 ensures we get fractional haircuts: 250/600 * 100 = 41.66..., etc.
+    let total_loss: u128 = 250;
+    engine.apply_adl(total_loss).unwrap();
+
+    // Calculate total haircut applied
+    let final_pnl1 = engine.accounts[user1 as usize].pnl;
+    let final_pnl2 = engine.accounts[user2 as usize].pnl;
+    let final_pnl3 = engine.accounts[user3 as usize].pnl;
+    let total_final_pnl = final_pnl1 + final_pnl2 + final_pnl3;
+
+    let total_haircut = (total_initial_pnl - total_final_pnl) as u128;
+
+    // Verify exact equality: total haircut == min(total_loss, total_unwrapped)
+    let total_unwrapped = 600u128; // All PnL is unwrapped (no warmup)
+    let expected_haircut = core::cmp::min(total_loss, total_unwrapped);
+
+    assert_eq!(
+        total_haircut, expected_haircut,
+        "ADL exactness: total haircut {} != expected {}",
+        total_haircut, expected_haircut
+    );
+}
+
+/// Test 2: ADL tie-break determinism - lower index wins when remainders are equal
+#[test]
+fn test_adl_tiebreak_lower_idx_wins() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Create LP to take the opposite side of PnL (zero-sum)
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    engine.deposit(lp, 10_000).unwrap();
+
+    // Create 2 accounts with identical unwrapped PnL
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(2).unwrap();
+
+    engine.deposit(user1, 1000).unwrap();
+    engine.deposit(user2, 1000).unwrap();
+
+    // Same PnL = same remainder for any proportional calculation
+    // Zero-sum: LP takes the opposite side
+    engine.accounts[user1 as usize].pnl = 100;
+    engine.accounts[user2 as usize].pnl = 100;
+    engine.accounts[lp as usize].pnl = -200; // LP loses what users gain
+
+    assert_conserved(&engine);
+
+    // Record initial PnLs
+    let initial_pnl1 = engine.accounts[user1 as usize].pnl;
+    let initial_pnl2 = engine.accounts[user2 as usize].pnl;
+
+    // Loss of 1: exactly 1 unit to distribute as remainder (since 1/200 < 1 per account)
+    // Both accounts have remainder = 1*100 % 200 = 100, so they tie
+    // Lower index (user1) should receive the +1 haircut
+    let total_loss: u128 = 1;
+    engine.apply_adl(total_loss).unwrap();
+
+    let final_pnl1 = engine.accounts[user1 as usize].pnl;
+    let final_pnl2 = engine.accounts[user2 as usize].pnl;
+
+    let haircut1 = initial_pnl1 - final_pnl1;
+    let haircut2 = initial_pnl2 - final_pnl2;
+
+    // Lower index should get the leftover
+    assert_eq!(haircut1, 1, "Lower index (user1) should get the +1 haircut");
+    assert_eq!(haircut2, 0, "Higher index (user2) should get 0");
+}
+
+/// Test 3: Reserved equality invariant - reserved == min(max(W+ - W-, 0), raw)
+#[test]
+fn test_reserved_equality_invariant() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 100; // I_min = 100
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Add accounts and set up state
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user = engine.add_user(1).unwrap();
+
+    // Set insurance to 500 (via direct manipulation for test purposes)
+    engine.insurance_fund.balance = 500;
+    engine.vault = 500; // Keep conservation
+
+    engine.deposit(lp, 10_000).unwrap();
+    engine.deposit(user, 1_000).unwrap();
+
+    // Create warmed positive PnL by manually setting W+ and W-
+    // Simulate: user warmed 200 in positive PnL, LP paid 50 in losses
+    engine.warmed_pos_total = 200;
+    engine.warmed_neg_total = 50;
+
+    // Call recompute
+    engine.recompute_warmup_insurance_reserved();
+
+    // Verify formula: reserved = min(max(W+ - W-, 0), raw_spendable)
+    // raw_spendable = max(0, I - I_min) = max(0, 500 - 100) = 400
+    // needed = W+ - W- = 200 - 50 = 150
+    // expected_reserved = min(150, 400) = 150
+    let raw = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    let needed = engine
+        .warmed_pos_total
+        .saturating_sub(engine.warmed_neg_total);
+    let expected = core::cmp::min(needed, raw);
+
+    assert_eq!(
+        engine.warmup_insurance_reserved, expected,
+        "Reserved should equal min(max(W+ - W-, 0), raw): {} != {}",
+        engine.warmup_insurance_reserved, expected
+    );
+
+    // Test edge case: W- > W+ (no reservation needed)
+    engine.warmed_pos_total = 50;
+    engine.warmed_neg_total = 200;
+    engine.recompute_warmup_insurance_reserved();
+
+    let needed2 = engine
+        .warmed_pos_total
+        .saturating_sub(engine.warmed_neg_total);
+    assert_eq!(needed2, 0, "Needed should be 0 when W- > W+");
+    assert_eq!(
+        engine.warmup_insurance_reserved, 0,
+        "Reserved should be 0 when W- > W+"
+    );
+
+    // Test edge case: insurance at floor (raw = 0)
+    engine.warmed_pos_total = 200;
+    engine.warmed_neg_total = 50;
+    engine.insurance_fund.balance = 100; // At floor
+    engine.recompute_warmup_insurance_reserved();
+
+    let raw3 = engine
+        .insurance_fund
+        .balance
+        .saturating_sub(engine.params.risk_reduction_threshold);
+    assert_eq!(raw3, 0, "raw_spendable should be 0 at floor");
+    assert_eq!(
+        engine.warmup_insurance_reserved, 0,
+        "Reserved should be 0 when at floor"
+    );
+}

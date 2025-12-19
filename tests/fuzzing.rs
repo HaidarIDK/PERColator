@@ -170,13 +170,17 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         raw_spendable
     );
 
-    // reserved <= raw_spendable
+    // Reserved equality invariant: reserved == min(max(W+ - W-, 0), raw)
+    let needed = engine
+        .warmed_pos_total
+        .saturating_sub(engine.warmed_neg_total);
+    let expected_reserved = core::cmp::min(needed, raw_spendable);
     assert!(
-        engine.warmup_insurance_reserved <= raw_spendable,
-        "{}: Reserved {} exceeds raw_spendable {}",
+        engine.warmup_insurance_reserved == expected_reserved,
+        "{}: Reserved equality violated: reserved={} != expected={}",
         context,
         engine.warmup_insurance_reserved,
-        raw_spendable
+        expected_reserved
     );
 
     // insurance_balance >= floor + reserved (with rounding tolerance)

@@ -2972,3 +2972,77 @@ fn proof_adl_exact_haircut_distribution() {
         "ADL must reduce total PnL by exactly the socialized loss"
     );
 }
+
+// ============================================================================
+// ADL Largest-Remainder + Reserved Equality Verification
+// ============================================================================
+
+/// Proof that ADL applies exact haircuts and maintains reserved equality invariant
+///
+/// This proof verifies:
+/// 1. applied_from_pnl == loss_to_socialize (via debug_assert in apply_adl)
+/// 2. reserved == min(max(W+ - W-, 0), raw) (via debug_assert in apply_adl)
+/// 3. conservation holds after ADL
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_adl_exactness_and_reserved_invariant() {
+    let mut engine = RiskEngine::new(test_params());
+    let user1 = engine.add_user(1).unwrap();
+    let user2 = engine.add_user(2).unwrap();
+    let user3 = engine.add_user(3).unwrap();
+
+    // Setup three accounts with positive PnL (unwrapped)
+    let pnl1: u128 = kani::any();
+    let pnl2: u128 = kani::any();
+    let pnl3: u128 = kani::any();
+    let loss: u128 = kani::any();
+
+    kani::assume(pnl1 > 0 && pnl1 < 500);
+    kani::assume(pnl2 > 0 && pnl2 < 500);
+    kani::assume(pnl3 > 0 && pnl3 < 500);
+    kani::assume(loss > 0 && loss < pnl1 + pnl2 + pnl3);
+
+    engine.accounts[user1 as usize].capital = 10_000;
+    engine.accounts[user1 as usize].pnl = pnl1 as i128;
+
+    engine.accounts[user2 as usize].capital = 10_000;
+    engine.accounts[user2 as usize].pnl = pnl2 as i128;
+
+    engine.accounts[user3 as usize].capital = 10_000;
+    engine.accounts[user3 as usize].pnl = pnl3 as i128;
+
+    engine.vault = 30_000 + pnl1 + pnl2 + pnl3;
+    engine.insurance_fund.balance = 1_000;
+
+    // Set some warmed positive total to test reserved computation
+    let warmed_pos: u128 = kani::any();
+    let warmed_neg: u128 = kani::any();
+    kani::assume(warmed_pos < 500);
+    kani::assume(warmed_neg < 500);
+    engine.warmed_pos_total = warmed_pos;
+    engine.warmed_neg_total = warmed_neg;
+
+    // Recompute reserved to start in valid state
+    engine.recompute_warmup_insurance_reserved();
+
+    // Apply ADL - debug_asserts inside will verify:
+    // 1. applied_from_pnl == loss_to_socialize
+    // 2. reserved == min(max(W+ - W-, 0), raw)
+    let _ = engine.apply_adl(loss);
+
+    // Additional explicit assertion for reserved equality
+    let raw = engine.insurance_spendable_raw();
+    let needed = engine.warmed_pos_total.saturating_sub(engine.warmed_neg_total);
+    let expected_reserved = core::cmp::min(needed, raw);
+    assert!(
+        engine.warmup_insurance_reserved == expected_reserved,
+        "Reserved equality invariant must hold after ADL"
+    );
+
+    // Conservation check
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after ADL"
+    );
+}
