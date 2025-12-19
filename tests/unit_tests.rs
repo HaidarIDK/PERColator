@@ -95,7 +95,7 @@ fn set_insurance(engine: &mut RiskEngine, new_balance: u128) {
     let old = engine.insurance_fund.balance;
     engine.insurance_fund.balance = new_balance;
     if new_balance >= old {
-        engine.vault += new_balance - old;
+        engine.vault = engine.vault.saturating_add(new_balance - old);
     } else {
         engine.vault = engine.vault.saturating_sub(old - new_balance);
     }
@@ -277,6 +277,8 @@ fn test_conservation_simple() {
 
     // PNL is zero-sum: user1 gains 500, user2 loses 500
     // (vault unchanged since this is internal redistribution)
+    assert_eq!(engine.accounts[user1 as usize].pnl, 0);
+    assert_eq!(engine.accounts[user2 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 500;
     engine.accounts[user2 as usize].pnl = -500;
     assert!(engine.check_conservation());
