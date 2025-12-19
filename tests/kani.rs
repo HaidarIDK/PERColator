@@ -629,8 +629,11 @@ fn funding_p2_never_touches_principal() {
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn funding_p3_zero_sum_between_opposite_positions() {
-    // P3: Funding is zero-sum when user and LP have opposite positions
+fn funding_p3_bounded_drift_between_opposite_positions() {
+    // P3: Funding has bounded drift when user and LP have opposite positions
+    // Note: With vault-favoring rounding (ceil when paying, trunc when receiving),
+    // funding is NOT exactly zero-sum. The vault keeps the rounding dust.
+    // This ensures one-sided conservation (vault >= expected).
 
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
@@ -661,12 +664,17 @@ fn funding_p3_zero_sum_between_opposite_positions() {
     let user_result = engine.touch_account(user_idx);
     let lp_result = engine.touch_account(lp_idx);
 
-    // If both settlements succeeded, check zero-sum
+    // If both settlements succeeded, check bounded drift
     if user_result.is_ok() && lp_result.is_ok() {
         let total_after = engine.accounts[user_idx as usize].pnl + engine.accounts[lp_idx as usize].pnl;
+        let change = total_after - total_before;
 
-        assert!(total_after == total_before,
-                "Funding must be zero-sum between opposite positions");
+        // Funding should not create value (vault keeps rounding dust)
+        assert!(change <= 0,
+                "Funding must not create value");
+        // Change should be bounded by rounding (at most -2 per account pair)
+        assert!(change >= -2,
+                "Funding drift must be bounded");
     }
 }
 

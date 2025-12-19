@@ -71,6 +71,19 @@ fn account_count(engine: &RiskEngine) -> usize {
     core::cmp::min(engine.params.max_accounts as usize, engine.accounts.len())
 }
 
+/// Compute funding payment with vault-favoring rounding.
+/// Round UP when account pays (raw > 0), truncate when account receives (raw < 0).
+/// This matches the engine's settle_account_funding and ensures one-sided conservation.
+#[inline]
+fn funding_payment(position: i128, delta_f: i128) -> i128 {
+    let raw = position.saturating_mul(delta_f);
+    if raw > 0 {
+        raw.saturating_add(999_999).saturating_div(1_000_000)
+    } else {
+        raw.saturating_div(1_000_000)
+    }
+}
+
 // ============================================================================
 // SECTION 2: GLOBAL INVARIANTS HELPER
 // ============================================================================
@@ -94,18 +107,12 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
                 let acc = &engine.accounts[i];
                 total_capital += acc.capital;
 
-                // Compute settled PNL (same formula as check_conservation)
-                // Round UP for positive payments (account pays), truncate for negative (account receives)
+                // Compute settled PNL using shared helper (matches engine rounding)
                 let mut settled_pnl = acc.pnl;
                 if acc.position_size != 0 {
                     let delta_f = global_index.saturating_sub(acc.funding_index);
                     if delta_f != 0 {
-                        let raw = acc.position_size.saturating_mul(delta_f);
-                        let payment = if raw > 0 {
-                            raw.saturating_add(999_999).saturating_div(1_000_000)
-                        } else {
-                            raw.saturating_div(1_000_000)
-                        };
+                        let payment = funding_payment(acc.position_size, delta_f);
                         settled_pnl = settled_pnl.saturating_sub(payment);
                     }
                 }
@@ -1358,18 +1365,12 @@ fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u
             let acc = &engine.accounts[i];
             total_capital += acc.capital;
 
-            // Compute settled PNL (same formula as check_conservation)
-            // Round UP for positive payments (account pays), truncate for negative (account receives)
+            // Compute settled PNL using shared helper (matches engine rounding)
             let mut settled_pnl = acc.pnl;
             if acc.position_size != 0 {
                 let delta_f = global_index.saturating_sub(acc.funding_index);
                 if delta_f != 0 {
-                    let raw = acc.position_size.saturating_mul(delta_f);
-                    let payment = if raw > 0 {
-                        raw.saturating_add(999_999).saturating_div(1_000_000)
-                    } else {
-                        raw.saturating_div(1_000_000)
-                    };
+                    let payment = funding_payment(acc.position_size, delta_f);
                     settled_pnl = settled_pnl.saturating_sub(payment);
                 }
             }
@@ -1750,14 +1751,12 @@ fn conservation_uses_settled_pnl_regression() {
             let acc = &engine.accounts[i];
             total_capital += acc.capital;
 
-            // Compute settled_pnl: pnl - position * (global_index - acc.funding_index) / 1e6
+            // Compute settled PNL using shared helper (matches engine rounding)
             let mut settled_pnl = acc.pnl;
             if acc.position_size != 0 {
                 let delta_f = global_index.saturating_sub(acc.funding_index);
                 if delta_f != 0 {
-                    let payment = acc.position_size
-                        .saturating_mul(delta_f)
-                        .saturating_div(1_000_000);
+                    let payment = funding_payment(acc.position_size, delta_f);
                     settled_pnl = settled_pnl.saturating_sub(payment);
                 }
             }
