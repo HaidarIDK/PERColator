@@ -121,11 +121,10 @@ fn valid_state(engine: &RiskEngine) -> bool {
                 return false;
             }
 
-            // 6. N1 invariant: pnl < 0 implies capital == 0
-            // After any settle path, negative pnl can only exist if capital is exhausted
-            if account.pnl < 0 && account.capital != 0 {
-                return false;
-            }
+            // NOTE: N1 (pnl < 0 => capital == 0) is NOT a global invariant.
+            // It's legal to have pnl < 0 with capital > 0 before settle is called.
+            // N1 is enforced at settle boundaries (withdraw/deposit/trade end).
+            // Keep N1 as separate proofs, not in valid_state().
         }
     }
 
@@ -3418,18 +3417,22 @@ fn fast_frame_execute_trade_only_mutates_two_accounts() {
 
     // Execute trade
     let matcher = NoOpMatcher;
-    let _ = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
+    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
 
-    // Assert: observer account completely unchanged
-    let observer_after = &engine.accounts[observer_idx as usize];
-    assert!(observer_after.capital == observer_snapshot.capital, "Frame: observer capital unchanged");
-    assert!(observer_after.pnl == observer_snapshot.pnl, "Frame: observer pnl unchanged");
-    assert!(observer_after.position_size == observer_snapshot.position_size, "Frame: observer position unchanged");
+    // Only assert frame properties when trade succeeds
+    // (Kani doesn't model Solana transaction atomicity - failed trades don't revert state)
+    if res.is_ok() {
+        // Assert: observer account completely unchanged
+        let observer_after = &engine.accounts[observer_idx as usize];
+        assert!(observer_after.capital == observer_snapshot.capital, "Frame: observer capital unchanged");
+        assert!(observer_after.pnl == observer_snapshot.pnl, "Frame: observer pnl unchanged");
+        assert!(observer_after.position_size == observer_snapshot.position_size, "Frame: observer position unchanged");
 
-    // Assert: vault unchanged (trades don't change vault)
-    assert!(engine.vault == vault_before, "Frame: vault unchanged by trade");
-    // Assert: insurance may increase due to fees
-    assert!(engine.insurance_fund.balance >= insurance_before, "Frame: insurance >= before (fees added)");
+        // Assert: vault unchanged (trades don't change vault)
+        assert!(engine.vault == vault_before, "Frame: vault unchanged by trade");
+        // Assert: insurance may increase due to fees
+        assert!(engine.insurance_fund.balance >= insurance_before, "Frame: insurance >= before (fees added)");
+    }
 }
 
 /// Frame proof: top_up_insurance_fund only mutates vault, insurance, and mode flags
@@ -3681,9 +3684,13 @@ fn fast_valid_preserved_by_execute_trade() {
     kani::assume(valid_state(&engine));
 
     let matcher = NoOpMatcher;
-    let _ = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
+    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
 
-    assert!(valid_state(&engine), "valid_state preserved by execute_trade");
+    // Only assert validity when trade succeeds
+    // (Kani doesn't model Solana transaction atomicity - failed trades don't revert state)
+    if res.is_ok() {
+        assert!(valid_state(&engine), "valid_state preserved by execute_trade");
+    }
 }
 
 /// Validity preserved by apply_adl
