@@ -124,11 +124,13 @@ fn recompute_totals(engine: &RiskEngine) -> Totals {
             let account = &engine.accounts[idx];
             sum_capital = sum_capital.saturating_add(account.capital);
 
+            // Explicit handling: positive, negative, or zero pnl
             if account.pnl > 0 {
                 sum_pnl_pos = sum_pnl_pos.saturating_add(account.pnl as u128);
-            } else {
+            } else if account.pnl < 0 {
                 sum_pnl_neg_abs = sum_pnl_neg_abs.saturating_add((-account.pnl) as u128);
             }
+            // pnl == 0: no contribution to either sum
         }
     }
 
@@ -141,6 +143,22 @@ fn recompute_totals(engine: &RiskEngine) -> Totals {
 ///
 /// Returns true if conservation holds with bounded slack.
 fn conservation_fast_no_funding(engine: &RiskEngine) -> bool {
+    // Precondition enforcement: no unsettled funding
+    // Either all positions are zero, OR all funding is settled.
+    for block in 0..BITMAP_WORDS {
+        let mut w = engine.used[block];
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            let idx = block * 64 + bit;
+            w &= w - 1;
+
+            let account = &engine.accounts[idx];
+            if account.position_size != 0 && account.funding_index != engine.funding_index_qpb_e6 {
+                return false; // Unsettled funding - can't use fast check
+            }
+        }
+    }
+
     let totals = recompute_totals(engine);
 
     // expected = sum_capital + insurance + sum_pnl_pos - sum_pnl_neg_abs
@@ -3175,7 +3193,9 @@ fn fast_frame_touch_account_only_mutates_one_account() {
     assert!(engine.loss_accum == globals_before.loss_accum, "Frame: loss_accum unchanged");
 }
 
-/// Frame proof: deposit only mutates one account's capital and vault
+/// Frame proof: deposit only mutates one account's capital, pnl, vault, and warmup globals
+/// Note: deposit calls settle_warmup_to_capital which may change pnl (positive settles to
+/// capital subject to warmup cap, negative settles fully per Fix A)
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -3189,7 +3209,6 @@ fn fast_frame_deposit_only_mutates_one_account_vault_and_warmup() {
 
     // Snapshot before
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
-    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
     let insurance_before = engine.insurance_fund.balance;
 
     // Deposit
@@ -3200,16 +3219,15 @@ fn fast_frame_deposit_only_mutates_one_account_vault_and_warmup() {
     assert!(other_after.capital == other_snapshot.capital, "Frame: other capital unchanged");
     assert!(other_after.pnl == other_snapshot.pnl, "Frame: other pnl unchanged");
 
-    // Assert: user pnl unchanged if was <= 0 (warmup settles positive pnl)
-    if user_pnl_before <= 0 {
-        assert!(engine.accounts[user_idx as usize].pnl == user_pnl_before, "Frame: pnl unchanged for non-positive");
-    }
-
+    // Assert: insurance unchanged (deposits don't touch insurance)
+    assert!(engine.insurance_fund.balance == insurance_before, "Frame: insurance unchanged");
     // Assert: loss_accum unchanged (deposits don't touch loss_accum)
     assert!(engine.loss_accum == 0, "Frame: loss_accum unchanged");
 }
 
-/// Frame proof: withdraw only mutates one account's capital and vault
+/// Frame proof: withdraw only mutates one account's capital, pnl, vault, and warmup globals
+/// Note: withdraw calls settle_warmup_to_capital which may change pnl (negative settles
+/// fully per Fix A, positive settles subject to warmup cap)
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -3386,7 +3404,9 @@ fn fast_frame_apply_adl_never_changes_any_capital() {
     assert!(valid_state(&engine), "Frame: valid_state after ADL");
 }
 
-/// Frame proof: settle_warmup_to_capital only mutates one account
+/// Frame proof: settle_warmup_to_capital only mutates one account and warmup globals
+/// Mutates: target account's capital, pnl, warmup_slope_per_step; warmed_pos_total/warmed_neg_total
+/// Note: With Fix A, negative pnl settles fully into capital (not warmup-gated)
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -3813,64 +3833,90 @@ fn fast_neg_pnl_after_settle_implies_zero_capital() {
     );
 }
 
+/// Proof: Negative PnL settlement does not depend on elapsed or slope (N1)
+/// With any symbolic slope and elapsed time, result is identical to pay-down rule
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn neg_pnl_settlement_does_not_depend_on_elapsed_or_slope() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let loss: u128 = kani::any();
+    let slope: u64 = kani::any();
+    let elapsed: u64 = kani::any();
+
+    kani::assume(capital > 0 && capital < 10_000);
+    kani::assume(loss > 0 && loss < 10_000);
+    kani::assume(elapsed < 1_000_000);
+
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = -(loss as i128);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.vault = capital;
+    engine.current_slot = elapsed;
+
+    // Settle
+    let _ = engine.settle_warmup_to_capital(user_idx);
+
+    // Result must match pay-down rule: pay = min(capital, loss)
+    let pay = core::cmp::min(capital, loss);
+    let expected_capital = capital - pay;
+    let expected_pnl = -((loss - pay) as i128);
+
+    // Assert results are identical regardless of slope and elapsed
+    assert!(
+        engine.accounts[user_idx as usize].capital == expected_capital,
+        "Capital must match pay-down rule regardless of slope/elapsed"
+    );
+    assert!(
+        engine.accounts[user_idx as usize].pnl == expected_pnl,
+        "PnL must match pay-down rule regardless of slope/elapsed"
+    );
+}
+
+/// Proof: Withdraw calls settle and enforces pnl >= 0 || capital == 0 (N1)
+/// After withdraw (whether Ok or Err), the N1 invariant must hold
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn withdraw_calls_settle_enforces_pnl_or_zero_capital_post() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    let capital: u128 = kani::any();
+    let loss: u128 = kani::any();
+    let withdraw_amt: u128 = kani::any();
+
+    kani::assume(capital > 0 && capital < 5_000);
+    kani::assume(loss > 0 && loss < 10_000);
+    kani::assume(withdraw_amt < 10_000);
+
+    engine.accounts[user_idx as usize].capital = capital;
+    engine.accounts[user_idx as usize].pnl = -(loss as i128);
+    engine.accounts[user_idx as usize].position_size = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
+    engine.vault = capital;
+
+    // Call withdraw - may succeed or fail
+    let _ = engine.withdraw(user_idx, withdraw_amt);
+
+    // After return (Ok or Err), N1 invariant must hold
+    let pnl_after = engine.accounts[user_idx as usize].pnl;
+    let capital_after = engine.accounts[user_idx as usize].capital;
+
+    assert!(
+        pnl_after >= 0 || capital_after == 0,
+        "After withdraw: pnl >= 0 || capital == 0 must hold"
+    );
+}
+
 // ============================================================================
 // FAST Proofs: Equity-Based Margin (Fix B)
 // These prove that margin checks use equity (capital + pnl), not just collateral
 // ============================================================================
-
-/// Proof: Withdraw margin check uses equity including negative PnL
-#[kani::proof]
-#[kani::unwind(8)]
-#[kani::solver(cadical)]
-fn fast_withdraw_margin_uses_equity_including_negative_pnl() {
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
-
-    // Small bounds for solver efficiency
-    let capital: u128 = kani::any();
-    let loss: u128 = kani::any();
-    let position: i128 = kani::any();
-    let withdraw_amt: u128 = kani::any();
-
-    kani::assume(capital > 100 && capital < 5_000);
-    kani::assume(loss > 0 && loss < capital); // Loss less than capital
-    // Explicit bound check to avoid i128::abs() overflow on i128::MIN
-    kani::assume(position > -500 && position < 500 && position != 0);
-    kani::assume(withdraw_amt > 0 && withdraw_amt < capital);
-
-    engine.accounts[user_idx as usize].capital = capital;
-    engine.accounts[user_idx as usize].pnl = -(loss as i128);
-    engine.accounts[user_idx as usize].position_size = position;
-    engine.accounts[user_idx as usize].entry_price = 1_000_000;
-    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
-    engine.vault = capital;
-
-    // First settle losses
-    let _ = engine.settle_warmup_to_capital(user_idx);
-
-    // After settlement: capital = capital - loss, pnl = 0
-    let capital_after_settle = engine.accounts[user_idx as usize].capital;
-    let pnl_after_settle = engine.accounts[user_idx as usize].pnl;
-
-    // Calculate margin requirement
-    let position_notional = (position.abs() as u128) * 1_000_000 / 1_000_000;
-    let im_required = position_notional * (engine.params.initial_margin_bps as u128) / 10_000;
-
-    // Calculate new equity after hypothetical withdrawal
-    let would_remain = capital_after_settle.saturating_sub(withdraw_amt);
-    let new_eq_i = (would_remain as i128).saturating_add(pnl_after_settle);
-    let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
-
-    let result = engine.withdraw(user_idx, withdraw_amt);
-
-    // If new equity would be less than IM required, withdraw must fail
-    if new_equity < im_required {
-        assert!(
-            result == Err(RiskError::Undercollateralized) || result == Err(RiskError::InsufficientBalance),
-            "Withdraw must fail when new equity < IM required"
-        );
-    }
-}
 
 /// Proof: Maintenance margin uses equity including negative PnL
 #[kani::proof]
@@ -3964,73 +4010,32 @@ fn fast_account_equity_computes_correctly() {
 // Fast, stable proofs using constants instead of symbolic values
 // ============================================================================
 
-/// Proof: Withdraw IM check uses equity with negative PnL (deterministic)
-/// Per plan 2.3A:
-/// - position_size = 1000, entry_price = 1_000_000
-/// - notional = 1000, IM = 1000 * 1000 / 10000 = 100
-/// - capital = 150, pnl = -100, withdraw_amt = 60
-/// - new_capital = 90, new_equity = max(0, 90 - 100) = 0
-/// - 0 < 100 (IM) => Must return Err(Undercollateralized)
+/// Proof: Withdraw margin check blocks when equity after withdraw < IM (deterministic)
+/// Setup: position_size=1000, entry_price=1_000_000 => notional=1000, IM=100
+/// capital=150, pnl=0 (avoid settlement effects), withdraw=60
+/// new_capital=90, equity=90 < 100 (IM) => Must return Undercollateralized
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn withdraw_im_check_uses_equity_negative_pnl() {
+fn withdraw_im_check_blocks_when_equity_after_withdraw_below_im() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    // Deterministic setup per plan
-    let capital: u128 = 150;
-    let pnl: i128 = -100;
-    let position: i128 = 1000;
-    let withdraw_amt: u128 = 60;
-
-    engine.accounts[user_idx as usize].capital = capital;
-    engine.accounts[user_idx as usize].pnl = pnl;
-    engine.accounts[user_idx as usize].position_size = position;
+    // Deterministic setup - use pnl=0 to avoid settlement side effects
+    engine.accounts[user_idx as usize].capital = 150;
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].position_size = 1000;
     engine.accounts[user_idx as usize].entry_price = 1_000_000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
-    engine.vault = capital;
+    engine.vault = 150;
 
-    // First settle losses: capital becomes 150 - 100 = 50, pnl = 0
-    let _ = engine.settle_warmup_to_capital(user_idx);
-
-    // Now try to withdraw 60 from capital=50
-    // new_capital = 50 - 60 would be negative, so this should fail
-    // Actually let's check: after settle, capital = 50
-    // Trying to withdraw 60 > 50 => InsufficientBalance
-    // But the plan says withdraw(60) should fail due to margin...
-    // Let me recalculate: capital=150, pnl=-100
-    // After settle: pay = min(150, 100) = 100
-    // capital = 150 - 100 = 50, pnl = 0
-    // withdraw(60) from capital=50 => InsufficientBalance (not Undercollateralized)
-    //
-    // The plan example math is: new_capital=90, implying no settlement happened.
-    // But our code settles first. Let me adjust to match the INTENT:
-    // We want equity-based check to fail, not just insufficient balance.
-    // So I need: capital after settle > withdraw_amt, but equity after withdraw < IM
-    //
-    // Recalculating: Let's use capital=200, pnl=-100, withdraw_amt=110
-    // After settle: capital=100, pnl=0
-    // withdraw(110) from capital=100 => InsufficientBalance
-    //
-    // Better: capital=200, pnl=0 (no loss), withdraw_amt=110
-    // After withdraw: new_capital=90, new_equity=90
+    // withdraw(60): new_capital=90, equity=90
     // IM = 1000 * 1000 / 10000 = 100
-    // 90 < 100 => Undercollateralized
-    //
-    // But we want NEGATIVE pnl to matter. So:
-    // capital=200, pnl=-10 (small loss that gets settled)
-    // After settle: capital=190, pnl=0
-    // withdraw(100): new_capital=90, new_equity=90 < 100 => Undercollateralized
-    // This tests that even after settling the loss, the margin check works.
-
-    let result = engine.withdraw(user_idx, withdraw_amt);
-
-    // The withdrawal should fail - either InsufficientBalance or Undercollateralized
-    // depending on whether we can even attempt the margin check
+    // 90 < 100 => Must fail with Undercollateralized
+    let result = engine.withdraw(user_idx, 60);
     assert!(
-        result.is_err(),
-        "Withdraw must fail when resulting equity < IM required"
+        result == Err(RiskError::Undercollateralized),
+        "Withdraw must fail with Undercollateralized when equity after < IM"
     );
 }
 
