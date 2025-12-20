@@ -1,157 +1,208 @@
 # Percolator: Risk Engine for Perpetual DEXs
 
-**Educational research project. NOT production ready. Do NOT use with real funds.**
+⚠️ **EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY** ⚠️  
+Do **NOT** use with real funds. Not audited. Experimental design.
 
-A formally verified risk engine for perpetual futures DEXs on Solana. Provides mathematical guarantees about fund safety under oracle manipulation.
+Percolator is a **formally verified risk engine** for perpetual futures DEXs on Solana.  
+It provides *provable guarantees* about fund safety, loss accounting, and margin correctness under adversarial conditions, including oracle manipulation.
+
+---
 
 ## Design
 
 ### Core Insight
 
-Oracle manipulation allows attackers to create artificial profits. PNL warmup ensures profits cannot be withdrawn instantly - they "warm up" over time T. During ADL events, unwrapped PNL is haircutted first, protecting deposited capital.
+Oracle manipulation allows attackers to create *temporary artificial profits*.  
+Percolator prevents these profits from being extracted by enforcing **PNL warmup**:
 
-**Guarantee:** If oracle manipulation lasts at most time T, and PNL requires time T to vest, then deposited capital is always withdrawable (subject to margin requirements).
+- Profits must **vest over time `T`** before becoming withdrawable capital.
+- Losses are **realized immediately** into capital.
+- During ADL (Auto-Deleveraging), **unwrapped (young) PNL is haircutted first**, protecting deposited capital.
 
-### Invariants
+**Guarantee (Qualified):**
+
+> If oracle manipulation lasts at most time `T`, and positive PNL requires time `T` to vest, then an account’s deposited capital is withdrawable **up to `max(0, capital + pnl)`**, subject to margin requirements and system solvency rules.
+
+This prevents attackers from minting profits via oracle manipulation and withdrawing them before corresponding losses are realized.
+
+---
+
+## Proven Invariants
 
 | ID | Property |
 |----|----------|
-| **I1** | Account capital is NEVER reduced by ADL or socialization |
-| **I2** | Conservation: `vault + loss_accum >= sum(capital) + sum(pnl) + insurance` |
-| **I4** | ADL haircuts unwrapped PNL before insurance fund |
+| **I1** | Account capital is **never** reduced by ADL or PNL socialization |
+| **I2** | Conservation (one-sided): `vault + loss_accum ≥ sum(capital) + sum(pnl) + insurance` |
+| **I4** | ADL haircuts **unwrapped (young) PNL first**, before insurance |
 | **I5** | PNL warmup is deterministic and monotonically increasing |
-| **I7** | Account isolation - operations on one account don't affect others |
-| **I8** | Insurance floor: insurance spending never reduces `insurance_fund.balance` below `I_min` |
-| **I9** | Threshold unstick: if `I <= I_min`, running the scan reduces total open interest to zero and forces loss payment from capital before ADL |
+| **I7** | Account isolation — operations on one account cannot affect others |
+| **I8** | **Equity-based margin**: `equity = max(0, capital + pnl)` is used consistently |
+| **N1** | Negative PNL is realized **immediately** into capital (not time-gated) |
 
-### Warmup Budget Invariant
+Additional audit-mandated properties verify:
+- Insurance floor protection
+- Reserved insurance safety
+- Idempotent warmup settlement
+- Bounded rounding slack
+- Correct behavior in withdrawal-only mode
 
-Warmup converts PnL into principal with sign:
-- **Positive PnL** can increase capital (profits become withdrawable principal)
-- **Negative PnL** can decrease capital (losses paid from principal, up to available capital)
+---
 
-Two related invariants govern warmup:
+## Warmup Budget System
 
-**Stable Invariant** (always holds):
-```
-W⁺ ≤ W⁻ + max(0, I - I_min)
-```
+Warmup converts PNL into capital with **sign-sensitive semantics**:
 
-**Budget Constraint** (limits future warmups):
-```
-Budget = W⁻ + S - W⁺ ≥ 0
-```
+- **Positive PNL** → may increase capital (profits vest gradually)
+- **Negative PNL** → immediately decreases capital (losses paid first)
 
-where `S = max(0, I - I_min) - R` (saturating) = unreserved spendable insurance.
+Two invariants govern this system.
 
-**Definitions:**
-- `W⁺` = `warmed_pos_total` - cumulative positive PnL converted to capital
-- `W⁻` = `warmed_neg_total` - cumulative negative PnL paid from capital
-- `I` = `insurance_fund.balance` - current insurance fund balance
-- `I_min` = `risk_reduction_threshold` - minimum insurance floor (protected)
-- `R` = `warmup_insurance_reserved` - derived value: `min(max(W⁺ - W⁻, 0), raw_spendable)` where `raw_spendable = max(0, I - I_min)`
-- `S` = `max(0, I - I_min) - R` (saturating) = unreserved spendable insurance
+### Stable Invariant (Always Holds)
 
-`R` is a derived value that automatically releases when losses are settled (W⁻ increases). ADL can only spend unreserved insurance (`S`), leaving reserved insurance intact to back warmed profits.
+W⁺ ≤ W⁻ + max(0, I − I_min)
 
-**Enforcement:** The invariant is enforced at the moment PnL would be converted into capital (warmup settlement), and losses are settled before gains.
+### Budget Constraint (Limits Future Warmups)
 
-**Rationale:** This invariant prevents "profit maturation / withdrawal" from outrunning realized loss payments. Without this constraint, an attacker could create artificial profits via oracle manipulation, wait for warmup, and withdraw before corresponding losses are paid - effectively extracting value that doesn't exist in the vault.
-
-### Key Operations
-
-**Trading:** Zero-sum PNL between user and LP. Fees go to insurance fund.
-
-**ADL (Auto-Deleveraging):** When losses must be covered:
-1. Haircut unwrapped (young) PNL proportionally across all accounts
-2. Spend only unreserved insurance above the protected floor: `max(0, I - I_min) - R`
-3. Any remaining loss is added to `loss_accum`
-
-**ADL Exact Haircut Property:** The sum of all haircuts equals exactly `loss_to_socialize` with no rounding dust. Integer division remainders are distributed deterministically (1 unit per account in index order).
-
-**Unwrapped PnL Definition:** For each account:
-```
-unwrapped_pnl = max(0, positive_pnl - reserved_pnl - withdrawable_pnl)
-```
-Where `withdrawable_pnl` is the portion that has completed warmup and can be withdrawn.
-
-Insurance spending is capped: the engine will only spend unreserved insurance above `I_min` to cover losses. Reserved insurance (`R`) backs already-warmed profits and cannot be spent by ADL.
-
-**Warmup Slope Invariant:** When `update_warmup_slope()` is called for an account with `positive_pnl > 0`, the slope is always `>= 1`. This prevents the "zero forever" bug where small PnL would never warm up.
-
-**Risk-Reduction-Only Mode:** Triggered when insurance fund at or below threshold:
-- Warmup frozen (no more PNL vests)
-- Risk-increasing trades blocked
-- Capital withdrawals and position closing allowed
-- Exit via insurance fund top-up
-
-**Forced Loss Realization Scan (Threshold Unstick):** When `insurance_fund.balance <= I_min`, the engine can perform an atomic scan that settles all open positions at the oracle price and forces negative PnL to be paid from capital (up to available capital). Any unpaid remainder is socialized via ADL (unwrapped first, then spendable insurance above floor, then `loss_accum`). This prevents profit maturation/withdrawal from outrunning realized loss payments.
-
-**Funding:** O(1) cumulative index pattern. Settled lazily before any account operation.
-
-### Conservation
-
-The conservation formula uses `>=` because negative rounding slippage leaves unclaimed value in the vault:
-
-```
-vault + loss_accum >= sum(capital) + sum(pnl) + insurance_fund.balance
-```
+Budget = W⁻ + S − W⁺ ≥ 0
 
 Where:
-- `loss_accum` tracks uncovered losses after consuming unwrapped PnL and all spendable insurance above the floor
 
-This holds because:
-- Deposits/withdrawals adjust both vault and capital
-- Trading PNL is zero-sum between counterparties
-- Fees transfer from user PNL to insurance (net zero)
-- ADL redistributes PNL (net zero)
-- Integer rounding always rounds down, leaving surplus in vault (safe: vault has at least what's owed)
+- `W⁺` = `warmed_pos_total` — cumulative positive PNL converted to capital  
+- `W⁻` = `warmed_neg_total` — cumulative negative PNL paid from capital  
+- `I` = `insurance_fund.balance`  
+- `I_min` = `risk_reduction_threshold` (protected insurance floor)  
+- `raw_spendable = max(0, I − I_min)`  
+- `R = min(max(W⁺ − W⁻, 0), raw_spendable)` — **reserved insurance**  
+- `S = raw_spendable − R` — **unreserved spendable insurance**
 
-## Running Tests
+**Key properties:**
 
-All tests require increased stack size due to fixed 4096-account array:
+- Reserved insurance `R` backs already-warmed profits.
+- ADL may only spend **unreserved insurance `S`**.
+- When losses are realized (`W⁻` increases), reserved insurance is automatically released.
 
-```bash
-# Unit tests (52 tests)
-RUST_MIN_STACK=16777216 cargo test
+**Enforcement:**  
+Losses are settled **before** profits are warmed. Warmup settlement clamps profits by the remaining budget, preventing profit maturation from outrunning loss realization.
 
-# Fuzzing (property-based tests)
-RUST_MIN_STACK=16777216 cargo test --features fuzz
+---
 
-# Formal verification (Kani)
-cargo install --locked kani-verifier
-cargo kani setup
-cargo kani
-```
+## Key Operations
+
+### Trading
+- Zero-sum PNL between user and LP
+- Trading fees are transferred to the insurance fund
+- Funding is settled lazily using a cumulative index
+
+### ADL (Auto-Deleveraging)
+When losses must be covered:
+1. Proportionally haircut **unwrapped (young) PNL**
+2. Spend only **unreserved insurance above the floor**
+3. Accumulate any remainder in `loss_accum`
+
+**Exactness Guarantee:**  
+The sum of all ADL haircuts equals `loss_to_socialize` exactly.  
+Remainders from integer division are distributed deterministically using a largest-remainder rule (ties broken by account index).
+
+### Risk-Reduction-Only Mode
+Triggered when insurance is at/below its configured threshold or uncovered losses exist:
+
+- Warmup is frozen (no profits vest)
+- Risk-increasing trades are blocked
+- Position reduction/closure is allowed
+- Capital withdrawals are allowed (subject to margin and solvency)
+- Exit occurs via insurance fund top-up
+
+### Forced Loss Realization (Threshold Unstick)
+When `insurance_fund.balance ≤ I_min`, the engine may run an atomic scan that:
+
+- Settles all open positions at the oracle price
+- Forces negative PNL to be paid from capital (up to available capital)
+- Socializes unpaid losses via ADL
+- Prevents profit maturation or withdrawal from outrunning realized losses
+
+### Panic Settlement
+An emergency instruction that:
+
+- Enters risk-reduction-only mode
+- Settles all positions at the oracle price
+- Clamps negative PNL to zero
+- Socializes losses via ADL
+- Converts remaining positive PNL via warmup under budget constraints
+
+---
+
+## Conservation
+
+Conservation is enforced **one-sided with bounded slack**:
+
+vault + loss_accum ≥ sum(capital) + sum(pnl) + insurance_fund.balance
+
+This accounts for:
+
+- Deposits/withdrawals (vault ↔ capital)
+- Trading PNL (zero-sum)
+- Fees (PNL → insurance)
+- ADL redistribution (PNL → losses)
+- Funding rounding (vault-favoring: ceil on payments, truncate on receipts)
+
+Any rounding dust is bounded by `MAX_ROUNDING_SLACK`.
+
+---
 
 ## Formal Verification
 
-Kani proofs verify all critical invariants via bounded model checking. See `tests/kani.rs` for proof harnesses.
+All critical invariants are verified using **Kani** (bounded model checking).  
+See `tests/kani.rs` for proof harnesses.
 
 ```bash
-# Run specific proof
+# Install Kani
+cargo install --locked kani-verifier
+cargo kani setup
+
+# Run all proofs
+cargo kani
+
+# Run a specific proof
 cargo kani --harness i1_adl_never_reduces_principal
-cargo kani --harness i2_deposit_preserves_conservation
-```
 
-Note: Kani proofs use 64-account arrays for tractability. Production uses 4096.
+Note:
+Kani builds use MAX_ACCOUNTS = 8 for tractability.
+Debug/fuzz builds use 64. Production builds use 4096.
 
-## Architecture
+⸻
 
-- `#![no_std]` - no heap allocation
-- `#![forbid(unsafe_code)]` - safe Rust only
-- Fixed 4096-account slab (~664 KB)
-- Bitmap for O(1) slot allocation
-- O(N) ADL via bitmap scan
+Testing
 
-## Limitations
+# Unit tests
+RUST_MIN_STACK=16777216 cargo test
 
-- No signature verification (external concern)
-- No oracle implementation (external concern)
-- No account deallocation
-- Maximum 4096 accounts
-- Not audited for production
+# Fuzzing (property-based)
+RUST_MIN_STACK=16777216 cargo test --features fuzz
 
-## License
+
+⸻
+
+Architecture
+	•	#![no_std]
+	•	#![forbid(unsafe_code)]
+	•	Fixed-size account slab (4096 accounts in production)
+	•	Bitmap-based allocation (O(1))
+	•	O(N) ADL via bitmap scan
+	•	Several-MB state footprint (~6MB in current layout)
+
+⸻
+
+Limitations
+	•	No signature verification (external concern)
+	•	No oracle implementation
+	•	No account deallocation
+	•	Maximum 4096 accounts
+	•	Not audited for production use
+
+⸻
+
+License
 
 Apache-2.0
+
+
