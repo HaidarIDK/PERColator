@@ -4681,3 +4681,100 @@ fn test_account_equity_computes_correctly() {
     };
     assert_eq!(engine.account_equity(&account_profit), 15_000);
 }
+
+// ============================================================================
+// N1 Invariant Tests: Negative PnL Settlement and Equity-Based Margin
+// ============================================================================
+
+/// Test: closed position + negative pnl blocks full withdrawal
+/// After loss settlement, can't withdraw the original capital amount
+#[test]
+fn test_withdraw_rejected_when_closed_and_negative_pnl_full_amount() {
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: deposit 1000, no position, negative pnl of -300
+    let _ = engine.deposit(user_idx, 1000);
+    engine.accounts[user_idx as usize].pnl = -300;
+    engine.accounts[user_idx as usize].position_size = 0;
+
+    // Try to withdraw full original amount (1000)
+    // After settle: capital = 1000 - 300 = 700, so withdrawing 1000 should fail
+    let result = engine.withdraw(user_idx, 1000);
+    assert_eq!(result, Err(RiskError::InsufficientBalance));
+
+    // Verify N1 invariant: after operation, pnl >= 0 || capital == 0
+    let account = &engine.accounts[user_idx as usize];
+    assert!(account.pnl >= 0 || account.capital == 0);
+}
+
+/// Test: remaining principal withdrawal succeeds after loss settlement
+/// After loss settlement, can still withdraw what remains
+#[test]
+fn test_withdraw_allows_remaining_principal_after_loss_settlement() {
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: deposit 1000, no position, negative pnl of -300
+    let _ = engine.deposit(user_idx, 1000);
+    engine.accounts[user_idx as usize].pnl = -300;
+    engine.accounts[user_idx as usize].position_size = 0;
+
+    // After settle: capital = 700. Withdraw 500 should succeed.
+    let result = engine.withdraw(user_idx, 500);
+    assert!(result.is_ok());
+
+    // Verify remaining capital
+    assert_eq!(engine.accounts[user_idx as usize].capital, 200);
+    // Verify N1 invariant
+    assert!(engine.accounts[user_idx as usize].pnl >= 0);
+}
+
+/// Test: insolvent account (loss > capital) blocks any withdrawal
+/// When loss exceeds capital, withdrawal is blocked
+#[test]
+fn test_insolvent_account_blocks_any_withdrawal() {
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: deposit 500, no position, negative pnl of -800 (exceeds capital)
+    let _ = engine.deposit(user_idx, 500);
+    engine.accounts[user_idx as usize].pnl = -800;
+    engine.accounts[user_idx as usize].position_size = 0;
+
+    // After settle: capital = 0, pnl = -300 (remaining loss)
+    // Any withdrawal should fail
+    let result = engine.withdraw(user_idx, 1);
+    assert_eq!(result, Err(RiskError::InsufficientBalance));
+
+    // Verify N1 invariant: pnl < 0 implies capital == 0
+    let account = &engine.accounts[user_idx as usize];
+    assert!(account.pnl >= 0 || account.capital == 0);
+}
+
+/// Test: deterministic IM withdrawal blocks when equity after < IM
+/// With position, equity-based margin check blocks undercollateralized withdrawal
+#[test]
+fn test_withdraw_im_check_blocks_when_equity_below_im() {
+    let mut engine = RiskEngine::new(default_params());
+    let user_idx = engine.add_user(1).unwrap();
+
+    // Setup: capital = 150, pnl = 0, position = 1000, entry_price = 1_000_000
+    // notional = 1000, IM = 1000 * 1000 / 10000 = 100
+    let _ = engine.deposit(user_idx, 150);
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].position_size = 1000;
+    engine.accounts[user_idx as usize].entry_price = 1_000_000;
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user_idx as usize].funding_index = 0;
+
+    // withdraw(60): new_capital = 90, equity = 90 < 100 (IM)
+    // Should fail with Undercollateralized
+    let result = engine.withdraw(user_idx, 60);
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+
+    // withdraw(40): new_capital = 110, equity = 110 > 100 (IM)
+    // Should succeed
+    let result2 = engine.withdraw(user_idx, 40);
+    assert!(result2.is_ok());
+}

@@ -359,10 +359,11 @@ fn clamp_pos_i128(val: i128) -> u128 {
     }
 }
 
+#[allow(dead_code)]
 #[inline]
 fn clamp_neg_i128(val: i128) -> u128 {
     if val < 0 {
-        (-val) as u128
+        neg_i128_to_u128(val)
     } else {
         0
     }
@@ -375,6 +376,33 @@ fn saturating_abs_i128(val: i128) -> i128 {
         i128::MAX
     } else {
         val.abs()
+    }
+}
+
+/// Safely convert negative i128 to u128 (handles i128::MIN without overflow)
+///
+/// For i128::MIN, -i128::MIN would overflow because i128::MAX + 1 cannot be represented.
+/// We handle this by returning (i128::MAX as u128) + 1 = 170141183460469231731687303715884105728.
+#[inline]
+fn neg_i128_to_u128(val: i128) -> u128 {
+    debug_assert!(val < 0, "neg_i128_to_u128 called with non-negative value");
+    if val == i128::MIN {
+        (i128::MAX as u128) + 1
+    } else {
+        (-val) as u128
+    }
+}
+
+/// Safely convert u128 to i128 with clamping (handles values > i128::MAX)
+///
+/// If x > i128::MAX, the cast would wrap to a negative value.
+/// We clamp to i128::MAX instead to preserve correctness of margin checks.
+#[inline]
+fn u128_to_i128_clamped(x: u128) -> i128 {
+    if x > i128::MAX as u128 {
+        i128::MAX
+    } else {
+        x as i128
     }
 }
 
@@ -975,7 +1003,8 @@ impl RiskEngine {
         // Calculate new state after withdrawal
         // FIX B: Use equity (includes negative PnL) for margin checks
         let new_capital = sub_u128(account.capital, amount);
-        let new_eq_i = (new_capital as i128).saturating_add(account.pnl);
+        let cap_i = u128_to_i128_clamped(new_capital);
+        let new_eq_i = cap_i.saturating_add(account.pnl);
         let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
         // If account has position, must maintain initial margin
@@ -1021,7 +1050,8 @@ impl RiskEngine {
     /// FIX B: This includes negative PnL in margin calculations.
     #[inline]
     pub fn account_equity(&self, account: &Account) -> u128 {
-        let eq_i = (account.capital as i128).saturating_add(account.pnl);
+        let cap_i = u128_to_i128_clamped(account.capital);
+        let eq_i = cap_i.saturating_add(account.pnl);
         if eq_i > 0 { eq_i as u128 } else { 0 }
     }
 
@@ -1200,7 +1230,8 @@ impl RiskEngine {
         // Check user maintenance margin
         // FIX B: Use equity (includes negative PnL) for margin checks
         if new_user_position != 0 {
-            let user_eq_i = (user.capital as i128).saturating_add(new_user_pnl);
+            let user_cap_i = u128_to_i128_clamped(user.capital);
+            let user_eq_i = user_cap_i.saturating_add(new_user_pnl);
             let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
@@ -1216,7 +1247,8 @@ impl RiskEngine {
         // Check LP maintenance margin
         // FIX B: Use equity (includes negative PnL) for margin checks
         if new_lp_position != 0 {
-            let lp_eq_i = (lp.capital as i128).saturating_add(new_lp_pnl);
+            let lp_cap_i = u128_to_i128_clamped(lp.capital);
+            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl);
             let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
@@ -1368,7 +1400,7 @@ impl RiskEngine {
         // pay = min(capital, -pnl)
         let pnl = self.accounts[idx as usize].pnl;
         if pnl < 0 {
-            let need = (-pnl) as u128;
+            let need = neg_i128_to_u128(pnl);
             let capital = self.accounts[idx as usize].capital;
             let pay = core::cmp::min(need, capital);
 
@@ -1723,7 +1755,7 @@ impl RiskEngine {
                 // Clamp negative PNL and accumulate system loss
                 if account.pnl < 0 {
                     // Convert negative PNL to system loss
-                    let loss = (-account.pnl) as u128;
+                    let loss = neg_i128_to_u128(account.pnl);
                     total_loss = total_loss.saturating_add(loss);
                     account.pnl = 0;
                 }
@@ -1742,7 +1774,7 @@ impl RiskEngine {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
             // Vault has surplus funds - add to insurance to maintain conservation
-            let surplus = (-total_mark_pnl) as u128;
+            let surplus = neg_i128_to_u128(total_mark_pnl);
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
 
@@ -1865,7 +1897,7 @@ impl RiskEngine {
 
                 // Force settle losses only (not positive PnL)
                 if account.pnl < 0 {
-                    let need = (-account.pnl) as u128;
+                    let need = neg_i128_to_u128(account.pnl);
                     let pay = core::cmp::min(need, account.capital);
 
                     // Pay from capital
@@ -1901,7 +1933,7 @@ impl RiskEngine {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
             // Vault has surplus funds - add to insurance to maintain conservation
-            let surplus = (-total_mark_pnl) as u128;
+            let surplus = neg_i128_to_u128(total_mark_pnl);
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
 
@@ -2063,7 +2095,7 @@ impl RiskEngine {
         let expected = if net_pnl >= 0 {
             add_u128(base, net_pnl as u128)
         } else {
-            base.saturating_sub((-net_pnl) as u128)
+            base.saturating_sub(neg_i128_to_u128(net_pnl))
         };
 
         let actual = add_u128(self.vault, self.loss_accum);

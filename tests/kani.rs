@@ -49,6 +49,31 @@ fn test_params_with_floor() -> RiskParams {
 }
 
 // ============================================================================
+// Integer Safety Helpers (match percolator.rs implementations)
+// ============================================================================
+
+/// Safely convert negative i128 to u128 (handles i128::MIN without overflow)
+#[inline]
+fn neg_i128_to_u128(val: i128) -> u128 {
+    debug_assert!(val < 0, "neg_i128_to_u128 called with non-negative value");
+    if val == i128::MIN {
+        (i128::MAX as u128) + 1
+    } else {
+        (-val) as u128
+    }
+}
+
+/// Safely convert u128 to i128 with clamping (handles values > i128::MAX)
+#[inline]
+fn u128_to_i128_clamped(x: u128) -> i128 {
+    if x > i128::MAX as u128 {
+        i128::MAX
+    } else {
+        x as i128
+    }
+}
+
+// ============================================================================
 // Verification Prelude: State Validity and Fast Conservation Helpers
 // ============================================================================
 
@@ -95,6 +120,12 @@ fn valid_state(engine: &RiskEngine) -> bool {
             if account.reserved_pnl > pos_pnl {
                 return false;
             }
+
+            // 6. N1 invariant: pnl < 0 implies capital == 0
+            // After any settle path, negative pnl can only exist if capital is exhausted
+            if account.pnl < 0 && account.capital != 0 {
+                return false;
+            }
         }
     }
 
@@ -128,7 +159,7 @@ fn recompute_totals(engine: &RiskEngine) -> Totals {
             if account.pnl > 0 {
                 sum_pnl_pos = sum_pnl_pos.saturating_add(account.pnl as u128);
             } else if account.pnl < 0 {
-                sum_pnl_neg_abs = sum_pnl_neg_abs.saturating_add((-account.pnl) as u128);
+                sum_pnl_neg_abs = sum_pnl_neg_abs.saturating_add(neg_i128_to_u128(account.pnl));
             }
             // pnl == 0: no contribution to either sum
         }
@@ -141,7 +172,8 @@ fn recompute_totals(engine: &RiskEngine) -> Totals {
 /// PRECONDITION: All used accounts must have position_size == 0, OR
 /// all accounts must be funding-settled (funding_index == global funding_index).
 ///
-/// Returns true if conservation holds with bounded slack.
+/// Returns false if precondition violated (unsettled funding exists).
+/// Returns true if conservation holds with bounded slack, false otherwise.
 fn conservation_fast_no_funding(engine: &RiskEngine) -> bool {
     // Precondition enforcement: no unsettled funding
     // Either all positions are zero, OR all funding is settled.
@@ -2762,7 +2794,7 @@ fn proof_c1_conservation_bounded_slack_panic_settle() {
     let expected = if net_pnl >= 0 {
         base + (net_pnl as u128)
     } else {
-        base.saturating_sub((-net_pnl) as u128)
+        base.saturating_sub(neg_i128_to_u128(net_pnl))
     };
 
     let actual = engine.vault + engine.loss_accum;
@@ -2845,7 +2877,7 @@ fn proof_c1_conservation_bounded_slack_force_realize() {
     let expected = if net_pnl >= 0 {
         base + (net_pnl as u128)
     } else {
-        base.saturating_sub((-net_pnl) as u128)
+        base.saturating_sub(neg_i128_to_u128(net_pnl))
     };
 
     let actual = engine.vault + engine.loss_accum;
@@ -3209,7 +3241,9 @@ fn fast_frame_deposit_only_mutates_one_account_vault_and_warmup() {
 
     // Snapshot before
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
+    let vault_before = engine.vault;
     let insurance_before = engine.insurance_fund.balance;
+    let loss_accum_before = engine.loss_accum;
 
     // Deposit
     let _ = engine.deposit(user_idx, amount);
@@ -3219,10 +3253,12 @@ fn fast_frame_deposit_only_mutates_one_account_vault_and_warmup() {
     assert!(other_after.capital == other_snapshot.capital, "Frame: other capital unchanged");
     assert!(other_after.pnl == other_snapshot.pnl, "Frame: other pnl unchanged");
 
+    // Assert: vault increases by deposit amount
+    assert!(engine.vault == vault_before + amount, "Frame: vault increased by deposit");
     // Assert: insurance unchanged (deposits don't touch insurance)
     assert!(engine.insurance_fund.balance == insurance_before, "Frame: insurance unchanged");
     // Assert: loss_accum unchanged (deposits don't touch loss_accum)
-    assert!(engine.loss_accum == 0, "Frame: loss_accum unchanged");
+    assert!(engine.loss_accum == loss_accum_before, "Frame: loss_accum unchanged");
 }
 
 /// Frame proof: withdraw only mutates one account's capital, pnl, vault, and warmup globals
@@ -3263,6 +3299,7 @@ fn fast_frame_withdraw_only_mutates_one_account_vault_and_warmup() {
 }
 
 /// Frame proof: execute_trade only mutates two accounts (user and LP)
+/// Note: fees increase insurance_fund, not vault
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -3272,18 +3309,20 @@ fn fast_frame_execute_trade_only_mutates_two_accounts() {
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
     let observer_idx = engine.add_user(3).unwrap();
 
-    // Setup with sufficient capital
-    engine.accounts[user_idx as usize].capital = 100_000;
-    engine.accounts[lp_idx as usize].capital = 100_000;
-    engine.vault = 200_000;
+    // Setup with huge capital to avoid margin rejections with equity-based checks
+    engine.accounts[user_idx as usize].capital = 1_000_000;
+    engine.accounts[lp_idx as usize].capital = 1_000_000;
+    engine.vault = 2_000_000;
 
+    // Small delta to keep margin requirements low
     let delta: i128 = kani::any();
     kani::assume(delta != 0);
-    kani::assume(delta.abs() < 100);
+    kani::assume(delta.abs() < 10);
 
-    // Snapshot observer before
+    // Snapshot before
     let observer_snapshot = snapshot_account(&engine.accounts[observer_idx as usize]);
     let vault_before = engine.vault;
+    let insurance_before = engine.insurance_fund.balance;
 
     // Execute trade
     let matcher = NoOpMatcher;
@@ -3295,8 +3334,10 @@ fn fast_frame_execute_trade_only_mutates_two_accounts() {
     assert!(observer_after.pnl == observer_snapshot.pnl, "Frame: observer pnl unchanged");
     assert!(observer_after.position_size == observer_snapshot.position_size, "Frame: observer position unchanged");
 
-    // Assert: vault unchanged (no deposits/withdrawals from trades without fees)
-    // Note: With fees, vault may change due to fee collection
+    // Assert: vault unchanged (trades don't change vault)
+    assert!(engine.vault == vault_before, "Frame: vault unchanged by trade");
+    // Assert: insurance may increase due to fees
+    assert!(engine.insurance_fund.balance >= insurance_before, "Frame: insurance >= before (fees added)");
 }
 
 /// Frame proof: top_up_insurance_fund only mutates vault, insurance, and mode flags
@@ -3844,7 +3885,7 @@ fn neg_pnl_settlement_does_not_depend_on_elapsed_or_slope() {
 
     let capital: u128 = kani::any();
     let loss: u128 = kani::any();
-    let slope: u64 = kani::any();
+    let slope: u128 = kani::any();
     let elapsed: u64 = kani::any();
 
     kani::assume(capital > 0 && capital < 10_000);
@@ -3951,8 +3992,9 @@ fn fast_maintenance_margin_uses_equity_including_negative_pnl() {
 
     let oracle_price = 1_000_000u64;
 
-    // Calculate expected values
-    let eq_i = (capital as i128).saturating_add(pnl);
+    // Calculate expected values (using safe clamped conversion to match production)
+    let cap_i = u128_to_i128_clamped(capital);
+    let eq_i = cap_i.saturating_add(pnl);
     let equity = if eq_i > 0 { eq_i as u128 } else { 0 };
 
     let position_value = (position.abs() as u128) * (oracle_price as u128) / 1_000_000;
@@ -3998,8 +4040,9 @@ fn fast_account_equity_computes_correctly() {
 
     let equity = engine.account_equity(&account);
 
-    // Calculate expected
-    let eq_i = (capital as i128).saturating_add(pnl);
+    // Calculate expected (using safe clamped conversion to match production)
+    let cap_i = u128_to_i128_clamped(capital);
+    let eq_i = cap_i.saturating_add(pnl);
     let expected = if eq_i > 0 { eq_i as u128 } else { 0 };
 
     assert!(equity == expected, "account_equity must equal max(0, capital + pnl)");
@@ -4020,6 +4063,10 @@ fn fast_account_equity_computes_correctly() {
 fn withdraw_im_check_blocks_when_equity_after_withdraw_below_im() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
+
+    // Ensure funding is settled (no pnl changes from touch_account)
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user_idx as usize].funding_index = 0;
 
     // Deterministic setup - use pnl=0 to avoid settlement side effects
     engine.accounts[user_idx as usize].capital = 150;
