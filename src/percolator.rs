@@ -908,6 +908,26 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Settle funding for all accounts (Kani-specific helper for fast conservation proofs)
+    ///
+    /// This allows harnesses to settle funding before using the fast conservation check
+    /// (conservation_fast_no_funding) which assumes funding is already settled.
+    #[cfg(kani)]
+    pub fn settle_all_funding_for_kani(&mut self) -> Result<()> {
+        let global_index = self.funding_index_qpb_e6;
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
+            }
+        }
+        Ok(())
+    }
+
     // ========================================
     // Deposits and Withdrawals
     // ========================================
@@ -953,8 +973,10 @@ impl RiskEngine {
         }
 
         // Calculate new state after withdrawal
+        // FIX B: Use equity (includes negative PnL) for margin checks
         let new_capital = sub_u128(account.capital, amount);
-        let new_collateral = add_u128(new_capital, clamp_pos_i128(account.pnl));
+        let new_eq_i = (new_capital as i128).saturating_add(account.pnl);
+        let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
         // If account has position, must maintain initial margin
         if account.position_size != 0 {
@@ -966,7 +988,7 @@ impl RiskEngine {
             let initial_margin_required =
                 mul_u128(position_notional, self.params.initial_margin_bps as u128) / 10_000;
 
-            if new_collateral < initial_margin_required {
+            if new_equity < initial_margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -974,6 +996,13 @@ impl RiskEngine {
         // Commit the withdrawal
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
+
+        // Regression assert: after settle + withdraw, negative PnL should have been settled
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            self.accounts[idx as usize].pnl >= 0 || self.accounts[idx as usize].capital == 0,
+            "Withdraw: negative PnL must settle immediately"
+        );
 
         Ok(())
     }
@@ -983,13 +1012,23 @@ impl RiskEngine {
     // ========================================
 
     /// Calculate account's collateral (capital + positive PNL)
+    /// NOTE: This is the OLD collateral definition. For margin checks, use account_equity instead.
     pub fn account_collateral(&self, account: &Account) -> u128 {
         add_u128(account.capital, clamp_pos_i128(account.pnl))
     }
 
+    /// Calculate account's equity for margin checks: max(0, capital + pnl)
+    /// FIX B: This includes negative PnL in margin calculations.
+    #[inline]
+    pub fn account_equity(&self, account: &Account) -> u128 {
+        let eq_i = (account.capital as i128).saturating_add(account.pnl);
+        if eq_i > 0 { eq_i as u128 } else { 0 }
+    }
+
     /// Check if account is above maintenance margin
+    /// FIX B: Uses equity (includes negative PnL) instead of collateral
     pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
-        let collateral = self.account_collateral(account);
+        let equity = self.account_equity(account);
 
         // Calculate position value at current price
         let position_value = mul_u128(
@@ -1001,7 +1040,7 @@ impl RiskEngine {
         let margin_required =
             mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
 
-        collateral > margin_required
+        equity > margin_required
     }
 
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
@@ -1159,29 +1198,33 @@ impl RiskEngine {
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
         // Check user maintenance margin
+        // FIX B: Use equity (includes negative PnL) for margin checks
         if new_user_position != 0 {
-            let user_collateral = add_u128(user.capital, clamp_pos_i128(new_user_pnl));
+            let user_eq_i = (user.capital as i128).saturating_add(new_user_pnl);
+            let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if user_collateral <= margin_required {
+            if user_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
 
         // Check LP maintenance margin
+        // FIX B: Use equity (includes negative PnL) for margin checks
         if new_lp_position != 0 {
-            let lp_collateral = add_u128(lp.capital, clamp_pos_i128(new_lp_pnl));
+            let lp_eq_i = (lp.capital as i128).saturating_add(new_lp_pnl);
+            let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if lp_collateral <= margin_required {
+            if lp_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -1318,22 +1361,30 @@ impl RiskEngine {
         let started_at = self.accounts[idx as usize].warmup_started_at_slot;
         let elapsed = effective_slot.saturating_sub(started_at);
         let slope = self.accounts[idx as usize].warmup_slope_per_step;
-        let mut cap = mul_u128(slope, elapsed as u128);
+        let cap = mul_u128(slope, elapsed as u128);
 
-        // 3.2 Settle losses first (negative PnL → reduce capital)
+        // 3.2 Settle losses IMMEDIATELY (negative PnL → reduce capital)
+        // FIX A: Negative PnL is not time-gated by warmup slope - it settles fully and immediately.
+        // pay = min(capital, -pnl)
         let pnl = self.accounts[idx as usize].pnl;
         if pnl < 0 {
             let need = (-pnl) as u128;
             let capital = self.accounts[idx as usize].capital;
-            let x = core::cmp::min(cap, core::cmp::min(need, capital));
+            let pay = core::cmp::min(need, capital);
 
-            if x > 0 {
+            if pay > 0 {
                 self.accounts[idx as usize].pnl =
-                    self.accounts[idx as usize].pnl.saturating_add(x as i128);
-                self.accounts[idx as usize].capital = sub_u128(capital, x);
-                self.warmed_neg_total = add_u128(self.warmed_neg_total, x);
-                cap = cap.saturating_sub(x);
+                    self.accounts[idx as usize].pnl.saturating_add(pay as i128);
+                self.accounts[idx as usize].capital = sub_u128(capital, pay);
+                self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
             }
+
+            // After immediate settlement: pnl < 0 only if capital was exhausted
+            #[cfg(any(test, kani))]
+            debug_assert!(
+                self.accounts[idx as usize].pnl >= 0 || self.accounts[idx as usize].capital == 0,
+                "Negative PnL must settle immediately: pnl < 0 implies capital == 0"
+            );
         }
 
         // 3.3 Budget from losses (currently unused but documents the design)
