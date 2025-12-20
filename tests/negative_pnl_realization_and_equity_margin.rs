@@ -23,11 +23,12 @@ fn test_params() -> RiskParams {
 // Fix A: Negative PnL Immediate Settlement Tests
 // ============================================================================
 
-/// Test: Withdrawal rejected when losses exist, even if position is closed
-/// This is the repro of the bug: position_size = 0, capital = 10_000, pnl = -9_000
-/// withdraw(10_000) must fail because after loss settlement, capital is only 1_000
+/// Test 1 (Plan 4.1): Withdrawal rejected when position closed and negative PnL exists
+/// Setup: capital=10_000, pnl=-9_000, pos=0, slope=0, current_slot large, vault=10_000
+/// withdraw(10_000) must be Err(InsufficientBalance)
+/// State after: capital=1_000, pnl=0
 #[test]
-fn withdraw_rejected_when_losses_exist_even_if_position_closed() {
+fn withdraw_rejected_when_closed_and_negative_pnl() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
@@ -65,9 +66,10 @@ fn withdraw_rejected_when_losses_exist_even_if_position_closed() {
     );
 }
 
-/// Test: After loss realization, remaining principal can be withdrawn
+/// Test 2 (Plan 4.2): After loss realization, remaining principal can be withdrawn
+/// Same setup then withdraw(1_000) is ok
 #[test]
-fn withdraw_allows_only_remaining_principal_after_loss_realization() {
+fn withdraw_allows_remaining_principal_after_loss_realization() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
@@ -167,83 +169,107 @@ fn loss_exceeding_capital_leaves_negative_pnl() {
 // Fix B: Equity-Based Margin Tests
 // ============================================================================
 
-/// Test: Withdraw with open position respects negative PnL in equity calculation
+/// Test 3 (Plan 4.3): Withdraw with open position blocked due to equity
+/// Deterministic IM requirement scenario per plan 2.3A:
+/// - position_size = 1000, entry_price = 1_000_000
+/// - notional = 1000, IM = 1000 * 1000 / 10000 = 100
+/// - capital = 150, pnl = -100, vault = capital
+/// - After settle: capital = 50, pnl = 0
+/// - withdraw(60) > capital=50 => Err(InsufficientBalance)
+///
+/// Alternate test that checks margin: after settle, try withdraw(40)
+/// - new_capital = 10, new_equity = 10 < IM=100 => Err(Undercollateralized)
 #[test]
-fn withdraw_with_open_position_respects_negative_pnl_in_equity() {
+fn withdraw_open_position_blocks_due_to_equity() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(1).unwrap();
 
-    // Setup:
-    // capital = 10_000
-    // pnl = -9_000 (will be settled immediately to capital = 1_000)
-    // position_size = 1_000
-    // entry_price = 1_000_000 (1.0 in 1e6 scale)
-    // position_notional = 1_000 * 1_000_000 / 1_000_000 = 1_000
-    // initial_margin_required = 1_000 * 1000 / 10_000 = 100 (10%)
-    //
-    // After settle: capital = 1_000, pnl = 0, equity = 1_000
-    // Try to withdraw 950: new_capital = 50, new_equity = 50
-    // 50 < 100 (IM) => should fail
+    // Setup per plan:
+    // position_size = 1000, entry_price = 1_000_000
+    // notional = 1000, IM = 100
+    // capital = 150, pnl = -100
+    // After settle: capital = 50, pnl = 0, equity = 50
 
-    engine.accounts[user_idx as usize].capital = 10_000;
-    engine.accounts[user_idx as usize].pnl = -9_000;
+    engine.accounts[user_idx as usize].capital = 150;
+    engine.accounts[user_idx as usize].pnl = -100;
     engine.accounts[user_idx as usize].position_size = 1_000;
     engine.accounts[user_idx as usize].entry_price = 1_000_000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
-    engine.vault = 10_000;
+    engine.vault = 150;
 
-    // First settle to realize loss
-    engine.settle_warmup_to_capital(user_idx).unwrap();
-
-    // Now capital = 1_000, pnl = 0
-    assert_eq!(engine.accounts[user_idx as usize].capital, 1_000);
-
-    // Try to withdraw 950 - would leave 50 equity < 100 IM required
-    let result = engine.withdraw(user_idx, 950);
+    // withdraw(60) should fail - loss settles first, then balance check fails
+    let result = engine.withdraw(user_idx, 60);
     assert!(
-        result == Err(RiskError::Undercollateralized),
-        "Withdraw should fail due to insufficient equity for initial margin"
+        result == Err(RiskError::InsufficientBalance),
+        "withdraw(60) must fail: after settling 100 loss, capital=50 < 60"
     );
 
-    // Withdraw 900 should succeed (leaves 100 equity = 100 IM required)
-    let result = engine.withdraw(user_idx, 900);
+    // Now capital = 50, pnl = 0
+    assert_eq!(engine.accounts[user_idx as usize].capital, 50);
+    assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
+
+    // Try withdraw(40) - would leave 10 equity < 100 IM required
+    let result = engine.withdraw(user_idx, 40);
     assert!(
-        result.is_ok(),
-        "Withdraw should succeed when equity >= IM required"
+        result == Err(RiskError::Undercollateralized),
+        "withdraw(40) must fail: new_equity=10 < IM=100"
     );
 }
 
-/// Test: Maintenance margin check uses equity including negative PnL
+/// Test 4 (Plan 4.4): Maintenance margin uses equity
+/// Per plan 2.3B:
+/// - position_size = 1000, oracle_price = 1_000_000
+/// - position_value = 1000, MM = 1000 * 500 / 10000 = 50
+/// Case 1: capital = 40, pnl = 0 => equity = 40 < 50 => false
+/// Case 2: capital = 100, pnl = -60 => equity = 40 < 50 => false
 #[test]
-fn maintenance_margin_uses_equity_including_negative_pnl() {
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
+fn maintenance_margin_uses_equity() {
+    let engine = RiskEngine::new(test_params());
 
-    // Setup with enough capital but negative pnl that drops equity below MM
-    // capital = 1_000
-    // pnl = -900 (after settle: capital = 100, pnl = 0)
-    // position_size = 10_000
-    // oracle_price = 1_000_000 (1.0)
-    // position_value = 10_000 * 1_000_000 / 1_000_000 = 10_000
-    // MM required = 10_000 * 500 / 10_000 = 500 (5%)
-    // equity after settle = 100 < 500 => below MM
+    let oracle_price = 1_000_000u64;
 
-    engine.accounts[user_idx as usize].capital = 1_000;
-    engine.accounts[user_idx as usize].pnl = -900;
-    engine.accounts[user_idx as usize].position_size = 10_000;
-    engine.accounts[user_idx as usize].entry_price = 1_000_000;
-    engine.vault = 1_000;
+    // Case 1: capital = 40, pnl = 0
+    let account1 = Account {
+        kind: AccountKind::User,
+        account_id: 1,
+        capital: 40,
+        pnl: 0,
+        reserved_pnl: 0,
+        warmup_started_at_slot: 0,
+        warmup_slope_per_step: 0,
+        position_size: 1_000,
+        entry_price: 1_000_000,
+        funding_index: 0,
+        matcher_program: [0; 32],
+        matcher_context: [0; 32],
+    };
 
-    // First settle to realize loss
-    engine.settle_warmup_to_capital(user_idx).unwrap();
-
-    // Now check maintenance margin
-    let account = &engine.accounts[user_idx as usize];
-    let is_above_mm = engine.is_above_maintenance_margin(account, 1_000_000);
-
+    // equity = 40, MM = 50, 40 < 50 => not above MM
     assert!(
-        !is_above_mm,
-        "Should be below maintenance margin when equity (100) < MM required (500)"
+        !engine.is_above_maintenance_margin(&account1, oracle_price),
+        "Case 1: equity 40 < MM 50, should be below MM"
+    );
+
+    // Case 2: capital = 100, pnl = -60
+    let account2 = Account {
+        kind: AccountKind::User,
+        account_id: 2,
+        capital: 100,
+        pnl: -60,
+        reserved_pnl: 0,
+        warmup_started_at_slot: 0,
+        warmup_slope_per_step: 0,
+        position_size: 1_000,
+        entry_price: 1_000_000,
+        funding_index: 0,
+        matcher_program: [0; 32],
+        matcher_context: [0; 32],
+    };
+
+    // equity = max(0, 100 - 60) = 40, MM = 50, 40 < 50 => not above MM
+    assert!(
+        !engine.is_above_maintenance_margin(&account2, oracle_price),
+        "Case 2: equity 40 (100-60) < MM 50, should be below MM"
     );
 }
 
