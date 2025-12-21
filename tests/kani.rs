@@ -83,35 +83,44 @@ fn u128_to_i128_clamped(x: u128) -> i128 {
 }
 
 // ============================================================================
-// Security Goal Helpers
+// SECURITY GOAL: Bounded Net Extraction (attacker cannot drain beyond real resources)
 // ============================================================================
 
-/// Returns insurance balance above the protected floor (spendable for warmup)
+/// Track decreases in insurance above floor across a trace.
+/// Uses spendable_raw (insurance - floor, saturating at 0), which is exactly the
+/// portion that can ever be spent by ADL / warmup (floor is protected).
 #[inline]
-fn insurance_above_floor(engine: &RiskEngine) -> u128 {
-    engine.insurance_spendable_raw()
+fn track_spendable_insurance_delta(engine: &RiskEngine, prev_raw: &mut u128, spent: &mut u128) {
+    let raw_now = engine.insurance_spendable_raw();
+    if raw_now < *prev_raw {
+        *spent = spent.saturating_add(*prev_raw - raw_now);
+    }
+    *prev_raw = raw_now;
 }
 
-/// Settles warmup for an account and tracks any capital reduction as "loss paid"
-/// Attributes loss to attacker or others based on idx.
-fn settle_and_track_losses(
-    engine: &mut RiskEngine,
-    idx: u16,
-    attacker_idx: u16,
+/// Scan all used accounts and attribute any realized loss-payments from capital
+/// (capital decreases) to attacker vs others. This is conservative and catches
+/// any path that reduces capital (settle, force_realize, etc).
+fn scan_and_track_capital_decreases(
+    engine: &RiskEngine,
+    attacker: u16,
+    caps_before: &mut [u128; MAX_ACCOUNTS],
     attacker_loss_paid: &mut u128,
     others_loss_paid: &mut u128,
 ) {
-    let cap_before = engine.accounts[idx as usize].capital;
-    let _ = engine.settle_warmup_to_capital(idx);
-    let cap_after = engine.accounts[idx as usize].capital;
-
-    // If capital went down, that was a realized loss paid from capital.
-    if cap_after < cap_before {
-        let paid = cap_before - cap_after;
-        if idx == attacker_idx {
-            *attacker_loss_paid = attacker_loss_paid.saturating_add(paid);
-        } else {
-            *others_loss_paid = others_loss_paid.saturating_add(paid);
+    for i in 0..MAX_ACCOUNTS {
+        if engine.is_used(i) {
+            let cap_after = engine.accounts[i].capital;
+            let cap_before = caps_before[i];
+            if cap_after < cap_before {
+                let paid = cap_before - cap_after;
+                if i as u16 == attacker {
+                    *attacker_loss_paid = attacker_loss_paid.saturating_add(paid);
+                } else {
+                    *others_loss_paid = others_loss_paid.saturating_add(paid);
+                }
+            }
+            caps_before[i] = cap_after;
         }
     }
 }
@@ -4088,83 +4097,132 @@ fn neg_pnl_is_realized_immediately_by_settle() {
 }
 
 // ============================================================================
-// Security Goal: Bounded Net Extraction
+// Security Goal: Bounded Net Extraction (Sequence-Based Proof)
 // ============================================================================
 
-/// SECURITY GOAL HARNESS:
-/// No sequence of operations can let attacker withdraw net more than:
-///   (realized losses paid by other users) + (insurance above protected floor).
+/// SECURITY THEOREM (bounded, sequence-based):
+///
+/// For a bounded sequence of operations, attacker net withdrawals are bounded by:
+///   (losses paid from OTHER users' capital) + (spendable insurance ever available)
 ///
 /// Formally:
-///   W_A - D_A <= L_others + max(0, I - I_min)_end
-///
-/// Where:
-///   W_A = total successful withdrawals by attacker
-///   D_A = total deposits by attacker
-///   L_others = realized losses paid from capital by non-attacker accounts
-///   max(0, I - I_min)_end = insurance above floor at end of sequence
+///   net_out = W_A - D_A
+///   net_out <= L_others + (spent_spendable_insurance + spendable_insurance_end)
 ///
 /// Notes:
-/// - This is the correct statement for *this* engine because withdrawals are capital-only.
-/// - Attacker profits must first be converted into capital by settle_warmup_to_capital().
-/// - This proves the system cannot be drained beyond what other users have lost + insurance.
-/// - Uses a deterministic sequence (deposit → trade → settle → withdraw) with symbolic amounts.
+/// - This matches your design: users can only withdraw capital.
+/// - Profit extraction requires converting PnL into capital (settle_warmup_to_capital),
+///   which is globally budgeted by W- and insurance above floor.
+/// - We intentionally allow insurance to be spent during the trace; we account for it
+///   via (spent + end), not "end only".
 #[kani::proof]
-#[kani::unwind(20)]
+#[kani::unwind(32)]
 #[kani::solver(cadical)]
-fn security_goal_no_overwithdraw_beyond_other_losses_and_insurance() {
+fn security_goal_bounded_net_extraction_sequence() {
     let mut engine = RiskEngine::new(test_params_with_floor());
 
-    // Create participants
+    // Participants
     let attacker = engine.add_user(1).unwrap();
-    let lp = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let lp = engine.add_lp([1u8; 32], [2u8; 32], 1).unwrap();
 
-    // Seed capital (deterministic for solver efficiency)
-    let attacker_seed: u128 = 1_000;
-    let lp_seed: u128 = 5_000;
-
+    // Deterministic initial state (makes solver happier)
+    engine.current_slot = 10;
     engine.insurance_fund.balance = engine.params.risk_reduction_threshold + 1_000;
-    engine.vault = attacker_seed + lp_seed + engine.insurance_fund.balance;
-
-    engine.accounts[attacker as usize].capital = attacker_seed;
-    engine.accounts[lp as usize].capital = lp_seed;
+    engine.accounts[attacker as usize].capital = 10_000;
+    engine.accounts[lp as usize].capital = 50_000;
+    engine.vault = engine.accounts[attacker as usize].capital
+        + engine.accounts[lp as usize].capital
+        + engine.insurance_fund.balance;
 
     // Ghost accounting
     let mut dep_a: u128 = 0;
     let mut wdr_a: u128 = 0;
-    let mut loss_paid_a: u128 = 0;
-    let mut loss_paid_others: u128 = 0;
+    let mut attacker_loss_paid: u128 = 0;
+    let mut others_loss_paid: u128 = 0;
 
-    // Step 1: Attacker deposits (symbolic amount)
-    let deposit_amt: u128 = kani::any();
-    kani::assume(deposit_amt <= 100);
-    if engine.deposit(attacker, deposit_amt).is_ok() {
-        dep_a = dep_a.saturating_add(deposit_amt);
+    // Track capital decreases (loss realization) conservatively
+    let mut caps_before = [0u128; MAX_ACCOUNTS];
+    for i in 0..MAX_ACCOUNTS {
+        if engine.is_used(i) {
+            caps_before[i] = engine.accounts[i].capital;
+        }
     }
 
-    // Step 2: Trade between attacker and LP (symbolic delta)
-    let delta: i128 = kani::any();
-    kani::assume(delta != 0 && delta != i128::MIN && delta.abs() <= 10);
-    let _ = engine.execute_trade(&NoOpMatcher, lp, attacker, 1_000_000, delta);
+    // Track spendable insurance usage over time
+    let mut spendable_prev = engine.insurance_spendable_raw();
+    let mut spendable_spent_total: u128 = 0;
 
-    // Step 3: Settle warmup (realize any PnL to capital)
-    settle_and_track_losses(&mut engine, attacker, attacker, &mut loss_paid_a, &mut loss_paid_others);
-    settle_and_track_losses(&mut engine, lp, attacker, &mut loss_paid_a, &mut loss_paid_others);
+    // Bounded "sequence" (keep small for Kani tractability)
+    // With 2 steps and 5 operations: 5^2 = 25 paths
+    const STEPS: usize = 2;
 
-    // Step 4: Attacker withdraws (symbolic amount)
-    let withdraw_amt: u128 = kani::any();
-    kani::assume(withdraw_amt <= 2_000);
-    if engine.withdraw(attacker, withdraw_amt).is_ok() {
-        wdr_a = wdr_a.saturating_add(withdraw_amt);
+    for _ in 0..STEPS {
+        // Choose an operation (reduced set for tractability)
+        let op: u8 = kani::any();
+        let choice = op % 5;
+
+        match choice {
+            // 0: attacker deposit small
+            0 => {
+                let amt: u128 = kani::any();
+                kani::assume(amt <= 50);
+                if engine.deposit(attacker, amt).is_ok() {
+                    dep_a = dep_a.saturating_add(amt);
+                }
+            }
+
+            // 1: attacker withdraw (bounded)
+            1 => {
+                let amt: u128 = kani::any();
+                kani::assume(amt <= 500);
+                if engine.withdraw(attacker, amt).is_ok() {
+                    wdr_a = wdr_a.saturating_add(amt);
+                }
+            }
+
+            // 2: trade attacker vs LP (small position deltas)
+            2 => {
+                let delta: i128 = kani::any();
+                kani::assume(delta != 0 && delta != i128::MIN);
+                kani::assume(delta > -5 && delta < 5);
+                let _ = engine.execute_trade(&NoOpMatcher, lp, attacker, 1_000_000, delta);
+            }
+
+            // 3: settle warmup for attacker or LP
+            3 => {
+                let which: u8 = kani::any();
+                let who = if (which & 1) == 0 { attacker } else { lp };
+                let _ = engine.settle_warmup_to_capital(who);
+            }
+
+            // 4: apply ADL with small loss
+            _ => {
+                let loss: u128 = kani::any();
+                kani::assume(loss <= 20);
+                let _ = engine.apply_adl(loss);
+            }
+        }
+
+        // Track insurance spend deltas and realized loss payments
+        track_spendable_insurance_delta(&engine, &mut spendable_prev, &mut spendable_spent_total);
+        scan_and_track_capital_decreases(
+            &engine,
+            attacker,
+            &mut caps_before,
+            &mut attacker_loss_paid,
+            &mut others_loss_paid,
+        );
     }
 
     // Final bound:
-    // net_out <= (losses paid by others) + (insurance above floor at end)
+    // net_out <= losses_paid_by_others + (spendable_insurance_end + spendable_insurance_spent_total)
     let net_out = wdr_a.saturating_sub(dep_a);
-    let rhs = loss_paid_others.saturating_add(insurance_above_floor(&engine));
+    let rhs = others_loss_paid
+        .saturating_add(engine.insurance_spendable_raw())
+        .saturating_add(spendable_spent_total);
 
     assert!(
         net_out <= rhs,
-        "SECURITY GOAL FAILED: attacker net extraction exceeds others' realized losses + spendable insurance"
+        "SECURITY GOAL FAILED: attacker extracted more than others' realized losses + total spendable insurance"
     );
 }

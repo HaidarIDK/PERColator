@@ -520,7 +520,7 @@ impl RiskEngine {
     // Bitmap Helpers
     // ========================================
 
-    fn is_used(&self, idx: usize) -> bool {
+    pub fn is_used(&self, idx: usize) -> bool {
         let w = idx >> 6;
         let b = idx & 63;
         ((self.used[w] >> b) & 1) == 1
