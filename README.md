@@ -271,26 +271,28 @@ Proofs live in `tests/kani.rs` and cover:
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani
+```
 
-Notes
+## Notes
 	•	MAX_ACCOUNTS = 8 in Kani (tractability),
 	•	Debug/fuzz uses 64,
 	•	Production uses 4096.
 
-⸻
+---
 
-Testing
+## Testing
 
+```bash
 # Unit tests
 RUST_MIN_STACK=16777216 cargo test
 
 # Fuzzing
 RUST_MIN_STACK=16777216 cargo test --features fuzz
+```
 
+---
 
-⸻
-
-Architecture
+## Architecture
 	•	#![no_std]
 	•	#![forbid(unsafe_code)]
 	•	Fixed-size account slab (4096 accounts in production)
@@ -298,17 +300,17 @@ Architecture
 	•	O(N) ADL via bitmap scan
 	•	Several-MB state footprint (~6MB in current layout)
 
-⸻
+---
 
-Limitations
+## Limitations
 	•	No signature verification
 	•	No oracle implementation
 	•	No account deallocation
 	•	Maximum 4096 accounts
 	•	Not audited for production use
 
-⸻
+---
 
-License
+## License
 
 Apache-2.0
