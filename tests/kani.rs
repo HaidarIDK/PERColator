@@ -17,6 +17,15 @@
 //! check_conservation loops) are computationally expensive and may timeout.
 //! These are marked with SLOW_PROOF comments. Run individually with longer
 //! timeouts if needed: cargo kani --harness <name> --solver-timeout 600
+//!
+//! HISTORICAL NOTE:
+//! Several I10 "withdrawal haircut" proofs were intentionally removed.
+//! The engine no longer supports haircut-based withdrawals.
+//! Insolvency is handled via:
+//!   - equity-based blocking,
+//!   - risk-reduction-only mode,
+//!   - forced loss realization.
+//! See README.md for the current design rationale.
 
 #![cfg(kani)]
 
@@ -1135,65 +1144,6 @@ fn i10_risk_mode_triggers_at_floor() {
     }
 }
 
-/*
-// NOTE: Commented out - tests old withdrawal haircut logic which was removed
-// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn i10_fair_unwinding_constant_haircut_ratio() {
-    // All users receive the same haircut ratio regardless of withdrawal order
-
-    let mut engine = RiskEngine::new(test_params());
-
-    // Add two users with different principals
-    let user1 = engine.add_user(1).unwrap();
-    let user2 = engine.add_user(1).unwrap();
-
-    let principal1: u128 = kani::any();
-    let principal2: u128 = kani::any();
-    let loss: u128 = kani::any();
-
-    kani::assume(principal1 > 1_000 && principal1 < 10_000);
-    kani::assume(principal2 > 1_000 && principal2 < 10_000);
-    kani::assume(loss > 0 && loss < 5_000);
-
-    engine.accounts[user1 as usize].capital = principal1;
-    engine.accounts[user2 as usize].capital = principal2;
-
-    // Trigger withdrawal mode
-    engine.risk_reduction_only = true;
-    engine.loss_accum = loss;
-
-    let total_principal = principal1 + principal2;
-    kani::assume(total_principal > loss); // System not completely insolvent
-
-    // User1 withdraws
-    let withdraw1 = principal1 / 2;
-    let _ = engine.withdraw(user1, withdraw1);
-    let actual1 = principal1 - engine.accounts[user1 as usize].capital;
-
-    // User2 withdraws (after user1)
-    let withdraw2 = principal2 / 2;
-    let _ = engine.withdraw(user2, withdraw2);
-    let actual2 = principal2 - engine.accounts[user2 as usize].capital;
-
-    // Calculate expected haircut ratio
-    let available = total_principal - loss;
-
-    // Both should get the same ratio (within rounding)
-    // ratio1 = actual1 / withdraw1
-    // ratio2 = actual2 / withdraw2
-    // These should be equal
-    let ratio1_scaled = actual1 * withdraw2;
-    let ratio2_scaled = actual2 * withdraw1;
-
-    // Allow for 1 unit difference due to integer division
-    assert!(ratio1_scaled.abs_diff(ratio2_scaled) <= withdraw1 + withdraw2,
-            "I10: Both users must receive same haircut ratio (fair unwinding)");
-}
-*/
-
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -1282,74 +1232,6 @@ fn i10_withdrawal_mode_allows_position_decrease() {
     );
 }
 
-/*
-// NOTE: Commented out - tests old withdrawal haircut logic which was removed
-// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn i10_total_withdrawals_bounded_by_available() {
-    // Total withdrawals in withdrawal mode cannot exceed (total_principal - loss_accum)
-
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
-
-    let principal: u128 = kani::any();
-    let loss: u128 = kani::any();
-
-    kani::assume(principal > 1_000 && principal < 10_000);
-    kani::assume(loss > 0 && loss < principal);
-
-    engine.accounts[user_idx as usize].capital = principal;
-
-    // Enter withdrawal mode
-    engine.risk_reduction_only = true;
-    engine.loss_accum = loss;
-
-    let vault_before = principal; // Assume vault matches
-    engine.vault = vault_before;
-
-    // Try to withdraw everything
-    let _ = engine.withdraw(user_idx, principal);
-
-    let withdrawn = vault_before.saturating_sub(engine.vault);
-    let available = principal - loss;
-
-    assert!(withdrawn <= available,
-            "I10: Total withdrawals must not exceed available principal");
-}
-
-
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn i10_top_up_reduces_loss_accum() {
-    // Insurance fund top-ups directly reduce loss_accum
-
-    let mut engine = RiskEngine::new(test_params());
-
-    let loss: u128 = kani::any();
-    let top_up: u128 = kani::any();
-
-    kani::assume(loss > 0 && loss < 10_000);
-    kani::assume(top_up > 0 && top_up < 20_000);
-
-    engine.risk_reduction_only = true;
-    engine.loss_accum = loss;
-    engine.vault = 0;
-
-    let loss_before = engine.loss_accum;
-
-    let _ = engine.top_up_insurance_fund(top_up);
-
-    // Loss should decrease by min(top_up, loss_before)
-    let expected_reduction = if top_up > loss_before { loss_before } else { top_up };
-
-    assert!(engine.loss_accum == loss_before - expected_reduction,
-            "I10: Top-up must reduce loss_accum by contribution amount");
-}
-*/
-
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -1423,45 +1305,6 @@ fn fast_i10_withdrawal_mode_preserves_conservation() {
         "I10: Withdrawal mode must preserve conservation"
     );
 }
-
-/*
-// NOTE: Commented out - tests old withdrawal haircut logic which was removed
-// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn i10_withdrawal_tracking_accuracy() {
-    // withdrawal_mode_withdrawn should accurately track total withdrawn amounts
-
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
-
-    let principal: u128 = kani::any();
-    let loss: u128 = kani::any();
-
-    kani::assume(principal > 2_000 && principal < 10_000);
-    kani::assume(loss > 0 && loss < principal / 2);
-
-    engine.accounts[user_idx as usize].capital = principal;
-    engine.vault = principal;
-
-    // Enter withdrawal mode
-    engine.risk_reduction_only = true;
-    engine.loss_accum = loss;
-
-    let tracking_before = engine.withdrawal_mode_withdrawn;
-
-    // Withdraw some amount
-    let withdraw = principal / 3;
-    let _ = engine.withdraw(user_idx, withdraw);
-
-    let actual_withdrawn = principal - engine.accounts[user_idx as usize].capital;
-    let tracking_increase = engine.withdrawal_mode_withdrawn - tracking_before;
-
-    assert!(tracking_increase == actual_withdrawn,
-            "I10: withdrawal_mode_withdrawn must accurately track withdrawals");
-}
-*/
 
 // ============================================================================
 // LP-Specific Invariants (CRITICAL - Addresses Kani audit findings)
@@ -1553,130 +1396,6 @@ fn adl_is_proportional_for_user_and_lp() {
         "ADL: User and LP with equal unwrapped PNL must receive equal haircuts"
     );
 }
-
-/*
-// NOTE: Commented out - slow (384s) and triggers "eligible bit not consumed" debug_assert
-// with different pnl values. The equal-pnl case is covered by adl_is_proportional_for_user_and_lp.
-// The proportionality property is implicitly verified by exact haircut distribution proofs.
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn adl_proportionality_general() {
-    // General proportional ADL: Haircut percentages should be equal
-    // even when PNL amounts differ
-
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-
-    let user_pnl: i128 = kani::any();
-    let lp_pnl: i128 = kani::any();
-    let loss: u128 = kani::any();
-
-    // Very small bounds for tractability
-    kani::assume(user_pnl > 0 && user_pnl < 100);
-    kani::assume(lp_pnl > 0 && lp_pnl < 100);
-    kani::assume(loss > 0 && loss < 100);
-    kani::assume(user_pnl != lp_pnl); // Different amounts
-
-    engine.accounts[user_idx as usize].pnl = user_pnl;
-    engine.accounts[lp_idx as usize].pnl = lp_pnl;
-    engine.insurance_fund.balance = 10_000;
-
-    // No reserved PNL, no warmup (all unwrapped)
-    engine.accounts[user_idx as usize].reserved_pnl = 0;
-    engine.accounts[lp_idx as usize].reserved_pnl = 0;
-    engine.accounts[user_idx as usize].warmup_slope_per_step = 0;
-    engine.accounts[lp_idx as usize].warmup_slope_per_step = 0;
-
-    let user_pnl_before = engine.accounts[user_idx as usize].pnl;
-    let lp_pnl_before = engine.accounts[lp_idx as usize].pnl;
-
-    let _ = engine.apply_adl(loss);
-
-    let user_loss = (user_pnl_before - engine.accounts[user_idx as usize].pnl) as u128;
-    let lp_loss = (lp_pnl_before - engine.accounts[lp_idx as usize].pnl) as u128;
-
-    // Check proportionality using cross-multiplication to avoid division
-    // user_loss / user_pnl == lp_loss / lp_pnl
-    // <=> user_loss * lp_pnl == lp_loss * user_pnl
-
-    let cross1 = user_loss.saturating_mul(lp_pnl as u128);
-    let cross2 = lp_loss.saturating_mul(user_pnl as u128);
-
-    // Allow for rounding error of up to (total_pnl) due to integer division
-    let total_pnl = (user_pnl + lp_pnl) as u128;
-    let diff = if cross1 > cross2 {
-        cross1 - cross2
-    } else {
-        cross2 - cross1
-    };
-
-    assert!(
-        diff <= total_pnl,
-        "ADL: Haircuts must be proportional (within rounding tolerance)"
-    );
-}
-*/
-
-/*
-// NOTE: Commented out - tests old withdrawal haircut logic which was removed
-// The new withdrawal-only mode blocks ALL withdrawals instead of applying haircuts
-#[kani::proof]
-#[kani::unwind(10)]
-#[kani::solver(cadical)]
-fn i10_fair_unwinding_is_fair_for_lps() {
-    // I10 for LPs: Users and LPs receive the same haircut ratio in withdrawal-only mode
-    // This extends i10_fair_unwinding_constant_haircut_ratio to include LPs
-
-    let mut engine = RiskEngine::new(test_params());
-    let user_idx = engine.add_user(1).unwrap();
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-
-    let user_capital: u128 = kani::any();
-    let lp_capital: u128 = kani::any();
-    let loss: u128 = kani::any();
-
-    kani::assume(user_capital > 1_000 && user_capital < 10_000);
-    kani::assume(lp_capital > 1_000 && lp_capital < 10_000);
-    kani::assume(loss > 0 && loss < 5_000);
-
-    engine.accounts[user_idx as usize].capital = user_capital;
-    engine.accounts[lp_idx as usize].capital = lp_capital;
-    engine.vault = user_capital + lp_capital;
-
-    let total_capital = user_capital + lp_capital;
-    kani::assume(total_capital > loss); // Not completely insolvent
-
-    // Trigger withdrawal mode
-    engine.risk_reduction_only = true;
-    engine.loss_accum = loss;
-
-    // User withdraws half their capital
-    let withdraw_user = user_capital / 2;
-    let _ = engine.withdraw(user_idx, withdraw_user);
-    let actual_user = user_capital - engine.accounts[user_idx as usize].capital;
-
-    // LP withdraws half their capital
-    let withdraw_lp = lp_capital / 2;
-    let _ = engine.withdraw(lp_idx, withdraw_lp);
-    let actual_lp = lp_capital - engine.accounts[lp_idx as usize].capital;
-
-    // Both should get the same haircut ratio
-    // ratio_user = actual_user / withdraw_user
-    // ratio_lp = actual_lp / withdraw_lp
-    // These should be equal (within rounding)
-
-    let ratio_user_scaled = actual_user * withdraw_lp;
-    let ratio_lp_scaled = actual_lp * withdraw_user;
-
-    // Allow for rounding error
-    let tolerance = withdraw_user + withdraw_lp;
-
-    assert!(ratio_user_scaled.abs_diff(ratio_lp_scaled) <= tolerance,
-            "I10-LP: Users and LPs must receive same haircut ratio in withdrawal-only mode");
-}
-*/
 
 /// FAST: Multi-LP capital preservation under ADL
 /// FAST: Multiple LP capital preservation under ADL

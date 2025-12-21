@@ -3,22 +3,16 @@ Generated: 2025-12-21
 
 ## Summary
 
-- **Total Proofs**: 90
+- **Total Proofs**: 84
 - **Passed**: 83
 - **Failed**: 0
-- **Timeout**: 7 (commented out / deprecated)
+- **Timeout**: 1 (panic_settle_preserves_conservation - 660s limit)
 - **Slow (>60s)**: 7
 
 ### Proofs Needing Attention
 
-**Timeout** (commented out or deprecated):
-- `i10_fair_unwinding_constant_haircut_ratio` - commented out
-- `i10_total_withdrawals_bounded_by_available` - commented out
-- `i10_top_up_reduces_loss_accum` - commented out
-- `i10_withdrawal_tracking_accuracy` - commented out
-- `i10_fair_unwinding_is_fair_for_lps` - commented out
-- `adl_proportionality_general` - commented out (complex multi-account remainder issue)
-- `panic_settle_preserves_conservation` - 660s, TIMEOUT
+**Timeout**:
+- `panic_settle_preserves_conservation` - 660s, TIMEOUT (complex multi-account loop)
 
 **Slow (>60s)**:
 - `proof_ps5_panic_settle_no_insurance_minting` - 77s
@@ -57,18 +51,12 @@ Generated: 2025-12-21
 | funding_p5_bounded_operations_no_overflow | 1s | PASS |
 | funding_zero_position_no_change | 1s | PASS |
 | i10_risk_mode_triggers_at_floor | 8s | PASS |
-| i10_fair_unwinding_constant_haircut_ratio | 0s | TIMEOUT |
 | i10_withdrawal_mode_blocks_position_increase | 10s | PASS |
 | i10_withdrawal_mode_allows_position_decrease | 4s | PASS |
-| i10_total_withdrawals_bounded_by_available | 1s | TIMEOUT |
-| i10_top_up_reduces_loss_accum | 0s | TIMEOUT |
 | i10_top_up_exits_withdrawal_mode_when_loss_zero | 1s | PASS |
 | fast_i10_withdrawal_mode_preserves_conservation | 3s | PASS |
-| i10_withdrawal_tracking_accuracy | 0s | TIMEOUT |
 | i1_lp_adl_never_reduces_capital | 16s | PASS |
 | adl_is_proportional_for_user_and_lp | 22s | PASS |
-| adl_proportionality_general | 1s | TIMEOUT |
-| i10_fair_unwinding_is_fair_for_lps | 0s | TIMEOUT |
 | multiple_lps_adl_preserves_all_capitals | 27s | PASS |
 | mixed_users_and_lps_adl_preserves_all_capitals | 30s | PASS |
 | proof_warmup_frozen_when_paused | 7s | PASS |
