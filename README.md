@@ -15,17 +15,17 @@ Concretely, **no sequence of trades, oracle updates, funding accruals, warmups, 
 
 Formally, over any execution trace, define:
 
-- **NetOutₐ** = *Withdrawalsₐ − Depositsₐ*  
+- **NetOut_A** = *Withdrawals_A − Deposits_A*  
   (successful withdrawals minus deposits made by the attacker)
-- **LossPaid¬ₐ** = total **realized losses actually paid from capital** by non-attacker accounts  
+- **LossPaid_notA** = total **realized losses actually paid from capital** by non-attacker accounts  
   (i.e. decreases in other users’ `capital` caused by settlement or force-realize)
-- **SpendableInsuranceₑₙd** = `max(0, insurance_balance_end − insurance_floor)`
+- **SpendableInsurance_end** = `max(0, insurance_balance_end − insurance_floor)`
 
 Then the engine enforces the invariant:
 
-\[
-\mathbf{NetOutₐ} \;\le\; \mathbf{LossPaid¬ₐ} \;+\; \mathbf{SpendableInsuranceₑₙd}
-\]
+```
+NetOut_A ≤ LossPaid_notA + SpendableInsurance_end
+```
 
 #### Interpretation
 
@@ -33,7 +33,8 @@ Then the engine enforces the invariant:
   - other users have **actually paid losses from principal** (capital decreased), or
   - the system explicitly spends **insurance above the protected threshold**.
 - **Unrealized losses do not count**:
-  - A “mule” account being underwater does **not** increase `LossPaid¬ₐ` unless its capital is actually reduced.
+  - A “mule” account being underwater does **not** increase `LossPaid_notA`
+    unless its capital is actually reduced.
 - **Profits cannot outrun losses**:
   - Positive PNL must first be realized into capital via warmup,
   - and that realization is globally budgeted by paid losses and insurance.
@@ -42,20 +43,14 @@ Then the engine enforces the invariant:
 
 Equivalently, total attacker withdrawals satisfy:
 
-\[
-\mathbf{Withdrawalsₐ} \;\le\;
-\mathbf{Depositsₐ}
-\;+\;
-\mathbf{LossPaid¬ₐ}
-\;+\;
-\mathbf{SpendableInsuranceₑₙd}
-\]
+```
+Withdrawals_A ≤ Deposits_A + LossPaid_notA + SpendableInsurance_end
+```
 
 This means the attacker’s **realized withdrawable surplus** is strictly bounded by
 value that already exists on the exchange balance sheet.
 
 This property is enforced **by construction** and **proven with formal verification**
-
 via an end-to-end Kani security harness in `tests/kani.rs`.
 
 ---
