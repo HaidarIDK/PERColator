@@ -10,37 +10,37 @@ Its **primary design goal** is simple and strict:
 > **No user can ever withdraw more value than actually exists on the exchange balance sheet.**
 
 Concretely, **no sequence of trades, oracle updates, funding accruals, warmups, ADL events, or withdrawals can allow an attacker to extract more than**:
-- their realized equity,
-- plus realized losses paid by other users,
-- plus insurance fund balance **above the protected threshold**.
+- their **realized equity**,
+- plus **realized losses paid by other users**,
+- plus **insurance fund balance above the protected threshold**.
 
-This property is enforced by construction and proven with formal verification.
+This property is enforced **by construction** and **proven with formal verification**.
 
 ---
 
-## Primary Security Goal (What This Engine Guarantees)
+## Primary Security Goal
 
 ### Balance-Sheet Safety Guarantee
 
 At all times:
 
-> **Total user withdrawals are bounded by real assets held by the system.**
+> **Total withdrawals are bounded by real assets held by the system.**
 
-More precisely, a user can never withdraw more than:
+More precisely, for any account:
 
-max(0, capital + pnl)
+withdrawable ≤ max(0, capital + pnl)
 
 subject to:
-- margin requirements, and
+- equity-based margin requirements, and
 - global solvency constraints.
 
-They **cannot**:
-- withdraw principal while losses are still unpaid,
+Users **cannot**:
+- withdraw principal while losses are unpaid,
 - mature artificial profits faster than losses are realized,
 - drain insurance backing other users’ profits,
 - exploit funding, rounding, or timing gaps to mint value.
 
-This is the core invariant the entire design enforces.
+This invariant is the core property the entire engine enforces.
 
 ---
 
@@ -48,31 +48,32 @@ This is the core invariant the entire design enforces.
 
 ### The Fundamental Problem
 
-Oracle manipulation allows attackers to:
+Oracle manipulation enables a classic exploit pattern:
+
 1. Create artificial mark-to-market profits,
 2. Close positions,
 3. Withdraw funds before losses are realized.
 
-Most historical perp exploits follow this exact pattern.
+Most historical perpetual DEX exploits follow this sequence.
 
 ---
 
 ### Core Insight
 
-Percolator prevents this by enforcing **asymmetric treatment of profits and losses**:
+Percolator eliminates this attack surface by enforcing **asymmetric treatment of profits and losses**:
 
 - **Positive PNL is time-gated** (warmup).
 - **Negative PNL is realized immediately**.
 - **Profit maturation is globally budgeted** by realized losses and insurance.
 - **ADL only touches profits, never principal**.
 
-There is no timing window where profits can outrun losses.
+There is **no timing window** in which profits can outrun losses.
 
 ---
 
 ## How the Code Enforces the Primary Goal
 
-### 1. Immediate Loss Realization (Fix N1)
+### 1. Immediate Loss Realization (N1)
 
 Negative PNL is **never** time-gated.
 
@@ -82,31 +83,31 @@ pay = min(capital, -pnl)
 capital -= pay
 pnl += pay
 
-This enforces the invariant:
+This enforces:
 
 pnl < 0  ⇒  capital == 0
 
-**Consequence:**
+**Consequence**
 - A user cannot withdraw capital while losses exist.
-- “Young losses” do not exist — losses are paid immediately.
+- There are no “young losses” that can be delayed.
 
 **Formally proven:** `N1` proofs in `tests/kani.rs`.
 
 ---
 
-### 2. Equity-Based Withdrawals (Fix I8)
+### 2. Equity-Based Withdrawals (I8)
 
 Withdrawals are gated by **equity**, not nominal capital:
 
 equity = max(0, capital + pnl)
 
-Margin checks use equity everywhere:
-- Withdrawals
-- Trading
-- Liquidation thresholds
+Margin checks use equity consistently for:
+- withdrawals,
+- trading,
+- liquidation thresholds.
 
-**Consequence:**
-- Closing a position does not let a user ignore losses.
+**Consequence**
+- Closing a position does not allow losses to be ignored.
 - Negative PNL always reduces withdrawable value.
 
 **Formally proven:** `I8` proofs.
@@ -120,6 +121,10 @@ Positive PNL must vest over time `T` before becoming capital:
 - No instant withdrawal of profits.
 - Warmup is deterministic and monotonic.
 - Warmup can be frozen during insolvency.
+
+**Important:**  
+Users **never withdraw PNL directly**.  
+All withdrawals are from **capital**, and positive PNL must first be converted into capital via warmup settlement.
 
 **Formally proven:** `I5`.
 
@@ -136,23 +141,23 @@ Where:
 - `W⁻` = total losses paid from capital,
 - `I − I_min` = insurance above the protected floor.
 
-This ensures:
-- Profits can only mature if **someone has already paid losses** or **insurance explicitly backs them**.
-- Artificial profits cannot be withdrawn unless they are balance-sheet-backed.
+**Consequence**
+- Profits can only mature if losses have already been paid, or insurance explicitly backs them.
+- Artificial profits cannot be withdrawn unless balance-sheet-backed.
 
-**Formally proven:** Warmup budget proofs (`WB-A`, `WB-B`, `WB-C`, `WB-D`).
+**Formally proven:** `WB-A`, `WB-B`, `WB-C`, `WB-D`.
 
 ---
 
-### 5. Reserved Insurance (Protects Already-Warmed Profits)
+### 5. Reserved Insurance (Protects Matured Profits)
 
 Insurance above the floor is split into:
-- **Reserved insurance** (backs warmed profits),
-- **Unreserved insurance** (can be spent by ADL).
+- **Reserved insurance** (backs already-warmed profits),
+- **Unreserved insurance** (available to ADL).
 
 ADL **cannot** spend reserved insurance.
 
-**Consequence:**
+**Consequence**
 - One user cannot drain insurance backing another user’s matured profits.
 - Insurance use is ordered and safe.
 
@@ -188,14 +193,16 @@ This prevents:
 
 ### 8. Forced Loss Realization (Threshold Unstick)
 
-When insurance is at/below the floor, the engine can:
+When insurance reaches the protected floor, the engine can:
 - Close all positions at the oracle price,
 - Force losses to be paid from capital,
 - Socialize any unpaid remainder via ADL.
 
-This guarantees:
+**Guarantee**
 - Losses are realized before any further profit maturation.
 - The system cannot deadlock with “paper profits”.
+
+**Formally proven:** `force_realize` proofs.
 
 ---
 
@@ -208,11 +215,29 @@ vault + loss_accum ≥ sum(capital) + sum(pnl) + insurance
 - Funding rounds in a vault-favoring way.
 - Any rounding dust is bounded by `MAX_ROUNDING_SLACK`.
 
-**Consequence:**
-- The vault always has at least what accounts think they own.
+**Consequence**
+- The vault always has at least what accounts believe they own.
 - No minting via arithmetic edge cases.
 
 **Formally proven:** `I2`, `C1`, `C1b`.
+
+---
+
+### 10. Net Extraction Bound (End-to-End Security Property)
+
+For any bounded sequence of operations, define:
+
+net_extraction = withdrawals − deposits
+
+Then the engine enforces:
+
+net_extraction ≤ (realized losses paid by other users)
++ (insurance above protected threshold)
+
+This is the **formal statement** of the primary security goal:
+no attacker can extract value that is not balance-sheet-backed.
+
+**Formally proven:** end-to-end security harness in `tests/kani.rs`.
 
 ---
 
@@ -238,17 +263,17 @@ All properties above are **machine-checked** using **Kani**.
 Proofs live in `tests/kani.rs` and cover:
 - safety invariants,
 - frame conditions,
-- edge cases,
 - insolvency transitions,
-- rounding behavior.
+- rounding behavior,
+- bounded adversarial traces.
 
 ```bash
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani
 
-Notes:
-	•	MAX_ACCOUNTS = 8 in Kani for tractability,
+Notes
+	•	MAX_ACCOUNTS = 8 in Kani (tractability),
 	•	Debug/fuzz uses 64,
 	•	Production uses 4096.
 
@@ -287,5 +312,3 @@ Limitations
 License
 
 Apache-2.0
-
-
