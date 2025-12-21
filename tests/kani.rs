@@ -1835,37 +1835,38 @@ fn panic_settle_preserves_conservation() {
     // Call panic_settle_all
     let result = engine.panic_settle_all(price);
 
+    // Under deterministic bounds, panic_settle_all must succeed
+    assert!(result.is_ok(), "PS4: panic_settle_all must succeed under bounded inputs");
+
     // PROOF: Conservation via "expected vs actual" (no check_conservation() call)
-    if result.is_ok() {
-        // Compute expected value
-        let post_total_capital =
-            engine.accounts[user_idx as usize].capital + engine.accounts[lp_idx as usize].capital;
-        let user_pnl = engine.accounts[user_idx as usize].pnl;
-        let lp_pnl = engine.accounts[lp_idx as usize].pnl;
-        let net_pnl = user_pnl.saturating_add(lp_pnl);
+    // Compute expected value
+    let post_total_capital =
+        engine.accounts[user_idx as usize].capital + engine.accounts[lp_idx as usize].capital;
+    let user_pnl = engine.accounts[user_idx as usize].pnl;
+    let lp_pnl = engine.accounts[lp_idx as usize].pnl;
+    let net_pnl = user_pnl.saturating_add(lp_pnl);
 
-        let base = post_total_capital + engine.insurance_fund.balance;
-        let expected = if net_pnl >= 0 {
-            base + (net_pnl as u128)
-        } else {
-            base.saturating_sub(neg_i128_to_u128(net_pnl))
-        };
+    let base = post_total_capital + engine.insurance_fund.balance;
+    let expected = if net_pnl >= 0 {
+        base + (net_pnl as u128)
+    } else {
+        base.saturating_sub(neg_i128_to_u128(net_pnl))
+    };
 
-        let actual = engine.vault + engine.loss_accum;
+    let actual = engine.vault + engine.loss_accum;
 
-        // PS4a: No under-collateralization
-        assert!(
-            actual >= expected,
-            "PS4: Vault under-collateralized after panic_settle"
-        );
+    // PS4a: No under-collateralization
+    assert!(
+        actual >= expected,
+        "PS4: Vault under-collateralized after panic_settle"
+    );
 
-        // PS4b: Slack is bounded
-        let slack = actual - expected;
-        assert!(
-            slack <= MAX_ROUNDING_SLACK,
-            "PS4: Slack exceeds MAX_ROUNDING_SLACK after panic_settle"
-        );
-    }
+    // PS4b: Slack is bounded
+    let slack = actual - expected;
+    assert!(
+        slack <= MAX_ROUNDING_SLACK,
+        "PS4: Slack exceeds MAX_ROUNDING_SLACK after panic_settle"
+    );
 }
 
 // ============================================================================
