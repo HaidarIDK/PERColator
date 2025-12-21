@@ -9,18 +9,54 @@ Its **primary design goal** is simple and strict:
 
 > **No user can ever withdraw more value than actually exists on the exchange balance sheet.**
 
-Concretely, no sequence of trades, oracle updates, funding accruals, warmups, ADL events, panic settles, force-realize scans, or withdrawals can allow an attacker to extract net value that is not balance-sheet-backed.
-Formally, over any execution trace:
-- the attacker’s net withdrawals are bounded by
-their own deposits,
-- plus realized losses paid by other users,
-- plus the insurance fund balance above the protected threshold.
+### Balance-Sheet-Backed Net Extraction (Formal Security Claim)
 
-Equivalently:
+Concretely, **no sequence of trades, oracle updates, funding accruals, warmups, ADL events, panic settles, force-realize scans, or withdrawals can allow an attacker to extract net value that is not balance-sheet-backed**.
 
-The attacker’s realized withdrawable equity is strictly bounded by their deposits plus losses paid by others plus spendable insurance, and can never exceed this amount.
+Formally, over any execution trace, define:
 
-This property is enforced by construction and proven with formal verification.
+- **NetOutₐ** = *Withdrawalsₐ − Depositsₐ*  
+  (successful withdrawals minus deposits made by the attacker)
+- **LossPaid¬ₐ** = total **realized losses actually paid from capital** by non-attacker accounts  
+  (i.e. decreases in other users’ `capital` caused by settlement or force-realize)
+- **SpendableInsuranceₑₙd** = `max(0, insurance_balance_end − insurance_floor)`
+
+Then the engine enforces the invariant:
+
+\[
+\mathbf{NetOutₐ} \;\le\; \mathbf{LossPaid¬ₐ} \;+\; \mathbf{SpendableInsuranceₑₙd}
+\]
+
+#### Interpretation
+
+- The attacker can extract net value **only if**:
+  - other users have **actually paid losses from principal** (capital decreased), or
+  - the system explicitly spends **insurance above the protected threshold**.
+- **Unrealized losses do not count**:
+  - A “mule” account being underwater does **not** increase `LossPaid¬ₐ` unless its capital is actually reduced.
+- **Profits cannot outrun losses**:
+  - Positive PNL must first be realized into capital via warmup,
+  - and that realization is globally budgeted by paid losses and insurance.
+
+#### Equivalent Withdrawal Bound
+
+Equivalently, total attacker withdrawals satisfy:
+
+\[
+\mathbf{Withdrawalsₐ} \;\le\;
+\mathbf{Depositsₐ}
+\;+\;
+\mathbf{LossPaid¬ₐ}
+\;+\;
+\mathbf{SpendableInsuranceₑₙd}
+\]
+
+This means the attacker’s **realized withdrawable surplus** is strictly bounded by
+value that already exists on the exchange balance sheet.
+
+This property is enforced **by construction** and **proven with formal verification**
+
+via an end-to-end Kani security harness in `tests/kani.rs`.
 
 ---
 
