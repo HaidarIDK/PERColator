@@ -9,11 +9,12 @@ Its **primary design goal** is simple and strict:
 
 > **No user can ever withdraw more value than actually exists on the exchange balance sheet.**
 
-- Concretely, no sequence of trades, oracle updates, funding accruals, warmups, ADL events, panic settles, force-realize scans, or withdrawals can allow an attacker to extract net value that is not balance-sheet-backed. Formally, over any execution trace:
--- the attacker’s net withdrawals are bounded by
+Concretely, no sequence of trades, oracle updates, funding accruals, warmups, ADL events, panic settles, force-realize scans, or withdrawals can allow an attacker to extract net value that is not balance-sheet-backed.
+Formally, over any execution trace:
+- the attacker’s net withdrawals are bounded by
 their own deposits,
--- plus realized losses paid by other users,
--- plus the insurance fund balance above the protected threshold.
+- plus realized losses paid by other users,
+- plus the insurance fund balance above the protected threshold.
 
 Equivalently:
 
