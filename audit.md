@@ -4,15 +4,12 @@ Generated: 2025-12-21
 ## Summary
 
 - **Total Proofs**: 84
-- **Passed**: 83
+- **Passed**: 84
 - **Failed**: 0
-- **Timeout**: 1 (panic_settle_preserves_conservation - 660s limit)
+- **Timeout**: 0
 - **Slow (>60s)**: 7
 
 ### Proofs Needing Attention
-
-**Timeout**:
-- `panic_settle_preserves_conservation` - 660s, TIMEOUT (complex multi-account loop)
 
 **Slow (>60s)**:
 - `proof_ps5_panic_settle_no_insurance_minting` - 77s
@@ -65,7 +62,7 @@ Generated: 2025-12-21
 | panic_settle_closes_all_positions | 3s | PASS |
 | panic_settle_clamps_negative_pnl | 245s | PASS |
 | panic_settle_enters_risk_mode | 2s | PASS |
-| panic_settle_preserves_conservation | 660s | TIMEOUT |
+| panic_settle_preserves_conservation | 1s | PASS |
 | warmup_budget_a_invariant_holds_after_settlement | 2s | PASS |
 | warmup_budget_b_negative_settlement_no_increase_pos | 2s | PASS |
 | warmup_budget_c_positive_settlement_bounded_by_budget | 2s | PASS |
