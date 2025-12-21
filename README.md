@@ -9,8 +9,8 @@ Its **primary design goal** is simple and strict:
 
 > **No user can ever withdraw more value than actually exists on the exchange balance sheet.**
 
-Concretely, **no sequence of trades, oracle updates, funding accruals, warmups, ADL events, or withdrawals can allow an attacker to extract more than**:
-- their **realized equity**,
+Concretely, **no sequence of trades, oracle updates, funding accruals, warmups, ADL events, panic settles, force-realize scans, or withdrawals can allow an attacker to extract more than**:
+- their **realized equity** (i.e., what can actually become withdrawable capital),
 - plus **realized losses paid by other users**,
 - plus **insurance fund balance above the protected threshold**.
 
@@ -26,7 +26,7 @@ At all times:
 
 > **Total withdrawals are bounded by real assets held by the system.**
 
-More precisely, for any account:
+More precisely, for any account (after funding + warmup settlement):
 
 withdrawable ≤ max(0, capital + pnl)
 
@@ -62,9 +62,9 @@ Most historical perpetual DEX exploits follow this sequence.
 
 Percolator eliminates this attack surface by enforcing **asymmetric treatment of profits and losses**:
 
-- **Positive PNL is time-gated** (warmup).
-- **Negative PNL is realized immediately**.
-- **Profit maturation is globally budgeted** by realized losses and insurance.
+- **Positive PnL is time-gated** (warmup).
+- **Negative PnL is realized immediately**.
+- **Profit maturation is globally budgeted** by realized losses and insurance (above the floor).
 - **ADL only touches profits, never principal**.
 
 There is **no timing window** in which profits can outrun losses.
@@ -75,242 +75,246 @@ There is **no timing window** in which profits can outrun losses.
 
 ### 1. Immediate Loss Realization (N1)
 
-Negative PNL is **never** time-gated.
+Negative PnL is **never** time-gated.
 
 In `settle_warmup_to_capital`:
 
+```text
 pay = min(capital, -pnl)
 capital -= pay
 pnl += pay
+```
 
-This enforces:
+This enforces (at settle boundaries):
 
-pnl < 0  ⇒  capital == 0
+```pnl < 0  ⇒  capital == 0```
 
-**Consequence**
-- A user cannot withdraw capital while losses exist.
-- There are no “young losses” that can be delayed.
+Consequence
+ * A user cannot withdraw capital while losses exist.
+ * There are no “young losses” that can be delayed.
 
-**Formally proven:** `N1` proofs in `tests/kani.rs`.
+Formally proven: N1 proofs in tests/kani.rs.
 
 ---
 
-### 2. Equity-Based Withdrawals (I8)
+2. Equity-Based Withdrawals (I8)
 
-Withdrawals are gated by **equity**, not nominal capital:
+Withdrawals are gated by equity, not nominal capital:
 
 equity = max(0, capital + pnl)
 
 Margin checks use equity consistently for:
-- withdrawals,
-- trading,
-- liquidation thresholds.
+ * withdrawals,
+ * trading,
+ * liquidation thresholds.
 
-**Consequence**
-- Closing a position does not allow losses to be ignored.
-- Negative PNL always reduces withdrawable value.
+Consequence
+ * Closing a position does not allow losses to be ignored.
+ * Negative PnL always reduces withdrawable value.
 
-**Formally proven:** `I8` proofs.
-
----
-
-### 3. Profit Warmup (Time-Gating Artificial Gains)
-
-Positive PNL must vest over time `T` before becoming capital:
-
-- No instant withdrawal of profits.
-- Warmup is deterministic and monotonic.
-- Warmup can be frozen during insolvency.
-
-**Important:**  
-Users **never withdraw PNL directly**.  
-All withdrawals are from **capital**, and positive PNL must first be converted into capital via warmup settlement.
-
-**Formally proven:** `I5`.
+Formally proven: I8 proofs in tests/kani.rs.
 
 ---
 
-### 4. Global Warmup Budget (Prevents Profit Outrunning Losses)
+3. Profit Warmup (Time-Gating Artificial Gains)
+
+Positive PnL must vest over time T before becoming capital:
+ * No instant withdrawal of profits.
+ * Warmup is deterministic and monotonic.
+ * Warmup can be frozen during insolvency (risk-reduction-only mode).
+
+Important:
+Users never withdraw PnL directly.
+All withdrawals are from capital, and positive PnL must first be converted into capital via warmup settlement.
+
+Formally proven: I5 proofs in tests/kani.rs.
+
+---
+
+4. Global Warmup Budget (Prevents Profit Outrunning Losses)
 
 Profit conversion is globally constrained by:
 
 W⁺ ≤ W⁻ + max(0, I − I_min)
 
 Where:
-- `W⁺` = total profits converted to capital,
-- `W⁻` = total losses paid from capital,
-- `I − I_min` = insurance above the protected floor.
+ * W⁺ = total profits converted to capital,
+ * W⁻ = total losses paid from capital,
+ * I − I_min = insurance above the protected floor (insurance_spendable_raw()).
 
-**Consequence**
-- Profits can only mature if losses have already been paid, or insurance explicitly backs them.
-- Artificial profits cannot be withdrawn unless balance-sheet-backed.
+Consequence
+ * Profits can only mature if losses have already been paid, or insurance explicitly backs them.
+ * Artificial profits cannot be withdrawn unless balance-sheet-backed.
 
-**Formally proven:** `WB-A`, `WB-B`, `WB-C`, `WB-D`.
+Formally proven: WB-A, WB-B, WB-C, WB-D proofs in tests/kani.rs.
 
 ---
 
-### 5. Reserved Insurance (Protects Matured Profits)
+5. Reserved Insurance (Protects Matured Profits)
 
 Insurance above the floor is split into:
-- **Reserved insurance** (backs already-warmed profits),
-- **Unreserved insurance** (available to ADL).
+ * Reserved insurance (backs already-warmed profits),
+ * Unreserved insurance (available to ADL).
 
-ADL **cannot** spend reserved insurance.
+ADL cannot spend reserved insurance.
 
-**Consequence**
-- One user cannot drain insurance backing another user’s matured profits.
-- Insurance use is ordered and safe.
+Consequence
+ * One user cannot drain insurance backing another user’s matured profits.
+ * Insurance use is ordered and safe.
 
-**Formally proven:** `R1`, `R2`, `R3`.
+Formally proven: R1, R2, R3 proofs in tests/kani.rs.
 
 ---
 
-### 6. ADL Cannot Touch Principal (I1)
+6. ADL Cannot Touch Principal (I1)
 
 ADL:
-- Only haircuts **unwrapped (young) PNL**,
-- Never reduces `capital`.
+ * Only haircuts unwrapped (young) PnL,
+ * Never reduces capital.
 
 Even in extreme insolvency, principal is not socialized.
 
-**Formally proven:** `I1` (users and LPs).
+Formally proven: I1 proofs (users and LPs) in tests/kani.rs.
 
 ---
 
-### 7. Risk-Reduction-Only Mode (Closes Timing Windows)
+7. Risk-Reduction-Only Mode (Closes Timing Windows)
 
 When insurance is exhausted or losses are uncovered:
-- Warmup is frozen,
-- Risk-increasing trades are blocked,
-- Only position reduction and limited withdrawals are allowed.
+ * Warmup is frozen,
+ * Risk-increasing trades are blocked,
+ * Only position reduction and limited withdrawals are allowed.
 
 This prevents:
-- Waiting out warmup while the system is insolvent.
+ * Waiting out warmup while the system is insolvent.
 
-**Formally proven:** `I10` series.
+Formally proven: I10 series in tests/kani.rs.
 
 ---
 
-### 8. Forced Loss Realization (Threshold Unstick)
+8. Forced Loss Realization (Threshold Unstick)
 
 When insurance reaches the protected floor, the engine can:
-- Close all positions at the oracle price,
-- Force losses to be paid from capital,
-- Socialize any unpaid remainder via ADL.
+ * Close all positions at the oracle price,
+ * Force losses to be paid from capital,
+ * Socialize any unpaid remainder via ADL.
 
-**Guarantee**
-- Losses are realized before any further profit maturation.
-- The system cannot deadlock with “paper profits”.
+Guarantee
+ * Losses are realized before any further profit maturation.
+ * The system cannot deadlock with “paper profits”.
 
-**Formally proven:** `force_realize` proofs.
+Formally proven: force_realize / audit proofs in tests/kani.rs.
 
 ---
 
-### 9. Conservation with Bounded Slack (I2)
+9. Conservation with Bounded Slack (I2)
 
 Conservation is enforced one-sided:
 
 vault + loss_accum ≥ sum(capital) + sum(pnl) + insurance
 
-- Funding rounds in a vault-favoring way.
-- Any rounding dust is bounded by `MAX_ROUNDING_SLACK`.
+ * Funding rounds in a vault-favoring way.
+ * Any rounding dust is bounded by MAX_ROUNDING_SLACK.
 
-**Consequence**
-- The vault always has at least what accounts believe they own.
-- No minting via arithmetic edge cases.
+Consequence
+ * The vault always has at least what accounts believe they own.
+ * No minting via arithmetic edge cases.
 
-**Formally proven:** `I2`, `C1`, `C1b`.
+Formally proven: I2, C1, C1b proofs in tests/kani.rs.
 
 ---
 
-### 10. Net Extraction Bound (End-to-End Security Property)
+10. Net Extraction Bound (End-to-End Security Property)
 
 For any bounded sequence of operations, define:
 
 net_extraction = withdrawals − deposits
 
-Then the engine enforces:
+Then the engine enforces the end-to-end bound:
 
 net_extraction ≤ (realized losses paid by other users)
-+ (insurance above protected threshold)
+              + (insurance above protected threshold)
 
-This is the **formal statement** of the primary security goal:
+Implementation detail (important for correctness): insurance “above floor” is tracked as the
+total spendable insurance ever available over the trace (spent + remaining), not just the final balance.
+
+This is the formal statement of the primary security goal:
 no attacker can extract value that is not balance-sheet-backed.
 
-**Formally proven:** end-to-end security harness in `tests/kani.rs`.
+Formally proven: security_goal_bounded_net_extraction_sequence harness in tests/kani.rs.
 
 ---
 
-## Proven Invariants Summary
+Proven Invariants Summary
 
-| ID | What It Prevents |
-|----|------------------|
-| **I1** | ADL stealing principal |
-| **I2** | Minting or balance-sheet drift |
-| **I4** | Insurance being spent before profits |
-| **I5** | Time-based profit exploits |
-| **I8** | Ignoring losses via withdrawals |
-| **N1** | “Young losses” withdrawal exploit |
-| **R1–R3** | Draining insurance backing profits |
-| **I10** | Insolvency timing attacks |
+ID	What It Prevents
+I1	ADL stealing principal
+I2	Minting or balance-sheet drift
+I4	Insurance being spent before profits
+I5	Time-based profit exploits
+I8	Ignoring losses via withdrawals
+N1	“Young losses” withdrawal exploit
+R1–R3	Draining insurance backing profits
+I10	Insolvency timing attacks
+SEC	Net extraction beyond balance-sheet resources
+
 
 ---
 
-## Formal Verification
+Formal Verification
 
-All properties above are **machine-checked** using **Kani**.
+All properties above are machine-checked using Kani.
 
-Proofs live in `tests/kani.rs` and cover:
-- safety invariants,
-- frame conditions,
-- insolvency transitions,
-- rounding behavior,
-- bounded adversarial traces.
+Proofs live in tests/kani.rs and cover:
+ * safety invariants,
+ * frame conditions,
+ * insolvency transitions,
+ * rounding behavior,
+ * bounded adversarial traces.
 
-```bash
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani
-```
 
-## Notes
-* MAX_ACCOUNTS = 8 in Kani (tractability),
-* Debug/fuzz uses 64,
-* Production uses 4096.
+Notes
+ * MAX_ACCOUNTS = 8 in Kani (tractability)
+ * debug/fuzz uses 64
+ * production uses 4096
 
 ---
 
 ## Testing
 
-```bash
 # Unit tests
 RUST_MIN_STACK=16777216 cargo test
 
 # Fuzzing
 RUST_MIN_STACK=16777216 cargo test --features fuzz
-```
+
 
 ---
 
 ## Architecture
-* #![no_std]
-* #![forbid(unsafe_code)]
-* Fixed-size account slab (4096 accounts in production)
-* Bitmap-based allocation (O(1))
-* O(N) ADL via bitmap scan
-* Several-MB state footprint (~6MB in current layout)
+ * #![no_std]
+ * #![forbid(unsafe_code)]
+ * Fixed-size account slab (4096 accounts in production)
+ * Bitmap-based allocation (O(1))
+ * O(N) ADL via bitmap scan
+ * Several-MB state footprint (~6MB in current layout)
 
 ---
 
 ## Limitations
-* No signature verification
-* No oracle implementation
-* No account deallocation
-* Maximum 4096 accounts
-* Not audited for production use
+ * No signature verification
+ * No oracle implementation
+ * No account deallocation
+ * Maximum 4096 accounts
+ * Not audited for production use
 
 ---
 
-## License
+License
 
 Apache-2.0
+
+
