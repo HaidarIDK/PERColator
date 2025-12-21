@@ -274,9 +274,9 @@ cargo kani
 ```
 
 ## Notes
-	•	MAX_ACCOUNTS = 8 in Kani (tractability),
-	•	Debug/fuzz uses 64,
-	•	Production uses 4096.
+* MAX_ACCOUNTS = 8 in Kani (tractability),
+* Debug/fuzz uses 64,
+* Production uses 4096.
 
 ---
 
@@ -293,21 +293,21 @@ RUST_MIN_STACK=16777216 cargo test --features fuzz
 ---
 
 ## Architecture
-	•	#![no_std]
-	•	#![forbid(unsafe_code)]
-	•	Fixed-size account slab (4096 accounts in production)
-	•	Bitmap-based allocation (O(1))
-	•	O(N) ADL via bitmap scan
-	•	Several-MB state footprint (~6MB in current layout)
+* #![no_std]
+* #![forbid(unsafe_code)]
+* Fixed-size account slab (4096 accounts in production)
+* Bitmap-based allocation (O(1))
+* O(N) ADL via bitmap scan
+* Several-MB state footprint (~6MB in current layout)
 
 ---
 
 ## Limitations
-	•	No signature verification
-	•	No oracle implementation
-	•	No account deallocation
-	•	Maximum 4096 accounts
-	•	Not audited for production use
+* No signature verification
+* No oracle implementation
+* No account deallocation
+* Maximum 4096 accounts
+* Not audited for production use
 
 ---
 
