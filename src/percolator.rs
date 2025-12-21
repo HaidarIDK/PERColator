@@ -25,16 +25,25 @@ extern crate kani;
 // Constants
 // ============================================================================
 
-// Use smaller array size for Kani verification to make proofs tractable
-// Production uses 4096, but Kani symbolic execution becomes intractable at that scale
+// Use smaller array size for Kani verification, fuzz testing, and debug builds
+// to avoid stack overflow (RiskEngine is ~6MB at 4096 accounts). Production (release) uses 4096.
 #[cfg(kani)]
-pub const MAX_ACCOUNTS: usize = 8;  // Small for fast formal verification
+pub const MAX_ACCOUNTS: usize = 8; // Small for fast formal verification
 
-#[cfg(not(kani))]
+#[cfg(all(any(feature = "fuzz", debug_assertions), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64; // Small to avoid stack overflow in tests
+
+#[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 // Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
+
+/// Maximum allowed rounding slack in conservation check.
+/// Each integer division can lose at most 1 unit of quote currency.
+/// With MAX_ACCOUNTS positions, worst-case rounding loss is MAX_ACCOUNTS units.
+/// This bounds how much "dust" can accumulate in the vault from truncation.
+pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
 
 // ============================================================================
 // Core Data Structures
@@ -67,7 +76,6 @@ pub struct Account {
     // ========================================
     // Capital & PNL (universal)
     // ========================================
-
     /// Deposited capital (user principal or LP capital)
     /// NEVER reduced by ADL/socialization (Invariant I1)
     pub capital: u128,
@@ -81,7 +89,6 @@ pub struct Account {
     // ========================================
     // Warmup (embedded, no separate struct)
     // ========================================
-
     /// Slot when warmup started
     pub warmup_started_at_slot: u64,
 
@@ -91,7 +98,6 @@ pub struct Account {
     // ========================================
     // Position (universal)
     // ========================================
-
     /// Current position size (+ long, - short)
     pub position_size: i128,
 
@@ -101,14 +107,12 @@ pub struct Account {
     // ========================================
     // Funding (universal)
     // ========================================
-
     /// Funding index snapshot (quote per base, 1e6 scale)
     pub funding_index: i128,
 
     // ========================================
     // LP-specific (only meaningful for LP kind)
     // ========================================
-
     /// Matching engine program ID (zero for user accounts)
     pub matcher_program: [u8; 32],
 
@@ -209,11 +213,6 @@ pub struct RiskEngine {
     /// Loss accumulator for socialization
     pub loss_accum: u128,
 
-    /// Rounding surplus from position settlement (negative mark_pnl rounding)
-    /// This tracks value in the vault that isn't claimed by any account due to
-    /// integer division rounding during position settlement.
-    pub rounding_surplus: u128,
-
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PnL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
     pub risk_reduction_only: bool,
 
@@ -230,17 +229,30 @@ pub struct RiskEngine {
     // ========================================
     // Warmup Budget Tracking
     // ========================================
-
     /// Cumulative positive PnL converted to capital (W+)
     pub warmed_pos_total: u128,
 
     /// Cumulative negative PnL paid from capital (W-)
     pub warmed_neg_total: u128,
 
+    /// Insurance above the floor that has been committed to backing warmed profits (monotone)
+    pub warmup_insurance_reserved: u128,
+
+    // ========================================
+    // ADL Scratch (production stack-safe)
+    // ========================================
+    /// Scratch: per-account remainders used by ADL largest-remainder distribution.
+    /// Stored in slab to avoid stack allocation in production.
+    /// Only meaningful for used accounts; others must be zeroed when not used.
+    pub adl_remainder_scratch: [u128; MAX_ACCOUNTS],
+
+    /// Scratch: per-account "eligible" bit for ADL remainder distribution.
+    /// 0 = not eligible / already consumed; 1 = eligible.
+    pub adl_eligible_scratch: [u8; MAX_ACCOUNTS],
+
     // ========================================
     // Slab Management
     // ========================================
-
     /// Occupancy bitmap (4096 bits = 64 u64 words)
     pub used: [u64; BITMAP_WORDS],
 
@@ -340,12 +352,21 @@ fn div_u128(a: u128, b: u128) -> Result<u128> {
 
 #[inline]
 fn clamp_pos_i128(val: i128) -> u128 {
-    if val > 0 { val as u128 } else { 0 }
+    if val > 0 {
+        val as u128
+    } else {
+        0
+    }
 }
 
+#[allow(dead_code)]
 #[inline]
 fn clamp_neg_i128(val: i128) -> u128 {
-    if val < 0 { (-val) as u128 } else { 0 }
+    if val < 0 {
+        neg_i128_to_u128(val)
+    } else {
+        0
+    }
 }
 
 /// Saturating absolute value for i128 (handles i128::MIN without overflow)
@@ -355,6 +376,33 @@ fn saturating_abs_i128(val: i128) -> i128 {
         i128::MAX
     } else {
         val.abs()
+    }
+}
+
+/// Safely convert negative i128 to u128 (handles i128::MIN without overflow)
+///
+/// For i128::MIN, -i128::MIN would overflow because i128::MAX + 1 cannot be represented.
+/// We handle this by returning (i128::MAX as u128) + 1 = 170141183460469231731687303715884105728.
+#[inline]
+fn neg_i128_to_u128(val: i128) -> u128 {
+    debug_assert!(val < 0, "neg_i128_to_u128 called with non-negative value");
+    if val == i128::MIN {
+        (i128::MAX as u128) + 1
+    } else {
+        (-val) as u128
+    }
+}
+
+/// Safely convert u128 to i128 with clamping (handles values > i128::MAX)
+///
+/// If x > i128::MAX, the cast would wrap to a negative value.
+/// We clamp to i128::MAX instead to preserve correctness of margin checks.
+#[inline]
+fn u128_to_i128_clamped(x: u128) -> i128 {
+    if x > i128::MAX as u128 {
+        i128::MAX
+    } else {
+        x as i128
     }
 }
 
@@ -442,13 +490,15 @@ impl RiskEngine {
             funding_index_qpb_e6: 0,
             last_funding_slot: 0,
             loss_accum: 0,
-            rounding_surplus: 0,
             risk_reduction_only: false,
             risk_reduction_mode_withdrawn: 0,
             warmup_paused: false,
             warmup_pause_slot: 0,
             warmed_pos_total: 0,
             warmed_neg_total: 0,
+            warmup_insurance_reserved: 0,
+            adl_remainder_scratch: [0; MAX_ACCOUNTS],
+            adl_eligible_scratch: [0; MAX_ACCOUNTS],
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -711,10 +761,7 @@ impl RiskEngine {
         let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
 
         // Calculate warmed up cap: slope * elapsed_slots
-        let warmed_up_cap = mul_u128(
-            account.warmup_slope_per_step,
-            elapsed_slots as u128
-        );
+        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
 
         // Return minimum of available and warmed up
         core::cmp::min(available_pnl, warmed_up_cap)
@@ -733,11 +780,26 @@ impl RiskEngine {
         let positive_pnl = clamp_pos_i128(account.pnl);
 
         // Calculate slope: pnl / warmup_period
+        // Ensure slope >= 1 when positive_pnl > 0 to prevent "zero forever" bug
         let slope = if self.params.warmup_period_slots > 0 {
-            positive_pnl / (self.params.warmup_period_slots as u128)
+            let base = positive_pnl / (self.params.warmup_period_slots as u128);
+            if positive_pnl > 0 {
+                core::cmp::max(1, base)
+            } else {
+                0
+            }
         } else {
             positive_pnl // Instant warmup if period is 0
         };
+
+        // Verify slope >= 1 when positive PnL exists
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            slope >= 1 || positive_pnl == 0,
+            "Warmup slope bug: slope {} with positive_pnl {}",
+            slope,
+            positive_pnl
+        );
 
         // Update slope
         account.warmup_slope_per_step = slope;
@@ -815,12 +877,23 @@ impl RiskEngine {
 
         if delta_f != 0 && account.position_size != 0 {
             // payment = position × ΔF / 1e6
-            let payment = account
+            // Round UP for positive payments (account pays), truncate for negative (account receives)
+            // This ensures vault always has at least what's owed (one-sided conservation slack).
+            let raw = account
                 .position_size
                 .checked_mul(delta_f)
-                .ok_or(RiskError::Overflow)?
-                .checked_div(1_000_000)
                 .ok_or(RiskError::Overflow)?;
+
+            let payment = if raw > 0 {
+                // Account is paying: round UP to ensure vault gets at least theoretical amount
+                raw.checked_add(999_999)
+                    .ok_or(RiskError::Overflow)?
+                    .checked_div(1_000_000)
+                    .ok_or(RiskError::Overflow)?
+            } else {
+                // Account is receiving: truncate towards zero to give at most theoretical amount
+                raw.checked_div(1_000_000).ok_or(RiskError::Overflow)?
+            };
 
             // Longs pay when funding positive: pnl -= payment
             account.pnl = account
@@ -846,6 +919,43 @@ impl RiskEngine {
         Self::settle_account_funding(account, self.funding_index_qpb_e6)
     }
 
+    /// Settle funding for all accounts (ensures funding is zero-sum for conservation checks)
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn settle_all_funding(&mut self) -> Result<()> {
+        let global_index = self.funding_index_qpb_e6;
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle funding for all accounts (Kani-specific helper for fast conservation proofs)
+    ///
+    /// This allows harnesses to settle funding before using the fast conservation check
+    /// (conservation_fast_no_funding) which assumes funding is already settled.
+    #[cfg(kani)]
+    pub fn settle_all_funding_for_kani(&mut self) -> Result<()> {
+        let global_index = self.funding_index_qpb_e6;
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
+            }
+        }
+        Ok(())
+    }
+
     // ========================================
     // Deposits and Withdrawals
     // ========================================
@@ -868,15 +978,19 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
+    /// Withdraw capital from an account.
+    /// Relies on Solana transaction atomicity: if this returns Err, the entire TX aborts.
     pub fn withdraw(&mut self, idx: u16, amount: u128) -> Result<()> {
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
 
-        // Settle funding before any PNL calculations
-        self.touch_account(idx)?;
+        // Validate account exists
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
 
-        // Settle warmup (converts PnL to capital with budget constraint)
+        // Settle funding and warmup (propagate errors)
+        self.touch_account(idx)?;
         self.settle_warmup_to_capital(idx)?;
 
         let account = &self.accounts[idx as usize];
@@ -887,22 +1001,23 @@ impl RiskEngine {
         }
 
         // Calculate new state after withdrawal
+        // FIX B: Use equity (includes negative PnL) for margin checks
         let new_capital = sub_u128(account.capital, amount);
-        let new_collateral = add_u128(new_capital, clamp_pos_i128(account.pnl));
+        let cap_i = u128_to_i128_clamped(new_capital);
+        let new_eq_i = cap_i.saturating_add(account.pnl);
+        let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
         // If account has position, must maintain initial margin
         if account.position_size != 0 {
             let position_notional = mul_u128(
                 saturating_abs_i128(account.position_size) as u128,
-                account.entry_price as u128
+                account.entry_price as u128,
             ) / 1_000_000;
 
-            let initial_margin_required = mul_u128(
-                position_notional,
-                self.params.initial_margin_bps as u128
-            ) / 10_000;
+            let initial_margin_required =
+                mul_u128(position_notional, self.params.initial_margin_bps as u128) / 10_000;
 
-            if new_collateral < initial_margin_required {
+            if new_equity < initial_margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -910,6 +1025,13 @@ impl RiskEngine {
         // Commit the withdrawal
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
+
+        // Regression assert: after settle + withdraw, negative PnL should have been settled
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            self.accounts[idx as usize].pnl >= 0 || self.accounts[idx as usize].capital == 0,
+            "Withdraw: negative PnL must settle immediately"
+        );
 
         Ok(())
     }
@@ -919,30 +1041,41 @@ impl RiskEngine {
     // ========================================
 
     /// Calculate account's collateral (capital + positive PNL)
+    /// NOTE: This is the OLD collateral definition. For margin checks, use account_equity instead.
     pub fn account_collateral(&self, account: &Account) -> u128 {
         add_u128(account.capital, clamp_pos_i128(account.pnl))
     }
 
+    /// Calculate account's equity for margin checks: max(0, capital + pnl)
+    /// FIX B: This includes negative PnL in margin calculations.
+    #[inline]
+    pub fn account_equity(&self, account: &Account) -> u128 {
+        let cap_i = u128_to_i128_clamped(account.capital);
+        let eq_i = cap_i.saturating_add(account.pnl);
+        if eq_i > 0 { eq_i as u128 } else { 0 }
+    }
+
     /// Check if account is above maintenance margin
+    /// FIX B: Uses equity (includes negative PnL) instead of collateral
     pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
-        let collateral = self.account_collateral(account);
+        let equity = self.account_equity(account);
 
         // Calculate position value at current price
         let position_value = mul_u128(
             saturating_abs_i128(account.position_size) as u128,
-            oracle_price as u128
+            oracle_price as u128,
         ) / 1_000_000;
 
         // Maintenance margin requirement
-        let margin_required = mul_u128(
-            position_value,
-            self.params.maintenance_margin_bps as u128
-        ) / 10_000;
+        let margin_required =
+            mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
 
-        collateral > margin_required
+        equity > margin_required
     }
 
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
+    /// Execute a trade between LP and user.
+    /// Relies on Solana transaction atomicity: if this returns Err, the entire TX aborts.
     pub fn execute_trade<M: MatchingEngine>(
         &mut self,
         matcher: &M,
@@ -956,10 +1089,12 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
-        // Auto-trigger force_realize_losses when insurance is at/below threshold
-        // This unsticks the exchange by forcing losers to pay from capital
-        if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-            self.force_realize_losses(oracle_price)?;
+        // Validate account kinds
+        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
+            return Err(RiskError::AccountKindMismatch);
+        }
+        if self.accounts[user_idx as usize].kind != AccountKind::User {
+            return Err(RiskError::AccountKindMismatch);
         }
 
         // Check if trade increases risk (absolute exposure for either party)
@@ -972,24 +1107,12 @@ impl RiskEngine {
         let lp_inc = saturating_abs_i128(new_lp_pos) > saturating_abs_i128(old_lp_pos);
 
         if user_inc || lp_inc {
-            self.enforce_op(OpClass::RiskIncrease)?; // Blocked in risk mode
+            self.enforce_op(OpClass::RiskIncrease)?;
         } else {
-            self.enforce_op(OpClass::RiskReduce)?;   // Allowed in risk mode
+            self.enforce_op(OpClass::RiskReduce)?;
         }
 
-        // Settle funding for both accounts
-        self.touch_account(user_idx)?;
-        self.touch_account(lp_idx)?;
-
-        // Validate account kinds
-        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
-            return Err(RiskError::AccountKindMismatch);
-        }
-        if self.accounts[user_idx as usize].kind != AccountKind::User {
-            return Err(RiskError::AccountKindMismatch);
-        }
-
-        // Call matching engine with LP account ID
+        // Call matching engine
         let lp = &self.accounts[lp_idx as usize];
         let execution = matcher.execute_match(
             &lp.matcher_program,
@@ -999,15 +1122,19 @@ impl RiskEngine {
             size,
         )?;
 
-        // Use executed price and size from matching engine
+        // Settle funding for both accounts (propagate errors)
+        self.touch_account(user_idx)?;
+        self.touch_account(lp_idx)?;
+
         let exec_price = execution.price;
         let exec_size = execution.size;
 
-        // Calculate fee based on actual execution
-        let notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
+        // Calculate fee
+        let notional =
+            mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
-        // Use split_at_mut to access both accounts without copying
+        // Access both accounts
         let (user, lp) = if user_idx < lp_idx {
             let (left, right) = self.accounts.split_at_mut(lp_idx as usize);
             (&mut left[user_idx as usize], &mut right[0])
@@ -1024,113 +1151,127 @@ impl RiskEngine {
             let old_position = user.position_size;
             let old_entry = user.entry_price;
 
-            // If reducing position, realize PNL at execution price
             if (old_position > 0 && exec_size < 0) || (old_position < 0 && exec_size > 0) {
-                let close_size = core::cmp::min(saturating_abs_i128(old_position), saturating_abs_i128(exec_size));
+                let close_size = core::cmp::min(
+                    saturating_abs_i128(old_position),
+                    saturating_abs_i128(exec_size),
+                );
                 let price_diff = if old_position > 0 {
-                    // Closing long: (exit_price - entry_price)
                     (exec_price as i128).saturating_sub(old_entry as i128)
                 } else {
-                    // Closing short: (entry_price - exit_price)
                     (old_entry as i128).saturating_sub(exec_price as i128)
                 };
 
+                // Use saturating arithmetic (no overflow errors needed with Solana atomicity)
                 let pnl = price_diff
-                    .checked_mul(close_size)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_div(1_000_000)
-                    .ok_or(RiskError::Overflow)?;
-
+                    .saturating_mul(close_size)
+                    .saturating_div(1_000_000);
                 user_pnl_delta = pnl;
                 lp_pnl_delta = -pnl;
             }
         }
 
-        // Calculate new positions using executed size
+        // Calculate new positions
         let new_user_position = user.position_size.saturating_add(exec_size);
         let new_lp_position = lp.position_size.saturating_sub(exec_size);
 
-        // Calculate new entry prices using execution price
+        // Calculate new entry prices
         let mut new_user_entry = user.entry_price;
         let mut new_lp_entry = lp.entry_price;
 
         // Update user entry price
         if (user.position_size > 0 && exec_size > 0) || (user.position_size < 0 && exec_size < 0) {
-            // Increasing position - weighted average entry at execution price
-            let old_notional = mul_u128(saturating_abs_i128(user.position_size) as u128, user.entry_price as u128);
+            let old_notional = mul_u128(
+                saturating_abs_i128(user.position_size) as u128,
+                user.entry_price as u128,
+            );
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = saturating_abs_i128(user.position_size).saturating_add(saturating_abs_i128(exec_size));
-
+            let total_size = saturating_abs_i128(user.position_size)
+                .saturating_add(saturating_abs_i128(exec_size));
             if total_size != 0 {
                 new_user_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
         } else if saturating_abs_i128(user.position_size) < saturating_abs_i128(exec_size) {
-            // Flipping position - new entry at execution price
             new_user_entry = exec_price;
         }
 
         // Update LP entry price
-        if (lp.position_size > 0 && new_lp_position > lp.position_size) ||
-           (lp.position_size < 0 && new_lp_position < lp.position_size) {
-            let old_notional = mul_u128(saturating_abs_i128(lp.position_size) as u128, lp.entry_price as u128);
+        if lp.position_size == 0 {
+            new_lp_entry = exec_price;
+        } else if (lp.position_size > 0 && new_lp_position > lp.position_size)
+            || (lp.position_size < 0 && new_lp_position < lp.position_size)
+        {
+            let old_notional = mul_u128(
+                saturating_abs_i128(lp.position_size) as u128,
+                lp.entry_price as u128,
+            );
             let new_notional = mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128);
             let total_notional = add_u128(old_notional, new_notional);
-            let total_size = saturating_abs_i128(lp.position_size).saturating_add(saturating_abs_i128(exec_size));
-
+            let total_size = saturating_abs_i128(lp.position_size)
+                .saturating_add(saturating_abs_i128(exec_size));
             if total_size != 0 {
                 new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
+        } else if saturating_abs_i128(lp.position_size) < saturating_abs_i128(new_lp_position)
+            && ((lp.position_size > 0 && new_lp_position < 0)
+                || (lp.position_size < 0 && new_lp_position > 0))
+        {
+            new_lp_entry = exec_price;
         }
 
-        // Apply fee to insurance fund
+        // Compute final PNL values
+        let new_user_pnl = user
+            .pnl
+            .saturating_add(user_pnl_delta)
+            .saturating_sub(fee as i128);
+        let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
+
+        // Check user maintenance margin
+        // FIX B: Use equity (includes negative PnL) for margin checks
+        if new_user_position != 0 {
+            let user_cap_i = u128_to_i128_clamped(user.capital);
+            let user_eq_i = user_cap_i.saturating_add(new_user_pnl);
+            let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
+            let position_value = mul_u128(
+                saturating_abs_i128(new_user_position) as u128,
+                oracle_price as u128,
+            ) / 1_000_000;
+            let margin_required =
+                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+            if user_equity <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
+        }
+
+        // Check LP maintenance margin
+        // FIX B: Use equity (includes negative PnL) for margin checks
+        if new_lp_position != 0 {
+            let lp_cap_i = u128_to_i128_clamped(lp.capital);
+            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl);
+            let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
+            let position_value = mul_u128(
+                saturating_abs_i128(new_lp_position) as u128,
+                oracle_price as u128,
+            ) / 1_000_000;
+            let margin_required =
+                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+            if lp_equity <= margin_required {
+                return Err(RiskError::Undercollateralized);
+            }
+        }
+
+        // Commit all state changes
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, fee);
 
-        // Update user account
-        user.pnl = user.pnl.saturating_add(user_pnl_delta);
-        user.pnl = user.pnl.saturating_sub(fee as i128);
+        user.pnl = new_user_pnl;
         user.position_size = new_user_position;
         user.entry_price = new_user_entry;
 
-        // Check user maintenance margin requirement
-        if user.position_size != 0 {
-            let user_collateral = add_u128(user.capital, clamp_pos_i128(user.pnl));
-            let position_value = mul_u128(
-                saturating_abs_i128(user.position_size) as u128,
-                oracle_price as u128
-            ) / 1_000_000;
-            let margin_required = mul_u128(
-                position_value,
-                self.params.maintenance_margin_bps as u128
-            ) / 10_000;
-
-            if user_collateral <= margin_required {
-                return Err(RiskError::Undercollateralized);
-            }
-        }
-
-        // Update LP account
-        lp.pnl = lp.pnl.saturating_add(lp_pnl_delta);
+        lp.pnl = new_lp_pnl;
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
-
-        // Check LP maintenance margin requirement
-        if lp.position_size != 0 {
-            let lp_collateral = add_u128(lp.capital, clamp_pos_i128(lp.pnl));
-            let position_value = mul_u128(
-                saturating_abs_i128(lp.position_size) as u128,
-                oracle_price as u128
-            ) / 1_000_000;
-            let margin_required = mul_u128(
-                position_value,
-                self.params.maintenance_margin_bps as u128
-            ) / 10_000;
-
-            if lp_collateral <= margin_required {
-                return Err(RiskError::Undercollateralized);
-            }
-        }
 
         // Update warmup slopes after PNL changes
         self.update_warmup_slope(user_idx)?;
@@ -1147,10 +1288,10 @@ impl RiskEngine {
     // ADL (Auto-Deleveraging) - Scan-Based
     // ========================================
 
-    /// Calculate unwrapped PNL for an account (inline helper for ADL)
-    /// Unwrapped = positive_pnl - withdrawable - reserved
+    /// Calculate withdrawable PnL for an account (inline helper)
+    /// withdrawable = min(available_pnl, warmed_up_cap)
     #[inline]
-    fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
+    fn compute_withdrawable_pnl(&self, account: &Account) -> u128 {
         if account.pnl <= 0 {
             return 0;
         }
@@ -1165,20 +1306,35 @@ impl RiskEngine {
             self.current_slot
         };
 
-        // Calculate withdrawable inline
+        // Calculate warmed capacity
         let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
         let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
-        let withdrawable = core::cmp::min(available_pnl, warmed_up_cap);
 
-        // Unwrapped = positive_pnl - withdrawable - reserved
-        positive_pnl
-            .saturating_sub(withdrawable)
-            .saturating_sub(account.reserved_pnl)
+        core::cmp::min(available_pnl, warmed_up_cap)
     }
 
-    /// Returns insurance balance above the floor (spendable amount)
+    /// Calculate unwrapped PNL for an account (inline helper for ADL)
+    /// unwrapped = max(0, positive_pnl - reserved_pnl - withdrawable_pnl)
+    /// This is PnL that hasn't yet warmed and isn't reserved - subject to ADL haircuts
     #[inline]
-    pub fn insurance_spendable(&self) -> u128 {
+    fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
+        if account.pnl <= 0 {
+            return 0;
+        }
+
+        let positive_pnl = account.pnl as u128;
+        let reserved = account.reserved_pnl;
+        let withdrawable = self.compute_withdrawable_pnl(account);
+
+        // unwrapped = positive_pnl - reserved - withdrawable (all saturating)
+        positive_pnl
+            .saturating_sub(reserved)
+            .saturating_sub(withdrawable)
+    }
+
+    /// Returns insurance balance above the floor (raw spendable, before reservations)
+    #[inline]
+    pub fn insurance_spendable_raw(&self) -> u128 {
         let floor = self.params.risk_reduction_threshold;
         if self.insurance_fund.balance > floor {
             self.insurance_fund.balance - floor
@@ -1187,12 +1343,31 @@ impl RiskEngine {
         }
     }
 
-    /// Returns remaining warmup budget for converting positive PnL to capital
-    /// Budget = max(0, warmed_neg_total + spendable_insurance - warmed_pos_total)
+    /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
     #[inline]
-    fn warmup_budget_remaining(&self) -> u128 {
-        let rhs = self.warmed_neg_total.saturating_add(self.insurance_spendable());
+    pub fn insurance_spendable_unreserved(&self) -> u128 {
+        self.insurance_spendable_raw()
+            .saturating_sub(self.warmup_insurance_reserved)
+    }
+
+    /// Returns remaining warmup budget for converting positive PnL to capital
+    /// Budget = max(0, warmed_neg_total + unreserved_spendable_insurance - warmed_pos_total)
+    #[inline]
+    pub fn warmup_budget_remaining(&self) -> u128 {
+        let rhs = self
+            .warmed_neg_total
+            .saturating_add(self.insurance_spendable_unreserved());
         rhs.saturating_sub(self.warmed_pos_total)
+    }
+
+    /// Recompute warmup_insurance_reserved from current W+, W-, and insurance.
+    /// Must be called after any operation that changes insurance or W+/W-.
+    /// Formula: reserved = min(max(W+ - W-, 0), raw_spendable)
+    #[inline]
+    pub fn recompute_warmup_insurance_reserved(&mut self) {
+        let raw = self.insurance_spendable_raw();
+        let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+        self.warmup_insurance_reserved = core::cmp::min(needed, raw);
     }
 
     /// Settle warmup: convert PnL to capital with global budget constraint
@@ -1202,7 +1377,7 @@ impl RiskEngine {
     /// - Positive PnL: increases capital (profits become principal, clamped by budget)
     ///
     /// The warmup budget invariant ensures:
-    ///   warmed_pos_total <= warmed_neg_total + insurance_spendable()
+    ///   warmed_pos_total <= warmed_neg_total + insurance_spendable_unreserved()
     pub fn settle_warmup_to_capital(&mut self, idx: u16) -> Result<()> {
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
@@ -1218,25 +1393,36 @@ impl RiskEngine {
         let started_at = self.accounts[idx as usize].warmup_started_at_slot;
         let elapsed = effective_slot.saturating_sub(started_at);
         let slope = self.accounts[idx as usize].warmup_slope_per_step;
-        let mut cap = mul_u128(slope, elapsed as u128);
+        let cap = mul_u128(slope, elapsed as u128);
 
-        // 3.2 Settle losses first (negative PnL → reduce capital)
+        // 3.2 Settle losses IMMEDIATELY (negative PnL → reduce capital)
+        // FIX A: Negative PnL is not time-gated by warmup slope - it settles fully and immediately.
+        // pay = min(capital, -pnl)
         let pnl = self.accounts[idx as usize].pnl;
         if pnl < 0 {
-            let need = (-pnl) as u128;
+            let need = neg_i128_to_u128(pnl);
             let capital = self.accounts[idx as usize].capital;
-            let x = core::cmp::min(cap, core::cmp::min(need, capital));
+            let pay = core::cmp::min(need, capital);
 
-            if x > 0 {
+            if pay > 0 {
                 self.accounts[idx as usize].pnl =
-                    self.accounts[idx as usize].pnl.saturating_add(x as i128);
-                self.accounts[idx as usize].capital = sub_u128(capital, x);
-                self.warmed_neg_total = add_u128(self.warmed_neg_total, x);
-                cap = cap.saturating_sub(x);
+                    self.accounts[idx as usize].pnl.saturating_add(pay as i128);
+                self.accounts[idx as usize].capital = sub_u128(capital, pay);
+                self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
             }
+
+            // After immediate settlement: pnl < 0 only if capital was exhausted
+            #[cfg(any(test, kani))]
+            debug_assert!(
+                self.accounts[idx as usize].pnl >= 0 || self.accounts[idx as usize].capital == 0,
+                "Negative PnL must settle immediately: pnl < 0 implies capital == 0"
+            );
         }
 
-        // 3.3 Settle gains with budget clamp (positive PnL → increase capital)
+        // 3.3 Budget from losses (currently unused but documents the design)
+        let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
+
+        // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
             let positive_pnl = pnl as u128;
@@ -1257,18 +1443,36 @@ impl RiskEngine {
             }
         }
 
-        // 3.4 Update start slot deterministically
-        if !self.warmup_paused {
-            self.accounts[idx as usize].warmup_started_at_slot = self.current_slot;
-        }
-        // If paused, leave warmup_started_at_slot unchanged
+        // 3.5 Always advance start marker to prevent double-settling the same matured amount.
+        // This is safe even when paused: effective_slot==warmup_pause_slot, so further elapsed==0.
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
-        // 3.5 Hard invariant assert in debug/kani
+        // 3.6 Recompute reserved (W+ or W- may have changed)
+        self.recompute_warmup_insurance_reserved();
+
+        // 3.7 Hard invariant assert in debug/kani
+        // W+ ≤ W- + raw_spendable (reserved insurance backs warmed profits)
+        // Reserved equality: reserved == min(max(W+ - W-, 0), raw)
+        // Also: insurance >= floor + reserved (reserved portion protected)
         #[cfg(any(test, kani))]
         {
+            let raw = self.insurance_spendable_raw();
+            let floor = self.params.risk_reduction_threshold;
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
-                self.warmed_pos_total <= self.warmed_neg_total.saturating_add(self.insurance_spendable()),
-                "Warmup budget invariant violated"
+                self.warmed_pos_total <= self.warmed_neg_total.saturating_add(raw),
+                "Warmup budget invariant violated: W+ > W- + raw"
+            );
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved equality invariant violated: {} != {}",
+                self.warmup_insurance_reserved,
+                expect_reserved
+            );
+            debug_assert!(
+                self.insurance_fund.balance >= floor.saturating_add(self.warmup_insurance_reserved),
+                "Insurance fell below floor+reserved"
             );
         }
 
@@ -1281,6 +1485,11 @@ impl RiskEngine {
     /// Pass 2: Recompute each account's unwrapped PNL and apply proportional haircut
     ///
     /// Waterfall: unwrapped PNL first, then insurance fund, then loss_accum
+    ///
+    /// Uses largest-remainder method for exact haircut distribution:
+    /// 1. Compute haircut = (loss * unwrapped) / total for each account
+    /// 2. Track remainder = (loss * unwrapped) % total for each account
+    /// 3. Distribute leftover units to accounts with largest remainder (ties: lowest idx)
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
         // ADL reduces risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
@@ -1307,9 +1516,11 @@ impl RiskEngine {
         // Determine how much loss can be socialized via unwrapped PNL
         let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
 
-        // Pass 2: Apply proportional haircuts by recomputing unwrapped PNL
+        // Track total applied for conservation
+        let mut applied_from_pnl: u128 = 0;
+
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            // Must use manual iteration since we need self for compute_unwrapped_pnl
+            // Step 1: Zero scratch arrays for used accounts only (via bitmap)
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
                 while w != 0 {
@@ -1317,26 +1528,121 @@ impl RiskEngine {
                     let idx = block * 64 + bit;
                     w &= w - 1;
 
-                    // Recompute unwrapped (deterministic - same value as pass 1)
+                    self.adl_remainder_scratch[idx] = 0;
+                    self.adl_eligible_scratch[idx] = 0;
+                }
+            }
+
+            // Step 2: Compute floor haircuts, store remainders, mark eligible
+            for block in 0..BITMAP_WORDS {
+                let mut w = self.used[block];
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block * 64 + bit;
+                    w &= w - 1;
+
                     let account = &self.accounts[idx];
                     if account.pnl > 0 {
                         let unwrapped = self.compute_unwrapped_pnl(account);
 
                         if unwrapped > 0 {
-                            let haircut = (loss_to_socialize * unwrapped) / total_unwrapped;
-                            self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                            let numer = loss_to_socialize.saturating_mul(unwrapped);
+                            let haircut = numer / total_unwrapped;
+                            let rem = numer % total_unwrapped;
+
+                            self.accounts[idx].pnl =
+                                self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                            applied_from_pnl += haircut;
+
+                            // Store remainder and mark eligible if rem > 0
+                            self.adl_remainder_scratch[idx] = rem;
+                            self.adl_eligible_scratch[idx] = if rem > 0 { 1 } else { 0 };
                         }
+                    }
+                }
+            }
+
+            // Step 3: Distribute leftover using largest-remainder method
+            // Each account can receive at most +1 leftover (correct for largest-remainder)
+            let mut leftover = loss_to_socialize - applied_from_pnl;
+
+            while leftover > 0 {
+                // Find account with max remainder; ties: lowest idx wins
+                let mut best_idx: Option<usize> = None;
+                let mut best_rem: u128 = 0;
+
+                for block in 0..BITMAP_WORDS {
+                    let mut w = self.used[block];
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        let idx = block * 64 + bit;
+                        w &= w - 1;
+
+                        // Only consider eligible accounts (don't gate on pnl > 0)
+                        if self.adl_eligible_scratch[idx] == 1 {
+                            let rem = self.adl_remainder_scratch[idx];
+                            // Skip zero remainders for robust selection
+                            if rem == 0 {
+                                continue;
+                            }
+                            // Prefer larger remainder; if equal, prefer smaller idx (ties)
+                            if rem > best_rem || (rem == best_rem && rem != 0 && best_idx.map_or(true, |b| idx < b)) {
+                                best_rem = rem;
+                                best_idx = Some(idx);
+                            }
+                        }
+                    }
+                }
+
+                match best_idx {
+                    Some(idx) => {
+                        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                        applied_from_pnl += 1;
+                        self.adl_eligible_scratch[idx] = 0;
+                        leftover -= 1;
+                    }
+                    None => {
+                        #[cfg(any(test, kani))]
+                        debug_assert!(false, "ADL leftover distribution ran out of eligible candidates");
+                        break;
+                    }
+                }
+            }
+
+            // Hygiene: verify all eligible bits consumed after distribution
+            #[cfg(any(test, kani))]
+            {
+                for block in 0..BITMAP_WORDS {
+                    let mut w = self.used[block];
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        let idx = block * 64 + bit;
+                        w &= w - 1;
+                        debug_assert!(
+                            self.adl_eligible_scratch[idx] == 0,
+                            "Eligible bit not consumed for account {}",
+                            idx
+                        );
                     }
                 }
             }
         }
 
+        // Verify exact socialization in test/kani builds
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            applied_from_pnl == loss_to_socialize,
+            "ADL rounding bug: applied {} != socialized {}",
+            applied_from_pnl,
+            loss_to_socialize
+        );
+
         // Handle remaining loss with insurance fund (respecting floor)
-        let remaining_loss = total_loss.saturating_sub(loss_to_socialize);
+        let remaining_loss = total_loss.saturating_sub(applied_from_pnl);
 
         if remaining_loss > 0 {
-            // Insurance can only spend above the floor (risk_reduction_threshold)
-            let spendable = self.insurance_spendable();
+            // Insurance can only spend unreserved amount above the floor
+            let spendable = self.insurance_spendable_unreserved();
             let spend = core::cmp::min(remaining_loss, spendable);
 
             // Deduct from insurance fund
@@ -1349,9 +1655,25 @@ impl RiskEngine {
             }
 
             // Enter risk-reduction-only mode if we've hit the floor or have uncovered losses
-            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold {
+            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold
+            {
                 self.enter_risk_reduction_only_mode();
             }
+        }
+
+        // Recompute reserved since insurance may have changed
+        self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in apply_adl"
+            );
         }
 
         Ok(())
@@ -1382,7 +1704,8 @@ impl RiskEngine {
         // Track sum of mark PNL to compensate for integer division rounding
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: settle all positions and clamp negative PNL
+        // Single pass: settle funding and positions, clamp negative PNL
+        let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1391,6 +1714,9 @@ impl RiskEngine {
                 w &= w - 1;
 
                 let account = &mut self.accounts[idx];
+
+                // Settle funding first (required for correct PNL accounting)
+                Self::settle_account_funding(account, global_funding_index)?;
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1429,28 +1755,37 @@ impl RiskEngine {
                 // Clamp negative PNL and accumulate system loss
                 if account.pnl < 0 {
                     // Convert negative PNL to system loss
-                    let loss = (-account.pnl) as u128;
+                    let loss = neg_i128_to_u128(account.pnl);
                     total_loss = total_loss.saturating_add(loss);
                     account.pnl = 0;
                 }
             }
         }
 
-        // Compensate for integer division rounding slippage.
-        // Due to truncation toward zero, sum(mark_pnl) may not be exactly zero even
-        // though positions are zero-sum. Handle both directions:
-        // - If total_mark_pnl > 0: accounts claim more profit than exists (phantom profit)
-        //   → treat as additional loss to be socialized
-        // - If total_mark_pnl < 0: accounts claim less than exists (vault surplus)
-        //   → track in rounding_surplus (does not mint insurance)
+        // Compensate for non-zero-sum mark PNL.
+        // Mark PNL may not sum to zero due to:
+        // 1. Integer division rounding slippage
+        // 2. Entry price discrepancies from weighted averaging
+        //
+        // If positive: treat as additional loss to socialize
+        // If negative: the vault has "extra" money that should go to insurance
+        //              to maintain conservation (otherwise slack increases)
         if total_mark_pnl > 0 {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
-            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
+            // Vault has surplus funds - add to insurance to maintain conservation
+            let surplus = neg_i128_to_u128(total_mark_pnl);
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
 
-        // Second pass: settle warmup for all used accounts before ADL
-        // This ensures the warmup budget counters reflect any immediate loss payments
+        // Socialize the accumulated loss via ADL waterfall BEFORE settle_warmup
+        // This allows apply_adl to haircut positive PNL before it gets converted to capital
+        if total_loss > 0 {
+            self.apply_adl(total_loss)?;
+        }
+
+        // Second pass: settle warmup for all used accounts after ADL
+        // This converts any remaining positive PNL to capital with proper budget tracking
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1459,13 +1794,23 @@ impl RiskEngine {
                 w &= w - 1;
 
                 // settle_warmup_to_capital handles the budget invariant
-                let _ = self.settle_warmup_to_capital(idx as u16);
+                self.settle_warmup_to_capital(idx as u16)?;
             }
         }
 
-        // Socialize the accumulated loss via ADL waterfall
-        if total_loss > 0 {
-            self.apply_adl(total_loss)?;
+        // Recompute reserved after all operations (insurance may have changed)
+        self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in panic_settle_all"
+            );
         }
 
         Ok(())
@@ -1486,6 +1831,9 @@ impl RiskEngine {
     /// 5. Does NOT warm any positive PnL (keeps it young, subject to ADL)
     /// 6. Unpaid losses (capital exhausted) go through apply_adl waterfall
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
+        // Force realize is a risk-reducing operation
+        self.enforce_op(OpClass::RiskReduce)?;
+
         // Gate: only allowed when insurance is at or below floor
         if self.insurance_fund.balance > self.params.risk_reduction_threshold {
             return Err(RiskError::Unauthorized);
@@ -1499,7 +1847,8 @@ impl RiskEngine {
         // Track sum of mark PNL for rounding compensation
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: realize mark PnL and settle negative PnL into capital
+        // Single pass: settle funding, realize mark PnL, and settle negative PnL into capital
+        let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1508,6 +1857,9 @@ impl RiskEngine {
                 w &= w - 1;
 
                 let account = &mut self.accounts[idx];
+
+                // Settle funding first (required for correct PNL accounting)
+                Self::settle_account_funding(account, global_funding_index)?;
 
                 // Skip accounts with no position
                 if account.position_size == 0 {
@@ -1545,7 +1897,7 @@ impl RiskEngine {
 
                 // Force settle losses only (not positive PnL)
                 if account.pnl < 0 {
-                    let need = (-account.pnl) as u128;
+                    let need = neg_i128_to_u128(account.pnl);
                     let pay = core::cmp::min(need, account.capital);
 
                     // Pay from capital
@@ -1564,20 +1916,45 @@ impl RiskEngine {
                     }
                 }
                 // Positive PnL is left as-is (young, subject to ADL, warmup frozen)
+
+                // Update warmup start marker to effective_slot to prevent later
+                // settle_warmup_to_capital() from "re-paying" based on old elapsed time.
+                // Since we called enter_risk_reduction_only_mode(), warmup is paused,
+                // so effective_slot = warmup_pause_slot.
+                let effective_slot = core::cmp::min(self.current_slot, self.warmup_pause_slot);
+                account.warmup_started_at_slot = effective_slot;
             }
         }
 
-        // Compensate for integer division rounding slippage
+        // Compensate for non-zero-sum mark PNL.
+        // If positive: treat as additional unpaid loss to socialize
+        // If negative: the vault has "extra" money that should go to insurance
         if total_mark_pnl > 0 {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
         } else if total_mark_pnl < 0 {
-            // Track vault surplus from rounding (does not mint insurance)
-            self.rounding_surplus = add_u128(self.rounding_surplus, (-total_mark_pnl) as u128);
+            // Vault has surplus funds - add to insurance to maintain conservation
+            let surplus = neg_i128_to_u128(total_mark_pnl);
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
 
         // Socialize any unpaid losses via ADL waterfall
         if total_unpaid_loss > 0 {
             self.apply_adl(total_unpaid_loss)?;
+        }
+
+        // Recompute reserved after all operations (W- and insurance may have changed)
+        self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in force_realize_losses"
+            );
         }
 
         Ok(())
@@ -1600,6 +1977,21 @@ impl RiskEngine {
             // Add remaining to insurance fund balance
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, remaining);
 
+            // Recompute reserved after insurance increase
+            self.recompute_warmup_insurance_reserved();
+
+            // Assert reserved equality invariant in test/kani
+            #[cfg(any(test, kani))]
+            {
+                let raw = self.insurance_spendable_raw();
+                let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+                let expect_reserved = core::cmp::min(needed, raw);
+                debug_assert!(
+                    self.warmup_insurance_reserved == expect_reserved,
+                    "Reserved invariant violated in top_up_insurance_fund (loss branch)"
+                );
+            }
+
             // Exit risk-reduction-only mode if loss is fully covered and above threshold
             let was_in_mode = self.risk_reduction_only;
             self.exit_risk_reduction_only_mode_if_safe();
@@ -1611,6 +2003,21 @@ impl RiskEngine {
         } else {
             // No loss - just add to insurance fund
             self.insurance_fund.balance = add_u128(self.insurance_fund.balance, amount);
+
+            // Recompute reserved after insurance increase
+            self.recompute_warmup_insurance_reserved();
+
+            // Assert reserved equality invariant in test/kani
+            #[cfg(any(test, kani))]
+            {
+                let raw = self.insurance_spendable_raw();
+                let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+                let expect_reserved = core::cmp::min(needed, raw);
+                debug_assert!(
+                    self.warmup_insurance_reserved == expect_reserved,
+                    "Reserved invariant violated in top_up_insurance_fund (no-loss branch)"
+                );
+            }
 
             // Check if we can exit risk-reduction mode (may have been triggered by threshold, not loss)
             let was_in_mode = self.risk_reduction_only;
@@ -1639,34 +2046,68 @@ impl RiskEngine {
     /// - ADL transfers from user PNL to cover losses (net zero within system)
     /// - loss_accum represents value that was "lost" from the vault (clamped negative PNL
     ///   that couldn't be socialized), so vault + loss_accum = original value
+    ///
+    /// # Rounding Slack
+    ///
+    /// We require `actual >= expected` (vault has at least what is owed) and
+    /// `(actual - expected) <= MAX_ROUNDING_SLACK` (bounded dust). Funding payments
+    /// are rounded UP when accounts pay, ensuring the vault never has less than
+    /// what's owed. The bounded dust check catches accidental minting bugs.
     pub fn check_conservation(&self) -> bool {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
+        let global_index = self.funding_index_qpb_e6;
 
         self.for_each_used(|_idx, account| {
             total_capital = add_u128(total_capital, account.capital);
-            net_pnl = net_pnl.saturating_add(account.pnl);
+
+            // Compute "would-be settled" PNL for this account
+            // This accounts for lazy funding settlement with same rounding as settle_account_funding
+            let mut settled_pnl = account.pnl;
+            if account.position_size != 0 {
+                let delta_f = global_index.saturating_sub(account.funding_index);
+                if delta_f != 0 {
+                    // payment = position × ΔF / 1e6
+                    // Round UP for positive (account pays), truncate for negative (account receives)
+                    let raw = account.position_size.saturating_mul(delta_f);
+                    let payment = if raw > 0 {
+                        raw.saturating_add(999_999).saturating_div(1_000_000)
+                    } else {
+                        raw.saturating_div(1_000_000)
+                    };
+                    settled_pnl = settled_pnl.saturating_sub(payment);
+                }
+            }
+            net_pnl = net_pnl.saturating_add(settled_pnl);
         });
 
         // Conservation formula:
-        // vault + loss_accum = sum(capital) + sum(pnl) + insurance + rounding_surplus
+        // vault + loss_accum >= sum(capital) + sum(settled_pnl) + insurance
         //
         // Where:
         // - loss_accum: value that "left" the system (unrecoverable losses)
-        // - rounding_surplus: value in vault unclaimed due to integer division rounding
+        // - settled_pnl: pnl after accounting for unsettled funding
+        //
+        // Funding payments are rounded UP when accounts pay, so the vault always has
+        // at least what's owed. The slack (dust) is bounded by MAX_ROUNDING_SLACK.
         let base = add_u128(total_capital, self.insurance_fund.balance);
-        let base = add_u128(base, self.rounding_surplus);
 
         let expected = if net_pnl >= 0 {
             add_u128(base, net_pnl as u128)
         } else {
-            base.saturating_sub((-net_pnl) as u128)
+            base.saturating_sub(neg_i128_to_u128(net_pnl))
         };
 
-        // vault + loss_accum should equal expected
         let actual = add_u128(self.vault, self.loss_accum);
 
-        actual == expected
+        // One-sided conservation check:
+        // actual >= expected (vault has at least what is owed)
+        // (actual - expected) <= MAX_ROUNDING_SLACK (bounded dust)
+        if actual < expected {
+            return false;
+        }
+        let slack = actual - expected;
+        slack <= MAX_ROUNDING_SLACK
     }
 
     /// Advance to next slot (for testing warmup)
