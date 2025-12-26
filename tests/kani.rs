@@ -44,6 +44,7 @@ fn test_params() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         keeper_rebate_bps: 5000,
+        max_crank_staleness_slots: u64::MAX,
     }
 }
 
@@ -60,6 +61,7 @@ fn test_params_with_floor() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         keeper_rebate_bps: 5000,
+        max_crank_staleness_slots: u64::MAX,
     }
 }
 
@@ -406,7 +408,7 @@ fn fast_i2_withdraw_preserves_conservation() {
 
     assert!(conservation_fast_no_funding(&engine));
 
-    let _ = engine.withdraw(user_idx, withdraw);
+    let _ = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     assert!(
         conservation_fast_no_funding(&engine),
@@ -571,7 +573,7 @@ fn i7_user_isolation_withdrawal() {
     let user2_pnl = engine.accounts[user2 as usize].pnl;
 
     // Operate on user1
-    let _ = engine.withdraw(user1, 50);
+    let _ = engine.withdraw(user1, 50, 0, 1_000_000);
 
     // User2 should be unchanged
     assert!(
@@ -721,7 +723,7 @@ fn withdrawal_requires_sufficient_balance() {
     engine.accounts[user_idx as usize].capital = principal;
     engine.vault = principal;
 
-    let result = engine.withdraw(user_idx, withdraw);
+    let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     assert!(
         result.is_err(),
@@ -755,7 +757,7 @@ fn pnl_withdrawal_requires_warmup() {
 
     // Trying to withdraw should fail (no principal, no warmed PNL)
     if withdraw > 0 {
-        let result = engine.withdraw(user_idx, withdraw);
+        let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
         assert!(
             result.is_err(),
             "Cannot withdraw when no principal and PNL not warmed up"
@@ -1228,7 +1230,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
     };
 
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, new_size - position);
+    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, new_size - position);
 
     // Should fail when trying to increase position
     if new_size.abs() > position.abs() {
@@ -1272,7 +1274,7 @@ fn i10_withdrawal_mode_allows_position_decrease() {
     let reduce = -position / 2; // Opposite sign = reduce
 
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, reduce);
+    let result = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, reduce);
 
     // Closing/reducing should be allowed
     assert!(
@@ -1347,7 +1349,7 @@ fn fast_i10_withdrawal_mode_preserves_conservation() {
         "Conservation before withdrawal"
     );
 
-    let _ = engine.withdraw(user_idx, withdraw);
+    let _ = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     assert!(
         conservation_fast_no_funding(&engine),
@@ -1633,7 +1635,7 @@ fn proof_withdraw_only_decreases_via_conversion() {
     let pnl_before = engine.accounts[user_idx as usize].pnl;
 
     // Attempt withdrawal
-    let _ = engine.withdraw(user_idx, amount);
+    let _ = engine.withdraw(user_idx, amount, 0, 1_000_000);
 
     let pnl_after = engine.accounts[user_idx as usize].pnl;
 
@@ -1681,7 +1683,7 @@ fn proof_risk_increasing_trades_rejected() {
     engine.enter_risk_reduction_only_mode();
 
     // Attempt trade
-    let result = engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, 100_000_000, delta);
+    let result = engine.execute_trade(&NoOpMatcher, lp_idx, user_idx, 0, 100_000_000, delta);
 
     // PROOF: If trade increases absolute exposure, it must be rejected in risk mode
     if user_increases {
@@ -3170,7 +3172,7 @@ fn fast_frame_withdraw_only_mutates_one_account_vault_and_warmup() {
     let loss_accum_before = engine.loss_accum;
 
     // Withdraw
-    let _ = engine.withdraw(user_idx, withdraw);
+    let _ = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     // Assert: other account unchanged
     let other_after = &engine.accounts[other_idx as usize];
@@ -3211,7 +3213,7 @@ fn fast_frame_execute_trade_only_mutates_two_accounts() {
 
     // Execute trade
     let matcher = NoOpMatcher;
-    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
+    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, delta);
 
     // Only assert frame properties when trade succeeds
     // (Kani doesn't model Solana transaction atomicity - failed trades don't revert state)
@@ -3454,7 +3456,7 @@ fn fast_valid_preserved_by_withdraw() {
 
     kani::assume(valid_state(&engine));
 
-    let res = engine.withdraw(user_idx, withdraw);
+    let res = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     if res.is_ok() {
         assert!(valid_state(&engine), "valid_state preserved by withdraw");
@@ -3482,7 +3484,7 @@ fn fast_valid_preserved_by_execute_trade() {
     kani::assume(valid_state(&engine));
 
     let matcher = NoOpMatcher;
-    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 1_000_000, delta);
+    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, delta);
 
     // Only assert validity when trade succeeds
     // (Kani doesn't model Solana transaction atomicity - failed trades don't revert state)
@@ -3738,7 +3740,7 @@ fn fast_withdraw_cannot_bypass_losses_when_position_zero() {
 
     // After settlement: capital = capital - loss, pnl = 0
     // Trying to withdraw more than remaining capital should fail
-    let result = engine.withdraw(user_idx, capital);
+    let result = engine.withdraw(user_idx, capital, 0, 1_000_000);
 
     // Should fail because after loss settlement, capital is less than requested
     assert!(
@@ -3854,7 +3856,7 @@ fn withdraw_calls_settle_enforces_pnl_or_zero_capital_post() {
     engine.vault = capital;
 
     // Call withdraw - may succeed or fail
-    let _ = engine.withdraw(user_idx, withdraw_amt);
+    let _ = engine.withdraw(user_idx, withdraw_amt, 0, 1_000_000);
 
     // After return (Ok or Err), N1 invariant must hold
     let pnl_after = engine.accounts[user_idx as usize].pnl;
@@ -3997,7 +3999,7 @@ fn withdraw_im_check_blocks_when_equity_after_withdraw_below_im() {
     // withdraw(60): new_capital=90, equity=90
     // IM = 1000 * 1000 / 10000 = 100
     // 90 < 100 => Must fail with Undercollateralized
-    let result = engine.withdraw(user_idx, 60);
+    let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
     assert!(
         result == Err(RiskError::Undercollateralized),
         "Withdraw must fail with Undercollateralized when equity after < IM"
@@ -4193,7 +4195,7 @@ fn security_goal_bounded_net_extraction_sequence() {
             1 => {
                 let amt: u128 = kani::any();
                 kani::assume(amt <= 500);
-                if engine.withdraw(attacker, amt).is_ok() {
+                if engine.withdraw(attacker, amt, 0, 1_000_000).is_ok() {
                     wdr_a = wdr_a.saturating_add(amt);
                 }
             }
@@ -4203,7 +4205,7 @@ fn security_goal_bounded_net_extraction_sequence() {
                 let delta: i128 = kani::any();
                 kani::assume(delta != 0 && delta != i128::MIN);
                 kani::assume(delta > -5 && delta < 5);
-                let _ = engine.execute_trade(&NoOpMatcher, lp, attacker, 1_000_000, delta);
+                let _ = engine.execute_trade(&NoOpMatcher, lp, attacker, 0, 1_000_000, delta);
             }
 
             // 3: settle warmup for attacker or LP
@@ -4290,6 +4292,7 @@ fn proof_settle_maintenance_deducts_correctly() {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 100, // Non-zero fee
         keeper_rebate_bps: 5000,
+        max_crank_staleness_slots: u64::MAX,
     };
     let mut engine = RiskEngine::new(params);
 
@@ -4379,31 +4382,18 @@ fn proof_close_account_requires_flat_and_paid() {
     // If neither, could succeed (depends on other conditions)
 }
 
-/// E. net_position tracking: sum of all positions equals engine.net_position
-/// Note: This is a simplified proof that verifies the invariant for small cases
+/// E. total_open_interest tracking: starts at 0 for new engine
+/// Note: Full OI tracking is tested via trade execution in other proofs
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn proof_net_position_sum_consistency() {
+fn proof_total_open_interest_initial() {
     let engine = RiskEngine::new(test_params());
 
-    // Start with net_position = 0
-    assert!(engine.net_position == 0, "Initial net_position should be 0");
-    assert!(engine.abs_net_position == 0, "Initial abs_net_position should be 0");
-
-    // For matched trades, user + LP position changes cancel out
-    // So net_position should remain 0 after any trade execution
-    // (This is by construction of execute_trade)
-
-    // Verify the relationship: abs_net_position == |net_position|
-    let computed_abs = if engine.net_position >= 0 {
-        engine.net_position as u128
-    } else {
-        neg_i128_to_u128(engine.net_position)
-    };
+    // Start with total_open_interest = 0 (no positions yet)
     assert!(
-        engine.abs_net_position == computed_abs,
-        "abs_net_position should equal |net_position|"
+        engine.total_open_interest == 0,
+        "Initial total_open_interest should be 0"
     );
 }
 
