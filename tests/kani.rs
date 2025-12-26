@@ -4521,12 +4521,12 @@ fn proof_trading_credits_fee_to_user() {
     }
 }
 
-/// Proof: keeper_crank rebates exactly half the maintenance fee due
-/// This ensures the 50% discount is applied correctly
+/// Proof: keeper_crank forgives exactly half the elapsed slots
+/// This ensures the 50% discount is applied via time forgiveness
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn proof_keeper_crank_rebates_half() {
+fn proof_keeper_crank_forgives_half_slots() {
     // Use params with non-zero maintenance fee
     let params = RiskParams {
         warmup_period_slots: 100,
@@ -4548,37 +4548,31 @@ fn proof_keeper_crank_rebates_half() {
     // Set last_fee_slot to 0 so fees accrue
     engine.accounts[user as usize].last_fee_slot = 0;
 
-    // Record state before crank
-    let credits_before = engine.accounts[user as usize].fee_credits;
-    let capital_before = engine.accounts[user as usize].capital;
-
     // Call keeper_crank as the user (advancing slot)
     let now_slot: u64 = kani::any();
     kani::assume(now_slot > 0 && now_slot <= 432_000); // Up to 2 days of slots
     kani::assume(now_slot > engine.last_crank_slot);
+
+    // Calculate expected slots to forgive
+    let dt = now_slot; // since last_fee_slot is 0
+    let expected_forgive = dt / 2;
 
     let result = engine.keeper_crank(user, now_slot, 1_000_000, 0, false);
 
     if result.is_ok() {
         let outcome = result.unwrap();
 
-        // Calculate expected fee due (same formula as settle_maintenance_fee)
-        let slots_elapsed = now_slot;
-        let fee_per_slot = params.maintenance_fee_per_day / params.slots_per_day.max(1) as u128;
-        let expected_due = slots_elapsed as u128 * fee_per_slot;
-        let expected_rebate = expected_due / 2;
-
-        // Verify rebate_credits matches expected
+        // Verify slots_forgiven matches expected (dt / 2, floored)
         assert!(
-            outcome.rebate_credits == expected_rebate as i128,
-            "keeper_crank must return rebate = due / 2"
+            outcome.slots_forgiven == expected_forgive,
+            "keeper_crank must forgive dt/2 slots"
         );
 
-        // If we had enough capital/credits, verify fee_credits increased by rebate
-        // (Note: maintenance fee is paid first, then rebate is added)
-        // Net effect on credits: -due (paid) + rebate (earned) = -due/2
-        // But since rebate is applied AFTER settle, credits_after = credits_before - due + rebate
-        // which equals credits_before - due/2 (net 50% discount)
+        // After crank, last_fee_slot should be now_slot (settle_maintenance_fee sets it)
+        assert!(
+            engine.accounts[user as usize].last_fee_slot == now_slot,
+            "last_fee_slot must be advanced to now_slot after settlement"
+        );
     }
 }
 

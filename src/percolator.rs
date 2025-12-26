@@ -369,8 +369,8 @@ pub enum OpClass {
 pub struct CrankOutcome {
     /// Whether the crank successfully advanced last_crank_slot
     pub advanced: bool,
-    /// Fee credits rebated to caller (in capital units)
-    pub rebate_credits: i128,
+    /// Slots forgiven for caller's maintenance (50% discount via time forgiveness)
+    pub slots_forgiven: u64,
     /// Whether force_realize_losses was triggered
     pub did_force_realize: bool,
     /// Whether panic_settle_all was triggered
@@ -981,7 +981,7 @@ impl RiskEngine {
         if now_slot <= self.last_crank_slot {
             return Ok(CrankOutcome {
                 advanced: false,
-                rebate_credits: 0,
+                slots_forgiven: 0,
                 did_force_realize: false,
                 did_panic_settle: false,
             });
@@ -990,29 +990,27 @@ impl RiskEngine {
         // Advance crank slot
         self.last_crank_slot = now_slot;
 
-        // Settle maintenance for caller and compute rebate
-        let rebate_credits = if (caller_idx as usize) < MAX_ACCOUNTS
+        // Settle maintenance for caller with 50% discount via time forgiveness
+        let slots_forgiven = if (caller_idx as usize) < MAX_ACCOUNTS
             && self.is_used(caller_idx as usize)
         {
-            // Settle fees and get the amount due
-            let fee_due = self
-                .settle_maintenance_fee(caller_idx, now_slot, oracle_price)
-                .unwrap_or(0);
+            // Pre-advance last_fee_slot by dt/2 to forgive half the elapsed time
+            // This makes settle_maintenance_fee charge only half the slots
+            let last_fee = self.accounts[caller_idx as usize].last_fee_slot;
+            let dt = now_slot.saturating_sub(last_fee);
+            let forgive = dt / 2;
 
-            // Rebate = exactly 50% of fee (caller pays 100%, gets 50% back as credit)
-            let rebate = fee_due / 2;
-
-            // Credit rebate to caller's fee_credits
-            if rebate > 0 {
-                self.accounts[caller_idx as usize].fee_credits = self.accounts
-                    [caller_idx as usize]
-                    .fee_credits
-                    .saturating_add(rebate as i128);
+            if forgive > 0 {
+                self.accounts[caller_idx as usize].last_fee_slot =
+                    last_fee.saturating_add(forgive);
             }
 
-            rebate as i128
+            // Now settle - will only charge for remaining half of dt
+            let _ = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+
+            forgive
         } else {
-            0i128
+            0
         };
 
         let mut did_force_realize = false;
@@ -1033,7 +1031,7 @@ impl RiskEngine {
 
         Ok(CrankOutcome {
             advanced: true,
-            rebate_credits,
+            slots_forgiven,
             did_force_realize,
             did_panic_settle,
         })
