@@ -211,6 +211,10 @@ pub struct RiskParams {
 
     /// Keeper rebate in basis points (e.g., 5000 = 50% of fees go to keeper)
     pub keeper_rebate_bps: u64,
+
+    /// Maximum allowed staleness before crank is required (in slots)
+    /// Set to u64::MAX to disable crank freshness check
+    pub max_crank_staleness_slots: u64,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -261,13 +265,11 @@ pub struct RiskEngine {
     pub max_crank_staleness_slots: u64,
 
     // ========================================
-    // Net Open Interest Tracking (O(1))
+    // Open Interest Tracking (O(1))
     // ========================================
-    /// Sum of all position_size across accounts (signed)
-    pub net_position: i128,
-
-    /// Cached abs(net_position) for quick exposure checks
-    pub abs_net_position: u128,
+    /// Total open interest = sum of abs(position_size) across all accounts
+    /// This measures total risk exposure in the system.
+    pub total_open_interest: u128,
 
     // ========================================
     // Warmup Budget Tracking
@@ -551,9 +553,8 @@ impl RiskEngine {
             warmup_paused: false,
             warmup_pause_slot: 0,
             last_crank_slot: 0,
-            max_crank_staleness_slots: params.slots_per_day / 100, // ~1% of day
-            net_position: 0,
-            abs_net_position: 0,
+            max_crank_staleness_slots: params.max_crank_staleness_slots,
+            total_open_interest: 0,
             warmed_pos_total: 0,
             warmed_neg_total: 0,
             warmup_insurance_reserved: 0,
@@ -791,7 +792,7 @@ impl RiskEngine {
 
     /// Settle maintenance fees for an account.
     ///
-    /// Returns the rebate credits granted (always 0 for non-crank callers).
+    /// Returns the fee amount due (for keeper rebate calculation).
     ///
     /// Algorithm:
     /// 1. Compute dt = now_slot - account.last_fee_slot
@@ -804,7 +805,7 @@ impl RiskEngine {
         idx: u16,
         now_slot: u64,
         oracle_price: u64,
-    ) -> Result<i128> {
+    ) -> Result<u128> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
         }
@@ -853,7 +854,7 @@ impl RiskEngine {
             }
         }
 
-        Ok(0) // Rebate credits are 0 for direct calls; keeper_crank handles rebates
+        Ok(due) // Return fee due for keeper rebate calculation
     }
 
     /// Set owner pubkey for an account
@@ -887,8 +888,9 @@ impl RiskEngine {
     /// - Account must exist
     /// - Position must be zero (no open positions)
     /// - fee_credits >= 0 (no outstanding fees owed)
+    /// - pnl must be 0 after settlement (any unwarmed positive pnl is forfeited)
     ///
-    /// Returns the amount withdrawn (capital + positive pnl).
+    /// Returns the amount withdrawn (capital only - pnl must go through warmup first).
     pub fn close_account(
         &mut self,
         idx: u16,
@@ -899,6 +901,10 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
+        // Full settlement: funding + maintenance fees + warmup
+        // This converts warmed pnl to capital and realizes negative pnl
+        self.touch_account_full(idx, now_slot, oracle_price)?;
+
         let account = &self.accounts[idx as usize];
 
         // Position must be zero
@@ -906,29 +912,25 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized); // Has open position
         }
 
-        // Settle maintenance fees first
-        let _ = self.settle_maintenance_fee(idx, now_slot, oracle_price);
-
         // Check no outstanding fees owed
-        let account = &self.accounts[idx as usize];
         if account.fee_credits < 0 {
             return Err(RiskError::InsufficientBalance); // Owes fees
         }
 
-        // Calculate withdrawal amount: capital + positive pnl (negative pnl reduces equity)
+        // After full settlement, negative pnl has been realized from capital.
+        // Positive unwarmed pnl remains in pnl field but is NOT withdrawable.
+        // Users must wait for warmup to convert pnl to capital before closing.
+        // If there's still positive pnl, it means warmup hasn't completed - user forfeits it.
+        // (This is the security property: can't bypass warmup via close_account)
+
+        // Return capital only (warmed profits are already in capital, unwarmed are forfeited)
         let capital = account.capital;
-        let pnl = account.pnl;
-        let equity = if pnl >= 0 {
-            capital.saturating_add(pnl as u128)
-        } else {
-            capital.saturating_sub(neg_i128_to_u128(pnl))
-        };
 
         // Deduct from vault
-        if equity > self.vault {
+        if capital > self.vault {
             return Err(RiskError::InsufficientBalance);
         }
-        self.vault = self.vault.saturating_sub(equity);
+        self.vault = self.vault.saturating_sub(capital);
 
         // Clear the account slot
         self.accounts[idx as usize] = empty_account();
@@ -941,7 +943,7 @@ impl RiskEngine {
         // Decrement used count
         self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
 
-        Ok(equity)
+        Ok(capital)
     }
 
     // ========================================
@@ -991,15 +993,27 @@ impl RiskEngine {
         // Advance crank slot
         self.last_crank_slot = now_slot;
 
-        // Settle maintenance for caller (if valid)
+        // Settle maintenance for caller and compute rebate
         let rebate_credits = if (caller_idx as usize) < MAX_ACCOUNTS
             && self.is_used(caller_idx as usize)
         {
-            // Settle and compute rebate
-            let _ = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+            // Settle fees and get the amount due
+            let fee_due = self
+                .settle_maintenance_fee(caller_idx, now_slot, oracle_price)
+                .unwrap_or(0);
+
             // Rebate = keeper_rebate_bps% of fee collected
-            // (For now, simplified: rebate is 0; full implementation would track)
-            0i128
+            let rebate = mul_u128(fee_due, self.params.keeper_rebate_bps as u128) / 10_000;
+
+            // Credit rebate to caller's fee_credits (reduces their fee burden)
+            if rebate > 0 {
+                self.accounts[caller_idx as usize].fee_credits = self.accounts
+                    [caller_idx as usize]
+                    .fee_credits
+                    .saturating_add(rebate as i128);
+            }
+
+            rebate as i128
         } else {
             0i128
         };
@@ -1209,6 +1223,27 @@ impl RiskEngine {
         Self::settle_account_funding(account, self.funding_index_qpb_e6)
     }
 
+    /// Full account touch: funding + maintenance fees + warmup settlement.
+    /// This is the standard "lazy settlement" path called on every user operation.
+    /// Triggers liquidation check if fees push account below maintenance margin.
+    pub fn touch_account_full(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<()> {
+        // 1. Settle funding
+        self.touch_account(idx)?;
+
+        // 2. Settle maintenance fees (may trigger undercollateralized error)
+        self.settle_maintenance_fee(idx, now_slot, oracle_price)?;
+
+        // 3. Settle warmup (convert warmed PnL to capital, realize losses)
+        self.settle_warmup_to_capital(idx)?;
+
+        Ok(())
+    }
+
     /// Settle funding for all accounts (ensures funding is zero-sum for conservation checks)
     #[cfg(any(test, feature = "fuzz"))]
     pub fn settle_all_funding(&mut self) -> Result<()> {
@@ -1270,7 +1305,16 @@ impl RiskEngine {
 
     /// Withdraw capital from an account.
     /// Relies on Solana transaction atomicity: if this returns Err, the entire TX aborts.
-    pub fn withdraw(&mut self, idx: u16, amount: u128) -> Result<()> {
+    pub fn withdraw(
+        &mut self,
+        idx: u16,
+        amount: u128,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<()> {
+        // Require fresh crank before state-changing operations
+        self.require_fresh_crank(now_slot)?;
+
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
 
@@ -1279,9 +1323,8 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
-        // Settle funding and warmup (propagate errors)
-        self.touch_account(idx)?;
-        self.settle_warmup_to_capital(idx)?;
+        // Full settlement: funding + maintenance fees + warmup
+        self.touch_account_full(idx, now_slot, oracle_price)?;
 
         let account = &self.accounts[idx as usize];
 
@@ -1371,9 +1414,13 @@ impl RiskEngine {
         matcher: &M,
         lp_idx: u16,
         user_idx: u16,
+        now_slot: u64,
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
+        // Require fresh crank before state-changing operations
+        self.require_fresh_crank(now_slot)?;
+
         // Validate indices
         if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
             return Err(RiskError::AccountNotFound);
@@ -1412,9 +1459,12 @@ impl RiskEngine {
             size,
         )?;
 
-        // Settle funding for both accounts (propagate errors)
+        // Settle funding and maintenance fees for both accounts (propagate errors)
+        // Note: warmup is settled at the END after trade PnL is generated
         self.touch_account(user_idx)?;
         self.touch_account(lp_idx)?;
+        self.settle_maintenance_fee(user_idx, now_slot, oracle_price)?;
+        self.settle_maintenance_fee(lp_idx, now_slot, oracle_price)?;
 
         let exec_price = execution.price;
         let exec_size = execution.size;
@@ -1563,16 +1613,17 @@ impl RiskEngine {
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
 
-        // Update net OI tracking (O(1))
-        // delta_user = new_user_position - old_user_pos, delta_lp = new_lp_position - old_lp_pos
-        // For matched trades: delta_user + delta_lp == 0 (user gains what LP loses)
-        let delta_user = new_user_position.saturating_sub(old_user_pos);
-        let delta_lp = new_lp_position.saturating_sub(old_lp_pos);
-        self.net_position = self
-            .net_position
-            .saturating_add(delta_user)
-            .saturating_add(delta_lp);
-        self.abs_net_position = saturating_abs_i128(self.net_position) as u128;
+        // Update total open interest tracking (O(1))
+        // OI = sum of abs(position_size) across all accounts
+        let old_oi = saturating_abs_i128(old_user_pos) as u128
+            + saturating_abs_i128(old_lp_pos) as u128;
+        let new_oi = saturating_abs_i128(new_user_position) as u128
+            + saturating_abs_i128(new_lp_position) as u128;
+        if new_oi > old_oi {
+            self.total_open_interest = self.total_open_interest.saturating_add(new_oi - old_oi);
+        } else {
+            self.total_open_interest = self.total_open_interest.saturating_sub(old_oi - new_oi);
+        }
 
         // Update warmup slopes after PNL changes
         self.update_warmup_slope(user_idx)?;
