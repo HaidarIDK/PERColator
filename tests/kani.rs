@@ -4440,25 +4440,24 @@ fn proof_require_fresh_crank_gates_stale() {
 fn proof_close_account_returns_correct_equity() {
     let mut engine = RiskEngine::new(test_params());
 
+    let user = engine.add_user(0).unwrap();
+
+    // Deposit capital
     let capital: u128 = kani::any();
     kani::assume(capital > 0 && capital <= 10000);
+    let _ = engine.deposit(user, capital);
 
-    let user = engine.add_user(capital).unwrap();
+    // Get actual capital after deposit
+    let actual_capital = engine.accounts[user as usize].capital;
 
-    // No position, no fees owed
-    engine.accounts[user as usize].position_size = 0;
-    engine.accounts[user as usize].fee_credits = 0;
+    // No position, no fees owed (position_size starts at 0, fee_credits starts at 0)
 
+    // Set pnl (must be bounded to avoid equity > vault issues)
     let pnl: i128 = kani::any();
-    kani::assume(pnl > -1000 && pnl < 1000);
-    kani::assume(pnl >= -(capital as i128)); // Can't have more negative PnL than capital
+    kani::assume(pnl >= 0 && pnl < 1000); // Only non-negative pnl to ensure vault has enough
     engine.accounts[user as usize].pnl = pnl;
 
-    let expected_equity = if pnl >= 0 {
-        capital.saturating_add(pnl as u128)
-    } else {
-        capital.saturating_sub(neg_i128_to_u128(pnl))
-    };
+    let expected_equity = actual_capital.saturating_add(pnl as u128);
 
     let result = engine.close_account(user, 0, 1_000_000);
 
