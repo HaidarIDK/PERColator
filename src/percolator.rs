@@ -365,6 +365,19 @@ pub enum OpClass {
     RiskReduce,
 }
 
+/// Outcome of a keeper crank operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrankOutcome {
+    /// Whether the crank successfully advanced last_crank_slot
+    pub advanced: bool,
+    /// Fee credits rebated to caller (in capital units)
+    pub rebate_credits: i128,
+    /// Whether force_realize_losses was triggered
+    pub did_force_realize: bool,
+    /// Whether panic_settle_all was triggered
+    pub did_panic_settle: bool,
+}
+
 // ============================================================================
 // Math Helpers (Saturating Arithmetic for Safety)
 // ============================================================================
@@ -770,6 +783,249 @@ impl RiskEngine {
         };
 
         Ok(idx)
+    }
+
+    // ========================================
+    // Maintenance Fees
+    // ========================================
+
+    /// Settle maintenance fees for an account.
+    ///
+    /// Returns the rebate credits granted (always 0 for non-crank callers).
+    ///
+    /// Algorithm:
+    /// 1. Compute dt = now_slot - account.last_fee_slot
+    /// 2. If dt == 0, return 0 (no-op)
+    /// 3. Compute due = fee_per_slot * dt
+    /// 4. Deduct from fee_credits; if negative, pay from capital to insurance
+    /// 5. If position exists and below maintenance after fee, return Err
+    pub fn settle_maintenance_fee(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<i128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+
+        let account = &mut self.accounts[idx as usize];
+
+        // Calculate elapsed time
+        let dt = now_slot.saturating_sub(account.last_fee_slot);
+        if dt == 0 {
+            return Ok(0);
+        }
+
+        // Calculate fee due
+        let fee_per_slot = if self.params.slots_per_day > 0 {
+            self.params.maintenance_fee_per_day / self.params.slots_per_day as u128
+        } else {
+            0
+        };
+        let due = fee_per_slot.saturating_mul(dt as u128);
+
+        // Update last_fee_slot
+        account.last_fee_slot = now_slot;
+
+        // Deduct from fee_credits
+        account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+        // If fee_credits is negative, pay from capital
+        if account.fee_credits < 0 {
+            let owed = neg_i128_to_u128(account.fee_credits);
+            let pay = core::cmp::min(owed, account.capital);
+
+            account.capital = account.capital.saturating_sub(pay);
+            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, pay);
+            self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, pay);
+
+            // Credit back what was paid
+            account.fee_credits = account.fee_credits.saturating_add(pay as i128);
+        }
+
+        // Check maintenance margin if account has a position
+        if account.position_size != 0 {
+            // Re-borrow immutably for margin check
+            let account_ref = &self.accounts[idx as usize];
+            if !self.is_above_maintenance_margin(account_ref, oracle_price) {
+                return Err(RiskError::Undercollateralized);
+            }
+        }
+
+        Ok(0) // Rebate credits are 0 for direct calls; keeper_crank handles rebates
+    }
+
+    /// Set owner pubkey for an account
+    pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+        self.accounts[idx as usize].owner = owner;
+        Ok(())
+    }
+
+    /// Add fee credits to an account (e.g., user deposits fee credits)
+    pub fn add_fee_credits(&mut self, idx: u16, amount: u128) -> Result<()> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+        self.accounts[idx as usize].fee_credits =
+            self.accounts[idx as usize].fee_credits.saturating_add(amount as i128);
+        Ok(())
+    }
+
+    /// Set the risk reduction threshold (admin function).
+    /// This controls when risk-reduction-only mode is triggered.
+    pub fn set_risk_reduction_threshold(&mut self, new_threshold: u128) {
+        self.params.risk_reduction_threshold = new_threshold;
+    }
+
+    /// Close an account and return its capital to the caller.
+    ///
+    /// Requirements:
+    /// - Account must exist
+    /// - Position must be zero (no open positions)
+    /// - fee_credits >= 0 (no outstanding fees owed)
+    ///
+    /// Returns the amount withdrawn (capital + positive pnl).
+    pub fn close_account(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<u128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let account = &self.accounts[idx as usize];
+
+        // Position must be zero
+        if account.position_size != 0 {
+            return Err(RiskError::Undercollateralized); // Has open position
+        }
+
+        // Settle maintenance fees first
+        let _ = self.settle_maintenance_fee(idx, now_slot, oracle_price);
+
+        // Check no outstanding fees owed
+        let account = &self.accounts[idx as usize];
+        if account.fee_credits < 0 {
+            return Err(RiskError::InsufficientBalance); // Owes fees
+        }
+
+        // Calculate withdrawal amount: capital + positive pnl (negative pnl reduces equity)
+        let capital = account.capital;
+        let pnl = account.pnl;
+        let equity = if pnl >= 0 {
+            capital.saturating_add(pnl as u128)
+        } else {
+            capital.saturating_sub(neg_i128_to_u128(pnl))
+        };
+
+        // Deduct from vault
+        if equity > self.vault {
+            return Err(RiskError::InsufficientBalance);
+        }
+        self.vault = self.vault.saturating_sub(equity);
+
+        // Clear the account slot
+        self.accounts[idx as usize] = empty_account();
+        self.clear_used(idx as usize);
+
+        // Return to freelist
+        self.next_free[idx as usize] = self.free_head;
+        self.free_head = idx;
+
+        // Decrement used count
+        self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
+
+        Ok(equity)
+    }
+
+    // ========================================
+    // Keeper Crank
+    // ========================================
+
+    /// Check if a fresh crank is required before state-changing operations.
+    /// Returns Err if the crank is stale (too old).
+    pub fn require_fresh_crank(&self, now_slot: u64) -> Result<()> {
+        if now_slot.saturating_sub(self.last_crank_slot) > self.max_crank_staleness_slots {
+            return Err(RiskError::Unauthorized); // NeedsCrank
+        }
+        Ok(())
+    }
+
+    /// Keeper crank entrypoint - advances global state and performs maintenance.
+    ///
+    /// Returns CrankOutcome with flags indicating what happened.
+    ///
+    /// Behavior:
+    /// 1. Accrue funding
+    /// 2. If now_slot <= last_crank_slot, return early (no-op)
+    /// 3. Else advance last_crank_slot
+    /// 4. Settle maintenance fees for caller
+    /// 5. Evaluate heavy actions (force_realize, panic_settle)
+    pub fn keeper_crank(
+        &mut self,
+        caller_idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_bps_per_slot: i64,
+        allow_panic: bool,
+    ) -> Result<CrankOutcome> {
+        // Accrue funding first
+        let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
+
+        // Check if we're advancing
+        if now_slot <= self.last_crank_slot {
+            return Ok(CrankOutcome {
+                advanced: false,
+                rebate_credits: 0,
+                did_force_realize: false,
+                did_panic_settle: false,
+            });
+        }
+
+        // Advance crank slot
+        self.last_crank_slot = now_slot;
+
+        // Settle maintenance for caller (if valid)
+        let rebate_credits = if (caller_idx as usize) < MAX_ACCOUNTS
+            && self.is_used(caller_idx as usize)
+        {
+            // Settle and compute rebate
+            let _ = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+            // Rebate = keeper_rebate_bps% of fee collected
+            // (For now, simplified: rebate is 0; full implementation would track)
+            0i128
+        } else {
+            0i128
+        };
+
+        let mut did_force_realize = false;
+        let mut did_panic_settle = false;
+
+        // Evaluate heavy actions
+        if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
+            // Insurance at or below floor - force realize losses
+            if self.force_realize_losses(oracle_price).is_ok() {
+                did_force_realize = true;
+            }
+        } else if (self.loss_accum > 0 || self.risk_reduction_only) && allow_panic {
+            // System in stress - panic settle
+            if self.panic_settle_all(oracle_price).is_ok() {
+                did_panic_settle = true;
+            }
+        }
+
+        Ok(CrankOutcome {
+            advanced: true,
+            rebate_credits,
+            did_force_realize,
+            did_panic_settle,
+        })
     }
 
     // ========================================
@@ -1306,6 +1562,17 @@ impl RiskEngine {
         lp.pnl = new_lp_pnl;
         lp.position_size = new_lp_position;
         lp.entry_price = new_lp_entry;
+
+        // Update net OI tracking (O(1))
+        // delta_user = new_user_position - old_user_pos, delta_lp = new_lp_position - old_lp_pos
+        // For matched trades: delta_user + delta_lp == 0 (user gains what LP loses)
+        let delta_user = new_user_position.saturating_sub(old_user_pos);
+        let delta_lp = new_lp_position.saturating_sub(old_lp_pos);
+        self.net_position = self
+            .net_position
+            .saturating_add(delta_user)
+            .saturating_add(delta_lp);
+        self.abs_net_position = saturating_abs_i128(self.net_position) as u128;
 
         // Update warmup slopes after PNL changes
         self.update_warmup_slope(user_idx)?;
