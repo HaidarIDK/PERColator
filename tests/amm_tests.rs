@@ -14,7 +14,6 @@ fn default_params() -> RiskParams {
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     }
 }

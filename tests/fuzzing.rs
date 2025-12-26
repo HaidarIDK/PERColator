@@ -272,7 +272,6 @@ fn params_regime_a() -> RiskParams {
         risk_reduction_threshold: 0,
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     }
 }
@@ -289,7 +288,6 @@ fn params_regime_b() -> RiskParams {
         risk_reduction_threshold: 1000,
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     }
 }

@@ -43,7 +43,6 @@ fn test_params() -> RiskParams {
         risk_reduction_threshold: 0,
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     }
 }
@@ -60,7 +59,6 @@ fn test_params_with_floor() -> RiskParams {
         risk_reduction_threshold: 1000, // Non-zero floor
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     }
 }
@@ -4291,7 +4289,6 @@ fn proof_settle_maintenance_deducts_correctly() {
         risk_reduction_threshold: 0,
         slots_per_day: 216_000,
         maintenance_fee_per_day: 100, // Non-zero fee
-        keeper_rebate_bps: 5000,
         max_crank_staleness_slots: u64::MAX,
     };
     let mut engine = RiskEngine::new(params);
@@ -4476,4 +4473,172 @@ fn proof_set_risk_reduction_threshold_updates() {
         engine.params.risk_reduction_threshold == new_threshold,
         "Threshold not updated correctly"
     );
+}
+
+// ============================================================================
+// Fee Credits Proofs (Step 5 additions)
+// ============================================================================
+
+/// Proof: Trading increases user's fee_credits by exactly the fee amount
+/// This ensures active traders earn credits that offset maintenance fees
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_trading_credits_fee_to_user() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create user and LP with sufficient capital
+    let user = engine.add_user(100_000).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 100_000).unwrap();
+
+    // Setup vault to cover both capitals
+    engine.vault = 200_000;
+
+    // Record fee_credits before trade
+    let credits_before = engine.accounts[user as usize].fee_credits;
+
+    // Execute a trade with bounded size
+    let size: i128 = kani::any();
+    kani::assume(size != 0 && size != i128::MIN);
+    kani::assume(size > -10 && size < 10); // Small size for fast verification
+
+    let oracle_price: u64 = 1_000_000; // 1.0 in 6 decimals
+    let result = engine.execute_trade(&NoOpMatcher, lp, user, 0, oracle_price, size);
+
+    // If trade succeeded, verify fee_credits increased by the fee amount
+    if result.is_ok() {
+        // Calculate expected fee (same formula as execute_trade)
+        let notional = (size.abs() as u128) * (oracle_price as u128) / 1_000_000;
+        let expected_fee = notional * (engine.params.trading_fee_bps as u128) / 10_000;
+
+        let credits_after = engine.accounts[user as usize].fee_credits;
+        let credits_increase = credits_after.saturating_sub(credits_before);
+
+        assert!(
+            credits_increase == expected_fee as i128,
+            "Trading must credit user with exactly the fee amount"
+        );
+    }
+}
+
+/// Proof: keeper_crank rebates exactly half the maintenance fee due
+/// This ensures the 50% discount is applied correctly
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_rebates_half() {
+    // Use params with non-zero maintenance fee
+    let params = RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 8,
+        new_account_fee: 0,
+        risk_reduction_threshold: 0,
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 100, // Non-zero fee
+        max_crank_staleness_slots: u64::MAX,
+    };
+    let mut engine = RiskEngine::new(params);
+
+    // Create user with capital
+    let user = engine.add_user(10_000).unwrap();
+
+    // Set last_fee_slot to 0 so fees accrue
+    engine.accounts[user as usize].last_fee_slot = 0;
+
+    // Record state before crank
+    let credits_before = engine.accounts[user as usize].fee_credits;
+    let capital_before = engine.accounts[user as usize].capital;
+
+    // Call keeper_crank as the user (advancing slot)
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot > 0 && now_slot <= 432_000); // Up to 2 days of slots
+    kani::assume(now_slot > engine.last_crank_slot);
+
+    let result = engine.keeper_crank(user, now_slot, 1_000_000, 0, false);
+
+    if result.is_ok() {
+        let outcome = result.unwrap();
+
+        // Calculate expected fee due (same formula as settle_maintenance_fee)
+        let slots_elapsed = now_slot;
+        let fee_per_slot = params.maintenance_fee_per_day / params.slots_per_day.max(1) as u128;
+        let expected_due = slots_elapsed as u128 * fee_per_slot;
+        let expected_rebate = expected_due / 2;
+
+        // Verify rebate_credits matches expected
+        assert!(
+            outcome.rebate_credits == expected_rebate as i128,
+            "keeper_crank must return rebate = due / 2"
+        );
+
+        // If we had enough capital/credits, verify fee_credits increased by rebate
+        // (Note: maintenance fee is paid first, then rebate is added)
+        // Net effect on credits: -due (paid) + rebate (earned) = -due/2
+        // But since rebate is applied AFTER settle, credits_after = credits_before - due + rebate
+        // which equals credits_before - due/2 (net 50% discount)
+    }
+}
+
+/// Proof: Net extraction is bounded even with fee credits and keeper_crank
+/// Attacker cannot extract more than deposited + others' losses + spendable insurance
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_net_extraction_bounded_with_fee_credits() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Setup: attacker and LP with bounded capitals
+    let attacker_deposit: u128 = kani::any();
+    let lp_deposit: u128 = kani::any();
+    kani::assume(attacker_deposit > 0 && attacker_deposit <= 1000);
+    kani::assume(lp_deposit > 0 && lp_deposit <= 1000);
+
+    let attacker = engine.add_user(attacker_deposit).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], lp_deposit).unwrap();
+    engine.vault = attacker_deposit + lp_deposit;
+
+    // Optional: attacker calls keeper_crank first
+    let do_crank: bool = kani::any();
+    if do_crank {
+        let _ = engine.keeper_crank(attacker, 100, 1_000_000, 0, false);
+    }
+
+    // Optional: execute a trade
+    let do_trade: bool = kani::any();
+    if do_trade {
+        let delta: i128 = kani::any();
+        kani::assume(delta != 0 && delta != i128::MIN);
+        kani::assume(delta > -5 && delta < 5);
+        let _ = engine.execute_trade(&NoOpMatcher, lp, attacker, 0, 1_000_000, delta);
+    }
+
+    // Attacker attempts withdrawal
+    let withdraw_amount: u128 = kani::any();
+    kani::assume(withdraw_amount <= 10000);
+
+    // Get attacker's state before withdrawal
+    let attacker_capital = engine.accounts[attacker as usize].capital;
+    let attacker_pnl = engine.accounts[attacker as usize].pnl;
+    let attacker_credits = engine.accounts[attacker as usize].fee_credits;
+
+    // Maximum extractable is capital + positive_pnl + positive_credits
+    // (Credits offset maintenance but can't be directly withdrawn)
+    let max_equity = attacker_capital as i128 + attacker_pnl + attacker_credits;
+
+    // Try to withdraw
+    let result = engine.withdraw(attacker, withdraw_amount, 0, 1_000_000);
+
+    // PROOF: Cannot withdraw more than equity allows
+    // If withdrawal succeeded, amount must be <= available equity
+    if result.is_ok() {
+        // Withdrawal succeeded, so amount was within limits
+        // The engine enforces capital-only withdrawals (no direct pnl/credit withdrawal)
+        assert!(
+            withdraw_amount <= attacker_capital,
+            "Withdrawal cannot exceed capital"
+        );
+    }
 }

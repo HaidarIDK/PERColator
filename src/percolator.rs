@@ -209,9 +209,6 @@ pub struct RiskParams {
     /// Maintenance fee per account per day (in capital units)
     pub maintenance_fee_per_day: u128,
 
-    /// Keeper rebate in basis points (e.g., 5000 = 50% of fees go to keeper)
-    pub keeper_rebate_bps: u64,
-
     /// Maximum allowed staleness before crank is required (in slots)
     /// Set to u64::MAX to disable crank freshness check
     pub max_crank_staleness_slots: u64,
@@ -1002,10 +999,10 @@ impl RiskEngine {
                 .settle_maintenance_fee(caller_idx, now_slot, oracle_price)
                 .unwrap_or(0);
 
-            // Rebate = keeper_rebate_bps% of fee collected
-            let rebate = mul_u128(fee_due, self.params.keeper_rebate_bps as u128) / 10_000;
+            // Rebate = exactly 50% of fee (caller pays 100%, gets 50% back as credit)
+            let rebate = fee_due / 2;
 
-            // Credit rebate to caller's fee_credits (reduces their fee burden)
+            // Credit rebate to caller's fee_credits
             if rebate > 0 {
                 self.accounts[caller_idx as usize].fee_credits = self.accounts
                     [caller_idx as usize]
@@ -1604,6 +1601,9 @@ impl RiskEngine {
         // Commit all state changes
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, fee);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, fee);
+
+        // Credit fee to user's fee_credits (active traders earn credits that offset maintenance)
+        user.fee_credits = user.fee_credits.saturating_add(fee as i128);
 
         user.pnl = new_user_pnl;
         user.position_size = new_user_position;
