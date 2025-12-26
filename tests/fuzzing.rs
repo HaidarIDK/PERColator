@@ -268,8 +268,11 @@ fn params_regime_a() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 0,
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 
@@ -281,8 +284,11 @@ fn params_regime_b() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 1000,
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 

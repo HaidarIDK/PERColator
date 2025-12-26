@@ -118,6 +118,18 @@ pub struct Account {
 
     /// Matching engine context account (zero for user accounts)
     pub matcher_context: [u8; 32],
+
+    // ========================================
+    // Owner & Maintenance Fees (wrapper-related)
+    // ========================================
+    /// Owner pubkey (32 bytes, signature checks done by wrapper)
+    pub owner: [u8; 32],
+
+    /// Fee credits in capital units (can go negative if fees owed)
+    pub fee_credits: i128,
+
+    /// Last slot when maintenance fees were settled for this account
+    pub last_fee_slot: u64,
 }
 
 impl Account {
@@ -147,6 +159,9 @@ fn empty_account() -> Account {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     }
 }
 
@@ -178,14 +193,24 @@ pub struct RiskParams {
     /// Maximum number of accounts
     pub max_accounts: u64,
 
-    /// Base account creation fee in basis points (e.g., 10000 = 1%)
-    /// Actual fee = (account_fee_bps * capacity_multiplier) / 10000
-    /// The multiplier increases as the system approaches max capacity
-    pub account_fee_bps: u64,
+    /// Flat account creation fee (absolute amount in capital units)
+    pub new_account_fee: u128,
 
     /// Insurance fund threshold for entering risk-reduction-only mode
     /// If insurance fund balance drops below this, risk-reduction mode activates
     pub risk_reduction_threshold: u128,
+
+    // ========================================
+    // Maintenance Fee Parameters
+    // ========================================
+    /// Number of slots per day (for fee calculations)
+    pub slots_per_day: u64,
+
+    /// Maintenance fee per account per day (in capital units)
+    pub maintenance_fee_per_day: u128,
+
+    /// Keeper rebate in basis points (e.g., 5000 = 50% of fees go to keeper)
+    pub keeper_rebate_bps: u64,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -225,6 +250,24 @@ pub struct RiskEngine {
 
     /// Slot when warmup was paused
     pub warmup_pause_slot: u64,
+
+    // ========================================
+    // Keeper Crank Tracking
+    // ========================================
+    /// Last slot when keeper crank was executed
+    pub last_crank_slot: u64,
+
+    /// Maximum allowed staleness before crank is required (in slots)
+    pub max_crank_staleness_slots: u64,
+
+    // ========================================
+    // Net Open Interest Tracking (O(1))
+    // ========================================
+    /// Sum of all position_size across accounts (signed)
+    pub net_position: i128,
+
+    /// Cached abs(net_position) for quick exposure checks
+    pub abs_net_position: u128,
 
     // ========================================
     // Warmup Budget Tracking
@@ -494,6 +537,10 @@ impl RiskEngine {
             risk_reduction_mode_withdrawn: 0,
             warmup_paused: false,
             warmup_pause_slot: 0,
+            last_crank_slot: 0,
+            max_crank_staleness_slots: params.slots_per_day / 100, // ~1% of day
+            net_position: 0,
+            abs_net_position: 0,
             warmed_pos_total: 0,
             warmed_neg_total: 0,
             warmup_insurance_reserved: 0,
@@ -578,25 +625,6 @@ impl RiskEngine {
         Ok(idx)
     }
 
-    /// Calculate account creation fee multiplier
-    fn account_fee_multiplier(max: u64, used: u64) -> u128 {
-        if used >= max {
-            return 0; // Cannot add
-        }
-        let remaining = max - used;
-        if remaining == 0 {
-            0
-        } else {
-            // 2^(floor(log2(max / remaining)))
-            let ratio = max / remaining;
-            if ratio == 0 {
-                1
-            } else {
-                1 << (64 - ratio.leading_zeros() - 1)
-            }
-        }
-    }
-
     /// Count used accounts
     fn count_used(&self) -> u64 {
         let mut count = 0u64;
@@ -655,8 +683,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        let multiplier = Self::account_fee_multiplier(self.params.max_accounts, used_count);
-        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        // Flat fee (no scaling)
+        let required_fee = self.params.new_account_fee;
         if fee_payment < required_fee {
             return Err(RiskError::InsufficientBalance);
         }
@@ -685,6 +713,9 @@ impl RiskEngine {
             funding_index: self.funding_index_qpb_e6,
             matcher_program: [0; 32],
             matcher_context: [0; 32],
+            owner: [0; 32],
+            fee_credits: 0,
+            last_fee_slot: self.current_slot,
         };
 
         Ok(idx)
@@ -703,8 +734,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        let multiplier = Self::account_fee_multiplier(self.params.max_accounts, used_count);
-        let required_fee = mul_u128(self.params.account_fee_bps as u128, multiplier) / 10_000;
+        // Flat fee (no scaling)
+        let required_fee = self.params.new_account_fee;
         if fee_payment < required_fee {
             return Err(RiskError::InsufficientBalance);
         }
@@ -733,6 +764,9 @@ impl RiskEngine {
             funding_index: self.funding_index_qpb_e6,
             matcher_program: matching_engine_program,
             matcher_context: matching_engine_context,
+            owner: [0; 32],
+            fee_credits: 0,
+            last_fee_slot: self.current_slot,
         };
 
         Ok(idx)

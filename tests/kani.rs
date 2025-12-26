@@ -39,8 +39,11 @@ fn test_params() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 8,    // Match Kani's MAX_ACCOUNTS
-        account_fee_bps: 0, // Zero fees to avoid vault/insurance mutations during add_user/add_lp
+        new_account_fee: 0, // Zero fees to avoid vault/insurance mutations during add_user/add_lp
         risk_reduction_threshold: 0,
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 
@@ -52,8 +55,11 @@ fn test_params_with_floor() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 8,
-        account_fee_bps: 0,
+        new_account_fee: 0,
         risk_reduction_threshold: 1000, // Non-zero floor
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 

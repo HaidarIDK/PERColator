@@ -56,8 +56,11 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        account_fee_bps: 10000,      // 1%
+        new_account_fee: 0,          // Zero fee for tests
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
+        slots_per_day: 216_000,      // ~400ms slots
+        maintenance_fee_per_day: 0,  // No maintenance fee by default
+        keeper_rebate_bps: 5000,     // 50% to keeper
     }
 }
 
@@ -2751,8 +2754,11 @@ fn params_with_threshold() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 1000,
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 1000, // Non-zero threshold
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 
@@ -4561,6 +4567,9 @@ fn test_maintenance_margin_uses_equity() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = 40, MM = 50, 40 < 50 => not above MM
@@ -4583,6 +4592,9 @@ fn test_maintenance_margin_uses_equity() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = max(0, 100 - 60) = 40, MM = 50, 40 < 50 => not above MM
@@ -4644,6 +4656,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_pos), 7_000);
 
@@ -4661,6 +4676,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_neg), 0);
 
@@ -4678,6 +4696,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_profit), 15_000);
 }

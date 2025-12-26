@@ -10,8 +10,11 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        account_fee_bps: 10000,      // 1%
+        new_account_fee: 0,          // Zero fee for tests
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
+        slots_per_day: 216_000,
+        maintenance_fee_per_day: 0,
+        keeper_rebate_bps: 5000,
     }
 }
 
