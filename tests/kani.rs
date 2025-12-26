@@ -3900,6 +3900,9 @@ fn fast_maintenance_margin_uses_equity_including_negative_pnl() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     let oracle_price = 1_000_000u64;
@@ -3948,6 +3951,9 @@ fn fast_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     let equity = engine.account_equity(&account);
@@ -4026,6 +4032,9 @@ fn maintenance_margin_uses_equity_negative_pnl() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = 40, MM = 50, 40 < 50 => not above MM
@@ -4048,6 +4057,9 @@ fn maintenance_margin_uses_equity_negative_pnl() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = max(0, 100 - 60) = 40, MM = 50, 40 < 50 => not above MM
@@ -4240,12 +4252,13 @@ fn security_goal_bounded_net_extraction_sequence() {
 /// A. Fee credits never inflate equity - fee_credits can only decrease or stay same
 /// when maintenance fees are settled (they can increase only via add_fee_credits)
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_fee_credits_never_inflate_from_settle() {
     let mut engine = RiskEngine::new(test_params());
 
     // Set up with user
-    let user = engine.add_user([1; 32], 1000).unwrap();
+    let user = engine.add_user(1000).unwrap();
 
     // Record initial fee credits (starts at 0)
     let initial_credits = engine.accounts[user as usize].fee_credits;
@@ -4263,7 +4276,8 @@ fn proof_fee_credits_never_inflate_from_settle() {
 
 /// B. settle_maintenance_fee properly deducts from fee_credits or capital
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_settle_maintenance_deducts_correctly() {
     let params = RiskParams {
         warmup_period_slots: 100,
@@ -4280,7 +4294,7 @@ fn proof_settle_maintenance_deducts_correctly() {
     let mut engine = RiskEngine::new(params);
 
     // Set up user with some capital
-    let user = engine.add_user([1; 32], 1000).unwrap();
+    let user = engine.add_user(1000).unwrap();
 
     // Set last_fee_slot to something in the past so fees accrue
     engine.accounts[user as usize].last_fee_slot = 0;
@@ -4305,11 +4319,12 @@ fn proof_settle_maintenance_deducts_correctly() {
 
 /// C. keeper_crank advances last_crank_slot monotonically
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_keeper_crank_advances_slot_monotonically() {
     let mut engine = RiskEngine::new(test_params());
 
-    let user = engine.add_user([1; 32], 1000).unwrap();
+    let user = engine.add_user(1000).unwrap();
     engine.last_crank_slot = 100;
 
     let slot_before = engine.last_crank_slot;
@@ -4334,11 +4349,12 @@ fn proof_keeper_crank_advances_slot_monotonically() {
 
 /// D. close_account only succeeds if position is zero and no fees owed
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_close_account_requires_flat_and_paid() {
     let mut engine = RiskEngine::new(test_params());
 
-    let user = engine.add_user([1; 32], 1000).unwrap();
+    let user = engine.add_user(1000).unwrap();
 
     // Try closing with arbitrary state
     let has_position: bool = kani::any();
@@ -4366,9 +4382,10 @@ fn proof_close_account_requires_flat_and_paid() {
 /// E. net_position tracking: sum of all positions equals engine.net_position
 /// Note: This is a simplified proof that verifies the invariant for small cases
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_net_position_sum_consistency() {
-    let mut engine = RiskEngine::new(test_params());
+    let engine = RiskEngine::new(test_params());
 
     // Start with net_position = 0
     assert!(engine.net_position == 0, "Initial net_position should be 0");
@@ -4392,7 +4409,8 @@ fn proof_net_position_sum_consistency() {
 
 /// F. require_fresh_crank gates stale state correctly
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_require_fresh_crank_gates_stale() {
     let mut engine = RiskEngine::new(test_params());
 
@@ -4417,14 +4435,15 @@ fn proof_require_fresh_crank_gates_stale() {
 
 /// Verify close_account returns correct equity amount
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_close_account_returns_correct_equity() {
     let mut engine = RiskEngine::new(test_params());
 
     let capital: u128 = kani::any();
     kani::assume(capital > 0 && capital <= 10000);
 
-    let user = engine.add_user([1; 32], capital).unwrap();
+    let user = engine.add_user(capital).unwrap();
 
     // No position, no fees owed
     engine.accounts[user as usize].position_size = 0;
@@ -4454,7 +4473,8 @@ fn proof_close_account_returns_correct_equity() {
 
 /// Verify set_risk_reduction_threshold updates the parameter
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
 fn proof_set_risk_reduction_threshold_updates() {
     let mut engine = RiskEngine::new(test_params());
 
