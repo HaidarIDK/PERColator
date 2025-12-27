@@ -1157,14 +1157,21 @@ impl RiskEngine {
         let numerator = mul_u128(equity, 10_000_000_000);
         let denominator = mul_u128(oracle_price as u128, target_bps as u128);
 
-        let abs_pos_safe_max = if denominator == 0 {
+        let mut abs_pos_safe_max = if denominator == 0 {
             0 // Edge case: full liquidation if no denominator
         } else {
             numerator / denominator
         };
 
         // Clamp to current position (can't have safe max > actual position)
-        let abs_pos_safe_max = core::cmp::min(abs_pos_safe_max, abs_pos);
+        abs_pos_safe_max = core::cmp::min(abs_pos_safe_max, abs_pos);
+
+        // Conservative rounding guard: subtract 1 unit to ensure we close slightly more
+        // than mathematically required. This guarantees post-liquidation account is
+        // strictly on the safe side of the inequality despite integer truncation.
+        if abs_pos_safe_max > 0 {
+            abs_pos_safe_max -= 1;
+        }
 
         // Required close amount
         let close_abs = abs_pos.saturating_sub(abs_pos_safe_max);
@@ -1411,6 +1418,18 @@ impl RiskEngine {
 
         if !outcome.position_was_closed {
             return Ok(false);
+        }
+
+        // Post-liquidation safety check: if position remains, verify target margin is met.
+        // The conservative -1 rounding guard in compute_liquidation_close_amount ensures this.
+        let remaining_pos = self.accounts[idx as usize].position_size;
+        if remaining_pos != 0 {
+            let target_bps = self.params.maintenance_margin_bps
+                .saturating_add(self.params.liquidation_buffer_bps);
+            debug_assert!(
+                self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps),
+                "Partial liquidation must leave account above target margin"
+            );
         }
 
         // Compute and apply liquidation fee on the closed amount (this IS fee revenue)
@@ -1805,6 +1824,12 @@ impl RiskEngine {
     /// Check if account is above maintenance margin
     /// FIX B: Uses equity (includes negative PnL) instead of collateral
     pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
+        self.is_above_margin_bps(account, oracle_price, self.params.maintenance_margin_bps)
+    }
+
+    /// Check if account is above a given margin threshold (in basis points).
+    /// Used for both maintenance margin check and post-liquidation target margin check.
+    pub fn is_above_margin_bps(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
         let equity = self.account_equity(account);
 
         // Calculate position value at current price
@@ -1813,9 +1838,8 @@ impl RiskEngine {
             oracle_price as u128,
         ) / 1_000_000;
 
-        // Maintenance margin requirement
-        let margin_required =
-            mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+        // Margin requirement at given bps
+        let margin_required = mul_u128(position_value, bps as u128) / 10_000;
 
         equity > margin_required
     }
