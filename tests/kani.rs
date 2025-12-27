@@ -4305,42 +4305,32 @@ fn proof_fee_credits_never_inflate_from_settle() {
 #[kani::solver(cadical)]
 fn proof_settle_maintenance_deducts_correctly() {
     let mut engine = RiskEngine::new(test_params_with_maintenance_fee());
+    let user = engine.add_user(0).unwrap();
 
-    let user = engine.add_user(10_000).unwrap();
-
-    // Set last_fee_slot = 0, then settle at slot 10_000
-    // With fee_per_slot = 1, expected due = 10_000
+    // Make the path deterministic - set capital explicitly
+    engine.accounts[user as usize].capital = 20_000;
+    engine.accounts[user as usize].fee_credits = 0;
     engine.accounts[user as usize].last_fee_slot = 0;
 
     let cap_before = engine.accounts[user as usize].capital;
-    let credits_before = engine.accounts[user as usize].fee_credits;
     let insurance_before = engine.insurance_fund.balance;
 
     let now_slot: u64 = 10_000;
-    let expected_due: u128 = 10_000; // fee_per_slot * slots = 1 * 10_000
+    let expected_due: u128 = 10_000; // fee_per_slot=1
 
-    let _ = engine.settle_maintenance_fee(user, now_slot, 1_000_000);
+    let res = engine.settle_maintenance_fee(user, now_slot, 1_000_000);
+    assert!(res.is_ok());
 
     let cap_after = engine.accounts[user as usize].capital;
-    let credits_after = engine.accounts[user as usize].fee_credits;
     let insurance_after = engine.insurance_fund.balance;
+    let credits_after = engine.accounts[user as usize].fee_credits;
 
-    // Credits start at 0, so fee comes from capital
-    // Capital should decrease by min(due, capital)
-    let paid = cap_before.saturating_sub(cap_after);
+    assert!(engine.accounts[user as usize].last_fee_slot == now_slot);
 
-    // Insurance should increase by the paid amount
-    assert!(
-        insurance_after >= insurance_before,
-        "Insurance should not decrease from fee settlement"
-    );
-
-    // Credits should be negative by the unpaid portion (if any)
-    // If capital covered everything, credits stay 0
-    // Otherwise credits = -(due - paid)
-    if paid >= expected_due {
-        assert!(credits_after == 0, "Credits should be 0 when capital covers full fee");
-    }
+    // With credits=0 and capital=20_000, we pay full due from capital:
+    assert!(cap_after == cap_before - expected_due);
+    assert!(insurance_after == insurance_before + expected_due);
+    assert!(credits_after == 0);
 }
 
 /// C. keeper_crank advances last_crank_slot correctly
@@ -4482,28 +4472,19 @@ fn proof_require_fresh_crank_gates_stale() {
 #[kani::solver(cadical)]
 fn proof_close_account_returns_capital_only() {
     let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
 
-    // Deposit capital deterministically
-    let user = engine.add_user(5000).unwrap();
+    // Give the user capital via deposit
+    let _ = engine.deposit(user, 7_000);
+    let cap_before_close = engine.accounts[user as usize].capital;
 
-    // Get capital after add_user
-    let capital_after_add = engine.accounts[user as usize].capital;
+    // Add unwarmed pnl (should be forfeited)
+    engine.accounts[user as usize].pnl = 1_000;
+    engine.accounts[user as usize].warmup_slope_per_step = 0;
 
-    // No position, no fees owed
-    // Set positive pnl but do NOT expect it returned (unwarmed pnl is forfeited)
-    engine.accounts[user as usize].pnl = 1000;
-
-    let result = engine.close_account(user, 0, 1_000_000);
-
-    if result.is_ok() {
-        let returned = result.unwrap();
-        // close_account returns capital only, not capital + pnl
-        // Unwarmed positive pnl is forfeited on close
-        assert!(
-            returned == capital_after_add,
-            "close_account should return capital only, not capital + unwarmed pnl"
-        );
-    }
+    let res = engine.close_account(user, 0, 1_000_000);
+    assert!(res.is_ok());
+    assert!(res.unwrap() == cap_before_close);
 }
 
 /// Verify close_account includes warmed pnl that was settled to capital
@@ -4512,11 +4493,13 @@ fn proof_close_account_returns_capital_only() {
 #[kani::solver(cadical)]
 fn proof_close_account_includes_warmed_pnl() {
     let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
 
-    let user = engine.add_user(5000).unwrap();
+    // Give the user capital via deposit
+    let _ = engine.deposit(user, 5_000);
 
     // Set positive pnl and warmup parameters so pnl can warm
-    engine.accounts[user as usize].pnl = 1000;
+    engine.accounts[user as usize].pnl = 1_000;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
     engine.accounts[user as usize].warmup_slope_per_step = 100; // 100 per slot
 
