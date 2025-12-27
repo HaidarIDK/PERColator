@@ -4736,7 +4736,7 @@ fn proof_lq1_liquidation_closes_position_and_oi_decreases() {
     engine.accounts[user as usize].pnl = -9_000;
 
     let oi_before = engine.total_open_interest;
-    let abs_pos = saturating_abs_i128(initial_pos) as u128;
+    let abs_pos = initial_pos.unsigned_abs();
 
     // Oracle price at 0.5 (causes loss, user is undercollateralized)
     let oracle_price: u64 = 500_000;

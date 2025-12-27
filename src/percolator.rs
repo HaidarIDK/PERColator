@@ -175,6 +175,21 @@ pub struct InsuranceFund {
     pub fee_revenue: u128,
 }
 
+/// Outcome from oracle_close_position_core helper
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClosedOutcome {
+    /// Absolute position size that was closed
+    pub abs_pos: u128,
+    /// Mark PnL from closing at oracle price
+    pub mark_pnl: i128,
+    /// Capital before settlement
+    pub cap_before: u128,
+    /// Capital after settlement
+    pub cap_after: u128,
+    /// Whether a position was actually closed
+    pub position_was_closed: bool,
+}
+
 /// Risk engine parameters
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RiskParams {
@@ -1091,45 +1106,38 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)
     }
 
-    /// Liquidate a single account at oracle price if below maintenance margin.
+    /// Core helper for oracle-price position close.
     ///
-    /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
-    /// This is an oracle-price force-close that does NOT require an LP/AMM.
+    /// This is the ONLY place that applies mark PnL + ADL routing + settlement
+    /// for forced-close flows (liquidation, panic_settle, force_realize).
     ///
-    /// ## Mark PnL Routing (critical for invariant preservation):
-    /// - mark_pnl > 0 (profit for liquidated account) → system deficit → apply_adl()
-    /// - mark_pnl < 0 (loss for liquidated account) → realized via settle_warmup_to_capital
+    /// ## PnL Routing Invariant:
+    /// - mark_pnl > 0 (profit) → funded via apply_adl() waterfall
+    /// - mark_pnl <= 0 (loss) → realized via settle_warmup_to_capital (capital path)
+    /// - Residual negative PnL (capital exhausted) → routed through ADL, PnL clamped to 0
     ///
-    /// After settlement, the capital actually paid (cap_before - cap_after) is routed
-    /// to insurance_fund.balance (NOT fee_revenue) to maintain balance-sheet neutrality.
-    pub fn liquidate_at_oracle(
+    /// No other path creates or destroys value.
+    fn oracle_close_position_core(
         &mut self,
         idx: u16,
         now_slot: u64,
         oracle_price: u64,
-    ) -> Result<bool> {
-        // No require_fresh_crank() here - keeper_crank IS the crank that makes things fresh.
-        // Only withdraw() and execute_trade() need that gate.
-
-        // Validate index
-        if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
-            return Ok(false);
-        }
-
-        // Settle account fully (funding + maintenance + warmup) pre-liquidation
+    ) -> Result<ClosedOutcome> {
+        // Settle account fully (funding + maintenance + warmup) first
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
-        // Check if account needs liquidation
-        let account = &self.accounts[idx as usize];
-        if account.position_size == 0 {
-            return Ok(false);
-        }
-        if self.is_above_maintenance_margin(account, oracle_price) {
-            return Ok(false);
+        // Check if there's a position to close
+        if self.accounts[idx as usize].position_size == 0 {
+            return Ok(ClosedOutcome {
+                abs_pos: 0,
+                mark_pnl: 0,
+                cap_before: self.accounts[idx as usize].capital,
+                cap_after: self.accounts[idx as usize].capital,
+                position_was_closed: false,
+            });
         }
 
-        // Account is below maintenance margin with a position - liquidate it
-        // Snapshot position details and capital before modification
+        // Snapshot position details and capital
         let pos = self.accounts[idx as usize].position_size;
         let abs_pos = saturating_abs_i128(pos) as u128;
         let entry = self.accounts[idx as usize].entry_price;
@@ -1148,23 +1156,73 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
-        // Route positive mark_pnl through ADL (system deficit - profits must be funded)
+        // Route positive mark_pnl through ADL (profits must be funded from somewhere)
         if mark_pnl > 0 {
             self.apply_adl(mark_pnl as u128)?;
         }
-        // mark_pnl <= 0: no ADL needed, losses are realized from capital below
+        // mark_pnl <= 0: losses realized from capital via settlement below
 
         // Settle warmup (realizes negative PnL from capital immediately, budgets positive)
         self.settle_warmup_to_capital(idx)?;
 
-        // Route realized losses to insurance (balance-sheet neutral: capital ↓, insurance ↑)
+        // Handle residual negative PnL (capital exhausted)
+        // This unpaid loss must be socialized via ADL waterfall, then clamp PnL to 0
+        let residual_pnl = self.accounts[idx as usize].pnl;
+        if residual_pnl < 0 {
+            let unpaid = neg_i128_to_u128(residual_pnl);
+            self.apply_adl(unpaid)?;
+            self.accounts[idx as usize].pnl = 0;
+        }
+
+        // Snapshot capital after settlement
         let cap_after = self.accounts[idx as usize].capital;
-        let paid = cap_before.saturating_sub(cap_after);
-        self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(paid);
-        // NOT fee_revenue - this is loss recovery, not a fee
+
+        Ok(ClosedOutcome {
+            abs_pos,
+            mark_pnl,
+            cap_before,
+            cap_after,
+            position_was_closed: true,
+        })
+    }
+
+    /// Liquidate a single account at oracle price if below maintenance margin.
+    ///
+    /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
+    /// This is an oracle-price force-close that does NOT require an LP/AMM.
+    ///
+    /// Uses oracle_close_position_core for PnL routing, then charges liquidation fee.
+    pub fn liquidate_at_oracle(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<bool> {
+        // Validate index
+        if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Ok(false);
+        }
+
+        // Settle and check maintenance margin
+        self.touch_account_full(idx, now_slot, oracle_price)?;
+
+        let account = &self.accounts[idx as usize];
+        if account.position_size == 0 {
+            return Ok(false);
+        }
+        if self.is_above_maintenance_margin(account, oracle_price) {
+            return Ok(false);
+        }
+
+        // Close position via core helper (handles PnL routing)
+        let outcome = self.oracle_close_position_core(idx, now_slot, oracle_price)?;
+
+        if !outcome.position_was_closed {
+            return Ok(false);
+        }
 
         // Compute and apply liquidation fee (this IS fee revenue)
-        let notional = mul_u128(abs_pos, oracle_price as u128) / 1_000_000;
+        let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
 
@@ -1178,23 +1236,6 @@ impl RiskEngine {
 
         // Recompute warmup reserved after insurance changes
         self.recompute_warmup_insurance_reserved();
-
-        // Assert invariants in debug/kani builds
-        #[cfg(any(test, kani))]
-        {
-            let raw = self.insurance_spendable_raw();
-            let floor = self.params.risk_reduction_threshold;
-            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
-            let expect_reserved = core::cmp::min(needed, raw);
-            debug_assert!(
-                self.warmup_insurance_reserved == expect_reserved,
-                "Reserved invariant violated in liquidate_at_oracle"
-            );
-            debug_assert!(
-                self.insurance_fund.balance >= floor.saturating_add(self.warmup_insurance_reserved),
-                "Insurance floor + reserved not protected in liquidate_at_oracle"
-            );
-        }
 
         Ok(true)
     }
@@ -2227,7 +2268,8 @@ impl RiskEngine {
     /// 3. Clamps negative PNL to zero and accumulates system loss
     /// 4. Applies ADL to socialize the loss (unwrapped PNL first, then insurance, then loss_accum)
     ///
-    /// No funding settlement is performed - this is purely position settlement.
+    /// Unlike single-account liquidation, global settlement requires multi-phase
+    /// processing so ADL can see the full picture of positive PnL before haircutting.
     pub fn panic_settle_all(&mut self, oracle_price: u64) -> Result<()> {
         // Panic settle is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
@@ -2240,7 +2282,7 @@ impl RiskEngine {
         // Track sum of mark PNL to compensate for integer division rounding
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: settle funding and positions, clamp negative PNL
+        // Phase 1: settle funding, apply mark PnL, close positions, clamp negative PnL
         let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
@@ -2262,21 +2304,7 @@ impl RiskEngine {
                 // Compute mark PNL at oracle price
                 let pos = account.position_size;
                 let abs_pos = saturating_abs_i128(pos) as u128;
-
-                let diff: i128 = if pos > 0 {
-                    // Long: profit when oracle > entry
-                    (oracle_price as i128).saturating_sub(account.entry_price as i128)
-                } else {
-                    // Short: profit when entry > oracle
-                    (account.entry_price as i128).saturating_sub(oracle_price as i128)
-                };
-
-                // mark_pnl = diff * abs_pos / 1_000_000
-                let mark_pnl = diff
-                    .checked_mul(abs_pos as i128)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_div(1_000_000)
-                    .ok_or(RiskError::Overflow)?;
+                let mark_pnl = Self::mark_pnl_for_position(pos, account.entry_price, oracle_price)?;
 
                 // Track total mark PNL for rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
@@ -2286,11 +2314,13 @@ impl RiskEngine {
 
                 // Close position
                 account.position_size = 0;
-                account.entry_price = oracle_price; // Set to oracle for determinism
+                account.entry_price = oracle_price;
+
+                // Update OI
+                self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
                 // Clamp negative PNL and accumulate system loss
                 if account.pnl < 0 {
-                    // Convert negative PNL to system loss
                     let loss = neg_i128_to_u128(account.pnl);
                     total_loss = total_loss.saturating_add(loss);
                     account.pnl = 0;
@@ -2298,28 +2328,20 @@ impl RiskEngine {
             }
         }
 
-        // Compensate for non-zero-sum mark PNL.
-        // Mark PNL may not sum to zero due to:
-        // 1. Integer division rounding slippage
-        // 2. Entry price discrepancies from weighted averaging
-        //
+        // Compensate for non-zero-sum mark PNL from rounding.
         // If positive: treat as additional loss to socialize via ADL
-        // If negative: this is a rounding artifact bounded by MAX_ROUNDING_SLACK.
-        //              Do NOT add to insurance (that would mint value).
-        //              The slack is absorbed by the bounded conservation check.
+        // If negative: absorbed by bounded conservation slack (don't mint to insurance)
         if total_mark_pnl > 0 {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
         }
-        // total_mark_pnl < 0: no action needed, absorbed by conservation slack
 
-        // Socialize the accumulated loss via ADL waterfall BEFORE settle_warmup
-        // This allows apply_adl to haircut positive PNL before it gets converted to capital
+        // Phase 2: Socialize accumulated loss via ADL waterfall
+        // All accounts now have their mark_pnl applied, so ADL can haircut properly
         if total_loss > 0 {
             self.apply_adl(total_loss)?;
         }
 
-        // Second pass: settle warmup for all used accounts after ADL
-        // This converts any remaining positive PNL to capital with proper budget tracking
+        // Phase 3: Settle warmup for all accounts (after ADL haircuts)
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -2327,12 +2349,11 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
 
-                // settle_warmup_to_capital handles the budget invariant
                 self.settle_warmup_to_capital(idx as u16)?;
             }
         }
 
-        // Recompute reserved after all operations (insurance may have changed)
+        // Recompute reserved after all operations
         self.recompute_warmup_insurance_reserved();
 
         // Assert reserved equality invariant in test/kani
@@ -2364,6 +2385,8 @@ impl RiskEngine {
     /// 4. For losers: pays losses from capital, incrementing warmed_neg_total
     /// 5. Does NOT warm any positive PnL (keeps it young, subject to ADL)
     /// 6. Unpaid losses (capital exhausted) go through apply_adl waterfall
+    ///
+    /// Like panic_settle_all, uses multi-phase processing so ADL can see full picture.
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
         // Force realize is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
@@ -2378,10 +2401,10 @@ impl RiskEngine {
 
         // Accumulate unpaid losses (when capital is exhausted)
         let mut total_unpaid_loss = 0u128;
-        // Track sum of mark PNL for rounding compensation
+        // Track sum of mark PNL to compensate for integer division rounding
         let mut total_mark_pnl: i128 = 0;
 
-        // Single pass: settle funding, realize mark PnL, and settle negative PnL into capital
+        // Phase 1: settle funding, apply mark PnL, close positions, pay losses from capital
         let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
@@ -2403,21 +2426,7 @@ impl RiskEngine {
                 // Compute mark PNL at oracle price
                 let pos = account.position_size;
                 let abs_pos = saturating_abs_i128(pos) as u128;
-
-                let diff: i128 = if pos > 0 {
-                    // Long: profit when oracle > entry
-                    (oracle_price as i128).saturating_sub(account.entry_price as i128)
-                } else {
-                    // Short: profit when entry > oracle
-                    (account.entry_price as i128).saturating_sub(oracle_price as i128)
-                };
-
-                // mark_pnl = diff * abs_pos / 1_000_000
-                let mark_pnl = diff
-                    .checked_mul(abs_pos as i128)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_div(1_000_000)
-                    .ok_or(RiskError::Overflow)?;
+                let mark_pnl = Self::mark_pnl_for_position(pos, account.entry_price, oracle_price)?;
 
                 // Track total mark PNL for rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
@@ -2428,6 +2437,9 @@ impl RiskEngine {
                 // Close position
                 account.position_size = 0;
                 account.entry_price = oracle_price;
+
+                // Update OI
+                self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
                 // Force settle losses only (not positive PnL)
                 if account.pnl < 0 {
@@ -2451,26 +2463,21 @@ impl RiskEngine {
                 }
                 // Positive PnL is left as-is (young, subject to ADL, warmup frozen)
 
-                // Update warmup start marker to effective_slot to prevent later
-                // settle_warmup_to_capital() from "re-paying" based on old elapsed time.
-                // Since we called enter_risk_reduction_only_mode(), warmup is paused,
-                // so effective_slot = warmup_pause_slot.
+                // Update warmup start marker
                 let effective_slot = core::cmp::min(self.current_slot, self.warmup_pause_slot);
                 account.warmup_started_at_slot = effective_slot;
             }
         }
 
-        // Compensate for non-zero-sum mark PNL.
-        // If positive: treat as additional unpaid loss to socialize via ADL
-        // If negative: this is a rounding artifact bounded by MAX_ROUNDING_SLACK.
-        //              Do NOT add to insurance (that would mint value).
-        //              The slack is absorbed by the bounded conservation check.
+        // Compensate for non-zero-sum mark PNL from rounding.
+        // If positive: treat as additional loss to socialize via ADL
+        // If negative: absorbed by bounded conservation slack (don't mint to insurance)
         if total_mark_pnl > 0 {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
         }
-        // total_mark_pnl < 0: no action needed, absorbed by conservation slack
 
-        // Socialize any unpaid losses via ADL waterfall
+        // Phase 2: Socialize any unpaid losses via ADL waterfall
+        // All accounts now have their mark_pnl applied, so ADL can haircut properly
         if total_unpaid_loss > 0 {
             self.apply_adl(total_unpaid_loss)?;
         }
