@@ -61,6 +61,7 @@ fn default_params() -> RiskParams {
         slots_per_day: 216_000,      // ~400ms slots
         maintenance_fee_per_day: 0,  // No maintenance fee by default
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,     // 0.5% liquidation fee
     }
 }
 
@@ -2759,6 +2760,7 @@ fn params_with_threshold() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
     }
 }
 
@@ -4798,4 +4800,110 @@ fn test_withdraw_im_check_blocks_when_equity_below_im() {
     // Should succeed
     let result2 = engine.withdraw(user_idx, 40, 0, 1_000_000);
     assert!(result2.is_ok());
+}
+
+// ==============================================================================
+// LIQUIDATION TESTS
+// ==============================================================================
+
+/// Test: keeper_crank returns num_liquidations > 0 when a user is under maintenance
+#[test]
+fn test_keeper_crank_liquidates_undercollateralized_user() {
+    let mut engine = RiskEngine::new(default_params());
+
+    // Create user and LP
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    let _ = engine.deposit(user, 10_000);
+    let _ = engine.deposit(lp, 100_000);
+
+    // Give user a long position at entry price 1.0
+    engine.accounts[user as usize].position_size = 1_000_000; // 1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[lp as usize].position_size = -1_000_000;
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 2_000_000;
+
+    // Set negative PnL to make user undercollateralized
+    // Position value at oracle 0.5 = 500_000
+    // Maintenance margin = 500_000 * 5% = 25_000
+    // User has capital 10_000, needs equity > 25_000 to avoid liquidation
+    engine.accounts[user as usize].pnl = -9_500; // equity = 500 < 25_000
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Call keeper_crank with oracle price 0.5 (500_000 in e6)
+    let result = engine.keeper_crank(user, 1, 500_000, 0, false);
+    assert!(result.is_ok());
+
+    let outcome = result.unwrap();
+
+    // Should have liquidated the user
+    assert!(
+        outcome.num_liquidations > 0,
+        "Expected at least one liquidation, got {}",
+        outcome.num_liquidations
+    );
+
+    // User's position should be closed
+    assert_eq!(
+        engine.accounts[user as usize].position_size, 0,
+        "User position should be closed after liquidation"
+    );
+
+    // Insurance should have increased from liquidation fee
+    assert!(
+        engine.insurance_fund.balance >= insurance_before,
+        "Insurance should not decrease from liquidation"
+    );
+}
+
+/// Test: Liquidation fee is correctly calculated and paid
+/// Setup: small position with no mark pnl (oracle == entry), just barely undercollateralized
+#[test]
+fn test_liquidation_fee_calculation() {
+    let mut engine = RiskEngine::new(default_params());
+
+    // Create user
+    let user = engine.add_user(0).unwrap();
+
+    // Setup:
+    // position = 100_000 (0.1 unit), entry = oracle = 1_000_000 (no mark pnl)
+    // position_value = 100_000 * 1_000_000 / 1_000_000 = 100_000
+    // maintenance_margin = 100_000 * 5% = 5_000
+    // capital = 4_000 < 5_000 -> undercollateralized
+    engine.accounts[user as usize].capital = 4_000;
+    engine.accounts[user as usize].position_size = 100_000; // 0.1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 100_000;
+    engine.vault = 4_000;
+
+    let insurance_before = engine.insurance_fund.balance;
+    let oracle_price: u64 = 1_000_000; // Same as entry = no mark pnl
+
+    // Expected fee calculation:
+    // notional = 100_000 * 1_000_000 / 1_000_000 = 100_000
+    // fee = 100_000 * 50 / 10_000 = 500 (0.5% of notional)
+
+    let result = engine.maybe_liquidate_account(user, 0, oracle_price);
+    assert!(result.is_ok());
+    assert!(result.unwrap(), "Liquidation should occur");
+
+    let insurance_after = engine.insurance_fund.balance;
+    let fee_received = insurance_after - insurance_before;
+
+    // Fee should be 0.5% of notional (100_000)
+    let expected_fee: u128 = 500;
+    assert_eq!(
+        fee_received, expected_fee,
+        "Liquidation fee should be {} but got {}",
+        expected_fee, fee_received
+    );
+
+    // Verify capital was reduced by the fee
+    assert_eq!(
+        engine.accounts[user as usize].capital, 3_500,
+        "Capital should be 4000 - 500 = 3500"
+    );
 }

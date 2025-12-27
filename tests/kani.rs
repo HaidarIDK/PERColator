@@ -48,6 +48,7 @@ fn test_params() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
     }
 }
 
@@ -64,6 +65,7 @@ fn test_params_with_floor() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
     }
 }
 
@@ -81,6 +83,7 @@ fn test_params_with_maintenance_fee() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 216_000, // fee_per_slot = 1
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
     }
 }
 
@@ -4702,4 +4705,129 @@ fn proof_net_extraction_bounded_with_fee_credits() {
             "Withdrawal cannot exceed capital"
         );
     }
+}
+
+// ============================================================================
+// LIQUIDATION PROOFS
+// ============================================================================
+
+/// Proof: Liquidation fee goes to insurance fund
+/// Setup user with position and undercollateralized state, verify fee flows correctly
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_liquidation_fee_goes_to_insurance() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create user with capital
+    let user = engine.add_user(0).unwrap();
+    let _ = engine.deposit(user, 10_000);
+
+    // Give user a position
+    engine.accounts[user as usize].position_size = 1_000_000; // 1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;   // entry at 1.0
+    engine.total_open_interest = 1_000_000;
+
+    // Make user undercollateralized by setting negative PnL
+    // Position is long at 1.0, oracle at 0.5 means mark_pnl = -500_000
+    // But we'll set PnL directly to simulate being underwater
+    engine.accounts[user as usize].pnl = -9_000; // Leaves only 1000 equity
+
+    // With 5% maintenance margin on position_value = 1_000_000 * 500_000 / 1_000_000 = 500_000
+    // margin_required = 500_000 * 500 / 10_000 = 25_000
+    // equity = 10_000 + (-9_000) = 1_000 < 25_000, so undercollateralized
+
+    let insurance_before = engine.insurance_fund.balance;
+    let capital_before = engine.accounts[user as usize].capital;
+
+    // Oracle price at 0.5 (500_000 in e6)
+    let oracle_price: u64 = 500_000;
+
+    // Attempt liquidation
+    let result = engine.maybe_liquidate_account(user, 0, oracle_price);
+
+    if result.is_ok() && result.unwrap() {
+        // Liquidation occurred
+        let insurance_after = engine.insurance_fund.balance;
+        let capital_after = engine.accounts[user as usize].capital;
+
+        // Fee should have been paid from capital to insurance
+        let fee_paid = insurance_after.saturating_sub(insurance_before);
+        let capital_decrease = capital_before.saturating_sub(capital_after);
+
+        // Fee paid should equal capital decrease (conservation)
+        assert!(
+            fee_paid == capital_decrease,
+            "Liquidation fee must equal capital decrease"
+        );
+
+        // Position should be closed
+        assert!(
+            engine.accounts[user as usize].position_size == 0,
+            "Position must be closed after liquidation"
+        );
+    }
+}
+
+/// Proof: Liquidation preserves conservation (bounded slack)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_liquidation_preserves_conservation() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create two accounts for minimal setup
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    let _ = engine.deposit(user, 10_000);
+    let _ = engine.deposit(lp, 10_000);
+
+    // Give user a position (LP takes opposite side)
+    engine.accounts[user as usize].position_size = 1_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[lp as usize].position_size = -1_000_000;
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 2_000_000;
+
+    // Make user undercollateralized
+    engine.accounts[user as usize].pnl = -9_000;
+    engine.accounts[lp as usize].pnl = 9_000; // Zero-sum
+
+    // Verify conservation before
+    assert!(engine.check_conservation(), "Conservation must hold before liquidation");
+
+    // Attempt liquidation at oracle price 0.5
+    let _ = engine.maybe_liquidate_account(user, 0, 500_000);
+
+    // Verify conservation after (with bounded slack)
+    assert!(engine.check_conservation(), "Conservation must hold after liquidation");
+}
+
+/// Proof: keeper_crank never fails due to liquidation errors (best-effort)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_best_effort_liquidation() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create user
+    let user = engine.add_user(0).unwrap();
+    let _ = engine.deposit(user, 1_000);
+
+    // Give user a position that could trigger liquidation
+    engine.accounts[user as usize].position_size = 10_000_000; // Large position
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 10_000_000;
+
+    // Set some arbitrary state
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price > 0 && oracle_price < 10_000_000);
+
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot < 1000);
+
+    // keeper_crank must always succeed regardless of liquidation outcomes
+    let result = engine.keeper_crank(user, now_slot, oracle_price, 0, false);
+
+    assert!(result.is_ok(), "keeper_crank must always succeed (best-effort)");
 }

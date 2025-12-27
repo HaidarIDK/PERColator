@@ -15,6 +15,7 @@ fn default_params() -> RiskParams {
         slots_per_day: 216_000,
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,     // 0.5% liquidation fee
     }
 }
 

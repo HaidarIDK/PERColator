@@ -212,6 +212,10 @@ pub struct RiskParams {
     /// Maximum allowed staleness before crank is required (in slots)
     /// Set to u64::MAX to disable crank freshness check
     pub max_crank_staleness_slots: u64,
+
+    /// Liquidation fee in basis points (e.g., 50 = 0.50%)
+    /// Paid from liquidated account's capital into insurance fund
+    pub liquidation_fee_bps: u64,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -377,6 +381,8 @@ pub struct CrankOutcome {
     pub did_force_realize: bool,
     /// Whether panic_settle_all was triggered
     pub did_panic_settle: bool,
+    /// Number of accounts liquidated during this crank
+    pub num_liquidations: u32,
 }
 
 // ============================================================================
@@ -1015,6 +1021,10 @@ impl RiskEngine {
             (0, true) // No caller to settle, considered ok
         };
 
+        // Proactive liquidation scan: liquidate any accounts below maintenance margin
+        // This runs on EVERY crank call (not just when advanced) to ensure timely liquidations
+        let num_liquidations = self.scan_and_liquidate_all(now_slot, oracle_price);
+
         // Heavy actions run independent of caller settle success
         let mut did_force_realize = false;
         let mut did_panic_settle = false;
@@ -1043,7 +1053,109 @@ impl RiskEngine {
             caller_settle_ok,
             did_force_realize,
             did_panic_settle,
+            num_liquidations,
         })
+    }
+
+    // ========================================
+    // Liquidation
+    // ========================================
+
+    /// Attempt to liquidate a single account if it's below maintenance margin.
+    /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
+    /// This is an oracle-price force-close that does NOT require an LP/AMM.
+    pub fn maybe_liquidate_account(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<bool> {
+        // Validate index
+        if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Ok(false);
+        }
+
+        // Settle account fully (funding + maintenance + warmup)
+        self.touch_account_full(idx, now_slot, oracle_price)?;
+
+        // Check if account needs liquidation
+        let account = &self.accounts[idx as usize];
+        if account.position_size == 0 {
+            return Ok(false);
+        }
+        if self.is_above_maintenance_margin(account, oracle_price) {
+            return Ok(false);
+        }
+
+        // Account is below maintenance margin with a position - liquidate it
+        let pos = self.accounts[idx as usize].position_size;
+        let abs_pos = saturating_abs_i128(pos) as u128;
+        let entry = self.accounts[idx as usize].entry_price;
+
+        // Compute mark PnL at oracle price (same pattern as panic_settle_all)
+        let diff: i128 = if pos > 0 {
+            // Long: profit when oracle > entry
+            (oracle_price as i128).saturating_sub(entry as i128)
+        } else {
+            // Short: profit when entry > oracle
+            (entry as i128).saturating_sub(oracle_price as i128)
+        };
+
+        let mark_pnl = diff
+            .checked_mul(abs_pos as i128)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)?;
+
+        // Apply mark PnL to account
+        self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
+
+        // Close position
+        self.accounts[idx as usize].position_size = 0;
+        self.accounts[idx as usize].entry_price = oracle_price; // Determinism
+
+        // Update OI (remove this account's contribution)
+        self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
+
+        // Settle warmup again (realizes negative PnL immediately, budgets positive)
+        self.settle_warmup_to_capital(idx)?;
+
+        // Compute and apply liquidation fee
+        let notional = mul_u128(abs_pos, oracle_price as u128) / 1_000_000;
+        let fee = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
+
+        // Pay fee from account capital (capped by available capital)
+        let account_capital = self.accounts[idx as usize].capital;
+        let pay = core::cmp::min(fee, account_capital);
+
+        self.accounts[idx as usize].capital = account_capital.saturating_sub(pay);
+        self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(pay);
+        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(pay);
+
+        Ok(true)
+    }
+
+    /// Scan all used accounts and liquidate any that are below maintenance margin.
+    /// Returns the number of accounts liquidated.
+    /// Best-effort: errors on individual accounts are ignored.
+    fn scan_and_liquidate_all(&mut self, now_slot: u64, oracle_price: u64) -> u32 {
+        let mut count = 0u32;
+
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = (block * 64 + bit) as u16;
+                w &= w - 1;
+
+                // Best-effort: ignore errors, just count successes
+                if let Ok(true) = self.maybe_liquidate_account(idx, now_slot, oracle_price) {
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 
     // ========================================
