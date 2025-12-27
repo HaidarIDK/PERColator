@@ -274,6 +274,7 @@ fn params_regime_a() -> RiskParams {
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
     }
 }
 
@@ -291,6 +292,7 @@ fn params_regime_b() -> RiskParams {
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
     }
 }
 

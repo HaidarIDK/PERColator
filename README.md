@@ -66,9 +66,34 @@ must verify balance deltas before calling into it.
 - Matching engine executes.
 - Wrapper calls `RiskEngine::execute_trade(...)`.
 
-### Keeper Crank
+### Keeper Crank & Liquidation
 
 `RiskEngine::keeper_crank(...)` is permissionless, safe at any time, and no‑op when idle.
+
+**On every call**, keeper_crank performs:
+
+1. **Funding accrual** — updates global funding index
+2. **Caller maintenance settle** (best effort) — settles maintenance fees for the calling account
+3. **Proactive liquidation scan** — scans all accounts and liquidates any that are below maintenance margin
+
+**Liquidation semantics:**
+
+- Accounts are closed at the **oracle price** (no LP/AMM required)
+- Liquidation fee (default: 0.5% of notional) is paid from account capital to insurance
+
+**Mark PnL routing (critical for invariant preservation):**
+
+| Scenario | mark_pnl | Effect | Routing |
+|----------|----------|--------|---------|
+| User has profit on close | > 0 | System deficit | → `apply_adl()` (socializes via ADL waterfall) |
+| User has loss on close | < 0 | System surplus | → `insurance_fund.balance` |
+
+- **Deficit** (mark_pnl > 0): The liquidated user has unrealized profit. This profit must come from somewhere, so it's socialized via ADL (haircutting other accounts' positive PnL).
+- **Surplus** (mark_pnl < 0): The liquidated user has unrealized loss. This loss benefits the system, so it's credited to insurance.
+
+After mark PnL routing:
+- `settle_warmup_to_capital()` realizes any remaining PnL (negative PnL reduces capital immediately; positive PnL is subject to warmup budget)
+- Liquidation fee is deducted from remaining capital
 
 ### Closing Accounts
 

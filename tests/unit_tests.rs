@@ -62,6 +62,7 @@ fn default_params() -> RiskParams {
         maintenance_fee_per_day: 0,  // No maintenance fee by default
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,     // 0.5% liquidation fee
+        liquidation_fee_cap: 100_000, // Cap at 100k units
     }
 }
 
@@ -2761,6 +2762,7 @@ fn params_with_threshold() -> RiskParams {
         maintenance_fee_per_day: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
     }
 }
 
@@ -4886,7 +4888,7 @@ fn test_liquidation_fee_calculation() {
     // notional = 100_000 * 1_000_000 / 1_000_000 = 100_000
     // fee = 100_000 * 50 / 10_000 = 500 (0.5% of notional)
 
-    let result = engine.maybe_liquidate_account(user, 0, oracle_price);
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price);
     assert!(result.is_ok());
     assert!(result.unwrap(), "Liquidation should occur");
 

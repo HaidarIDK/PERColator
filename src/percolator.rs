@@ -216,6 +216,10 @@ pub struct RiskParams {
     /// Liquidation fee in basis points (e.g., 50 = 0.50%)
     /// Paid from liquidated account's capital into insurance fund
     pub liquidation_fee_bps: u64,
+
+    /// Absolute cap on liquidation fee (in capital units)
+    /// Prevents whales paying enormous fees
+    pub liquidation_fee_cap: u128,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -1061,21 +1065,60 @@ impl RiskEngine {
     // Liquidation
     // ========================================
 
-    /// Attempt to liquidate a single account if it's below maintenance margin.
+    /// Compute mark PnL for a position at oracle price (pure helper, no side effects).
+    /// Returns the PnL from closing the position at oracle price.
+    /// - Longs: profit when oracle > entry
+    /// - Shorts: profit when entry > oracle
+    pub fn mark_pnl_for_position(pos: i128, entry: u64, oracle: u64) -> Result<i128> {
+        if pos == 0 {
+            return Ok(0);
+        }
+
+        let abs_pos = saturating_abs_i128(pos) as u128;
+
+        let diff: i128 = if pos > 0 {
+            // Long: profit when oracle > entry
+            (oracle as i128).saturating_sub(entry as i128)
+        } else {
+            // Short: profit when entry > oracle
+            (entry as i128).saturating_sub(oracle as i128)
+        };
+
+        // mark_pnl = diff * abs_pos / 1_000_000
+        diff.checked_mul(abs_pos as i128)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)
+    }
+
+    /// Liquidate a single account at oracle price if below maintenance margin.
+    ///
     /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
     /// This is an oracle-price force-close that does NOT require an LP/AMM.
-    pub fn maybe_liquidate_account(
+    ///
+    /// ## Mark PnL Routing (critical for invariant preservation):
+    /// - mark_pnl > 0 (profit for liquidated account) → system deficit → apply_adl()
+    /// - mark_pnl < 0 (loss for liquidated account) → system surplus → insurance
+    ///
+    /// This ensures conservation: when closing a position, the mark PnL represents
+    /// value transfer between the liquidated trader and the system. Profits must
+    /// come from somewhere (ADL socializes across other positions), while losses
+    /// are a windfall for the system (go to insurance).
+    pub fn liquidate_at_oracle(
         &mut self,
         idx: u16,
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<bool> {
+        // Gating: require fresh crank (same as withdraw/trade)
+        self.require_fresh_crank(now_slot)?;
+
         // Validate index
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Ok(false);
         }
 
-        // Settle account fully (funding + maintenance + warmup)
+        // Settle account fully (funding + maintenance + warmup) pre-liquidation
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         // Check if account needs liquidation
@@ -1088,24 +1131,13 @@ impl RiskEngine {
         }
 
         // Account is below maintenance margin with a position - liquidate it
+        // Snapshot position details before modification
         let pos = self.accounts[idx as usize].position_size;
         let abs_pos = saturating_abs_i128(pos) as u128;
         let entry = self.accounts[idx as usize].entry_price;
 
-        // Compute mark PnL at oracle price (same pattern as panic_settle_all)
-        let diff: i128 = if pos > 0 {
-            // Long: profit when oracle > entry
-            (oracle_price as i128).saturating_sub(entry as i128)
-        } else {
-            // Short: profit when entry > oracle
-            (entry as i128).saturating_sub(oracle_price as i128)
-        };
-
-        let mark_pnl = diff
-            .checked_mul(abs_pos as i128)
-            .ok_or(RiskError::Overflow)?
-            .checked_div(1_000_000)
-            .ok_or(RiskError::Overflow)?;
+        // Compute mark PnL at oracle price
+        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1117,12 +1149,27 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
+        // Route system impact based on mark_pnl sign:
+        // - Positive mark_pnl (profit for liquidated) = system deficit → ADL
+        // - Negative mark_pnl (loss for liquidated) = system surplus → insurance
+        if mark_pnl > 0 {
+            // System deficit: must socialize this via ADL
+            self.apply_adl(mark_pnl as u128)?;
+        } else if mark_pnl < 0 {
+            // System surplus: goes to insurance
+            let surplus = neg_i128_to_u128(mark_pnl);
+            self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(surplus);
+            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(surplus);
+        }
+        // mark_pnl == 0: no system impact
+
         // Settle warmup again (realizes negative PnL immediately, budgets positive)
         self.settle_warmup_to_capital(idx)?;
 
         // Compute and apply liquidation fee
         let notional = mul_u128(abs_pos, oracle_price as u128) / 1_000_000;
-        let fee = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
+        let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
+        let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
 
         // Pay fee from account capital (capped by available capital)
         let account_capital = self.accounts[idx as usize].capital;
@@ -1132,12 +1179,33 @@ impl RiskEngine {
         self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(pay);
         self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(pay);
 
+        // Recompute warmup reserved after insurance changes
+        self.recompute_warmup_insurance_reserved();
+
+        // Assert invariants in debug/kani builds
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let floor = self.params.risk_reduction_threshold;
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in liquidate_at_oracle"
+            );
+            debug_assert!(
+                self.insurance_fund.balance >= floor.saturating_add(self.warmup_insurance_reserved),
+                "Insurance floor + reserved not protected in liquidate_at_oracle"
+            );
+        }
+
         Ok(true)
     }
 
     /// Scan all used accounts and liquidate any that are below maintenance margin.
     /// Returns the number of accounts liquidated.
-    /// Best-effort: errors on individual accounts are ignored.
+    /// Best-effort: errors on individual accounts are ignored (only operational errors
+    /// like Overflow are swallowed, not internal invariant violations which would panic).
     fn scan_and_liquidate_all(&mut self, now_slot: u64, oracle_price: u64) -> u32 {
         let mut count = 0u32;
 
@@ -1149,7 +1217,7 @@ impl RiskEngine {
                 w &= w - 1;
 
                 // Best-effort: ignore errors, just count successes
-                if let Ok(true) = self.maybe_liquidate_account(idx, now_slot, oracle_price) {
+                if let Ok(true) = self.liquidate_at_oracle(idx, now_slot, oracle_price) {
                     count += 1;
                 }
             }
