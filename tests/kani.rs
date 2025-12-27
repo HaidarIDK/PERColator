@@ -4320,6 +4320,7 @@ fn proof_settle_maintenance_deducts_correctly() {
 
     let res = engine.settle_maintenance_fee(user, now_slot, 1_000_000);
     assert!(res.is_ok());
+    assert!(res.unwrap() == expected_due);
 
     let cap_after = engine.accounts[user as usize].capital;
     let insurance_after = engine.insurance_fund.balance;
@@ -4590,8 +4591,9 @@ fn proof_trading_credits_fee_to_user() {
 fn proof_keeper_crank_forgives_half_slots() {
     let mut engine = RiskEngine::new(test_params_with_maintenance_fee());
 
-    // Create user with enough capital to cover fees
-    let user = engine.add_user(100_000).unwrap();
+    // Create user and set capital explicitly (add_user doesn't give capital)
+    let user = engine.add_user(0).unwrap();
+    engine.accounts[user as usize].capital = 1_000_000;
 
     // Set last_fee_slot to 0 so fees accrue
     engine.accounts[user as usize].last_fee_slot = 0;
@@ -4633,12 +4635,14 @@ fn proof_keeper_crank_forgives_half_slots() {
         "last_fee_slot must never exceed now_slot"
     );
 
-    // Insurance should increase by the charged amount (since user has capital)
+    // Insurance should increase by exactly the charged amount (since user has capital)
     let insurance_after = engine.insurance_fund.balance;
-    assert!(
-        insurance_after >= insurance_before,
-        "Insurance should increase from maintenance fees"
-    );
+    if outcome.caller_settle_ok {
+        assert!(
+            insurance_after == insurance_before + (charged_dt as u128),
+            "Insurance must increase by exactly charged_dt when settle succeeds"
+        );
+    }
 }
 
 /// Proof: Net extraction is bounded even with fee credits and keeper_crank
@@ -4680,12 +4684,6 @@ fn proof_net_extraction_bounded_with_fee_credits() {
 
     // Get attacker's state before withdrawal
     let attacker_capital = engine.accounts[attacker as usize].capital;
-    let attacker_pnl = engine.accounts[attacker as usize].pnl;
-    let attacker_credits = engine.accounts[attacker as usize].fee_credits;
-
-    // Maximum extractable is capital + positive_pnl + positive_credits
-    // (Credits offset maintenance but can't be directly withdrawn)
-    let max_equity = attacker_capital as i128 + attacker_pnl + attacker_credits;
 
     // Try to withdraw
     let result = engine.withdraw(attacker, withdraw_amount, 0, 1_000_000);
