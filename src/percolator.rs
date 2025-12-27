@@ -371,6 +371,8 @@ pub struct CrankOutcome {
     pub advanced: bool,
     /// Slots forgiven for caller's maintenance (50% discount via time forgiveness)
     pub slots_forgiven: u64,
+    /// Whether caller's maintenance fee settle succeeded (false if undercollateralized)
+    pub caller_settle_ok: bool,
     /// Whether force_realize_losses was triggered
     pub did_force_realize: bool,
     /// Whether panic_settle_all was triggered
@@ -966,6 +968,11 @@ impl RiskEngine {
     /// 3. Else advance last_crank_slot
     /// 4. Settle maintenance fees for caller
     /// 5. Evaluate heavy actions (force_realize, panic_settle)
+    ///
+    /// This is the single permissionless "do-the-right-thing" entrypoint.
+    /// - Always attempts caller's maintenance settle with 50% discount (best-effort)
+    /// - Only advances last_crank_slot when now_slot > last_crank_slot
+    /// - Heavy actions run independent of caller settle success
     pub fn keeper_crank(
         &mut self,
         caller_idx: u16,
@@ -974,24 +981,18 @@ impl RiskEngine {
         funding_rate_bps_per_slot: i64,
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
-        // Accrue funding first
+        // Accrue funding first (always)
         let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
 
-        // Check if we're advancing
-        if now_slot <= self.last_crank_slot {
-            return Ok(CrankOutcome {
-                advanced: false,
-                slots_forgiven: 0,
-                did_force_realize: false,
-                did_panic_settle: false,
-            });
+        // Check if we're advancing the global crank slot
+        let advanced = now_slot > self.last_crank_slot;
+        if advanced {
+            self.last_crank_slot = now_slot;
         }
 
-        // Advance crank slot
-        self.last_crank_slot = now_slot;
-
-        // Settle maintenance for caller with 50% discount via time forgiveness
-        let slots_forgiven = if (caller_idx as usize) < MAX_ACCOUNTS
+        // Always attempt caller's maintenance settle with 50% discount (best-effort)
+        // This lets users "self-crank" even if someone already cranked this slot
+        let (slots_forgiven, caller_settle_ok) = if (caller_idx as usize) < MAX_ACCOUNTS
             && self.is_used(caller_idx as usize)
         {
             // Pre-advance last_fee_slot by dt/2 to forgive half the elapsed time
@@ -1006,32 +1007,40 @@ impl RiskEngine {
             }
 
             // Now settle - will only charge for remaining half of dt
-            let _ = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+            // Best-effort: don't fail keeper_crank if caller is undercollateralized
+            let settle_result = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
 
-            forgive
+            (forgive, settle_result.is_ok())
         } else {
-            0
+            (0, true) // No caller to settle, considered ok
         };
 
+        // Heavy actions run independent of caller settle success
         let mut did_force_realize = false;
         let mut did_panic_settle = false;
 
-        // Evaluate heavy actions
-        if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-            // Insurance at or below floor - force realize losses
-            if self.force_realize_losses(oracle_price).is_ok() {
-                did_force_realize = true;
-            }
-        } else if (self.loss_accum > 0 || self.risk_reduction_only) && allow_panic {
-            // System in stress - panic settle
-            if self.panic_settle_all(oracle_price).is_ok() {
-                did_panic_settle = true;
+        // Only run heavy actions when we actually advanced the crank
+        if advanced {
+            if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
+                // Insurance at or below floor - force realize losses
+                if self.force_realize_losses(oracle_price).is_ok() {
+                    did_force_realize = true;
+                }
+            } else if (self.loss_accum > 0 || self.risk_reduction_only)
+                && allow_panic
+                && self.total_open_interest > 0
+            {
+                // System in stress with open positions - panic settle
+                if self.panic_settle_all(oracle_price).is_ok() {
+                    did_panic_settle = true;
+                }
             }
         }
 
         Ok(CrankOutcome {
-            advanced: true,
+            advanced,
             slots_forgiven,
+            caller_settle_ok,
             did_force_realize,
             did_panic_settle,
         })
