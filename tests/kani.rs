@@ -4856,8 +4856,9 @@ fn proof_lq3a_profit_routes_through_adl() {
     }
 }
 
-/// LQ3b: Liquidation routes mark_pnl < 0 (loss) to insurance
-/// When liquidated user has loss (mark_pnl < 0), it's a system surplus that goes to insurance.
+/// LQ3b: Liquidation routes realized losses (capital drop) to insurance
+/// When user has loss and it's realized from capital, that capital flows to insurance.
+/// This is balance-sheet neutral: capital ↓ + insurance ↑ by same amount.
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -4877,30 +4878,35 @@ fn proof_lq3b_loss_routes_to_insurance() {
     engine.accounts[user as usize].pnl = -8_000;
 
     let insurance_before = engine.insurance_fund.balance;
+    let capital_before = engine.accounts[user as usize].capital;
 
     // Oracle at 0.8 - user has loss
     let oracle_price: u64 = 800_000;
-
-    // mark_pnl = (0.8 - 1.0) * 1 = -0.2 = -200_000 (loss for user, system surplus)
-    let expected_surplus: u128 = 200_000;
 
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
     if result.is_ok() && result.unwrap() {
         let insurance_after = engine.insurance_fund.balance;
+        let capital_after = engine.accounts[user as usize].capital;
 
-        // Insurance should increase by at least the mark_pnl surplus
-        // (Plus potentially the liquidation fee)
+        // Capital should have decreased (loss paid + fee)
         assert!(
-            insurance_after > insurance_before,
-            "Insurance must increase when user has loss (system surplus)"
+            capital_after < capital_before,
+            "Capital must decrease when loss is realized"
         );
 
-        // Insurance increase should be >= expected_surplus (mark_pnl magnitude)
+        // Insurance should have increased
+        assert!(
+            insurance_after > insurance_before,
+            "Insurance must increase from realized losses + fee"
+        );
+
+        // The capital drop should flow to insurance (balance-sheet neutral)
+        let capital_drop = capital_before.saturating_sub(capital_after);
         let insurance_increase = insurance_after.saturating_sub(insurance_before);
         assert!(
-            insurance_increase >= expected_surplus,
-            "Insurance must increase by at least mark_pnl magnitude"
+            insurance_increase == capital_drop,
+            "Insurance increase must equal capital drop (balance-sheet neutral)"
         );
 
         // Position must be closed

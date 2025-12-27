@@ -1098,20 +1098,18 @@ impl RiskEngine {
     ///
     /// ## Mark PnL Routing (critical for invariant preservation):
     /// - mark_pnl > 0 (profit for liquidated account) → system deficit → apply_adl()
-    /// - mark_pnl < 0 (loss for liquidated account) → system surplus → insurance
+    /// - mark_pnl < 0 (loss for liquidated account) → realized via settle_warmup_to_capital
     ///
-    /// This ensures conservation: when closing a position, the mark PnL represents
-    /// value transfer between the liquidated trader and the system. Profits must
-    /// come from somewhere (ADL socializes across other positions), while losses
-    /// are a windfall for the system (go to insurance).
+    /// After settlement, the capital actually paid (cap_before - cap_after) is routed
+    /// to insurance_fund.balance (NOT fee_revenue) to maintain balance-sheet neutrality.
     pub fn liquidate_at_oracle(
         &mut self,
         idx: u16,
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<bool> {
-        // Gating: require fresh crank (same as withdraw/trade)
-        self.require_fresh_crank(now_slot)?;
+        // No require_fresh_crank() here - keeper_crank IS the crank that makes things fresh.
+        // Only withdraw() and execute_trade() need that gate.
 
         // Validate index
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -1131,10 +1129,11 @@ impl RiskEngine {
         }
 
         // Account is below maintenance margin with a position - liquidate it
-        // Snapshot position details before modification
+        // Snapshot position details and capital before modification
         let pos = self.accounts[idx as usize].position_size;
         let abs_pos = saturating_abs_i128(pos) as u128;
         let entry = self.accounts[idx as usize].entry_price;
+        let cap_before = self.accounts[idx as usize].capital;
 
         // Compute mark PnL at oracle price
         let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
@@ -1149,24 +1148,22 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
-        // Route system impact based on mark_pnl sign:
-        // - Positive mark_pnl (profit for liquidated) = system deficit → ADL
-        // - Negative mark_pnl (loss for liquidated) = system surplus → insurance
+        // Route positive mark_pnl through ADL (system deficit - profits must be funded)
         if mark_pnl > 0 {
-            // System deficit: must socialize this via ADL
             self.apply_adl(mark_pnl as u128)?;
-        } else if mark_pnl < 0 {
-            // System surplus: goes to insurance
-            let surplus = neg_i128_to_u128(mark_pnl);
-            self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(surplus);
-            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(surplus);
         }
-        // mark_pnl == 0: no system impact
+        // mark_pnl <= 0: no ADL needed, losses are realized from capital below
 
-        // Settle warmup again (realizes negative PnL immediately, budgets positive)
+        // Settle warmup (realizes negative PnL from capital immediately, budgets positive)
         self.settle_warmup_to_capital(idx)?;
 
-        // Compute and apply liquidation fee
+        // Route realized losses to insurance (balance-sheet neutral: capital ↓, insurance ↑)
+        let cap_after = self.accounts[idx as usize].capital;
+        let paid = cap_before.saturating_sub(cap_after);
+        self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(paid);
+        // NOT fee_revenue - this is loss recovery, not a fee
+
+        // Compute and apply liquidation fee (this IS fee revenue)
         let notional = mul_u128(abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
