@@ -2303,16 +2303,14 @@ impl RiskEngine {
         // 1. Integer division rounding slippage
         // 2. Entry price discrepancies from weighted averaging
         //
-        // If positive: treat as additional loss to socialize
-        // If negative: the vault has "extra" money that should go to insurance
-        //              to maintain conservation (otherwise slack increases)
+        // If positive: treat as additional loss to socialize via ADL
+        // If negative: this is a rounding artifact bounded by MAX_ROUNDING_SLACK.
+        //              Do NOT add to insurance (that would mint value).
+        //              The slack is absorbed by the bounded conservation check.
         if total_mark_pnl > 0 {
             total_loss = total_loss.saturating_add(total_mark_pnl as u128);
-        } else if total_mark_pnl < 0 {
-            // Vault has surplus funds - add to insurance to maintain conservation
-            let surplus = neg_i128_to_u128(total_mark_pnl);
-            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
+        // total_mark_pnl < 0: no action needed, absorbed by conservation slack
 
         // Socialize the accumulated loss via ADL waterfall BEFORE settle_warmup
         // This allows apply_adl to haircut positive PNL before it gets converted to capital
@@ -2463,15 +2461,14 @@ impl RiskEngine {
         }
 
         // Compensate for non-zero-sum mark PNL.
-        // If positive: treat as additional unpaid loss to socialize
-        // If negative: the vault has "extra" money that should go to insurance
+        // If positive: treat as additional unpaid loss to socialize via ADL
+        // If negative: this is a rounding artifact bounded by MAX_ROUNDING_SLACK.
+        //              Do NOT add to insurance (that would mint value).
+        //              The slack is absorbed by the bounded conservation check.
         if total_mark_pnl > 0 {
             total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
-        } else if total_mark_pnl < 0 {
-            // Vault has surplus funds - add to insurance to maintain conservation
-            let surplus = neg_i128_to_u128(total_mark_pnl);
-            self.insurance_fund.balance = add_u128(self.insurance_fund.balance, surplus);
         }
+        // total_mark_pnl < 0: no action needed, absorbed by conservation slack
 
         // Socialize any unpaid losses via ADL waterfall
         if total_unpaid_loss > 0 {
