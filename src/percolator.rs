@@ -1196,6 +1196,8 @@ impl RiskEngine {
     /// - mark_pnl > 0 (profit) → funded via apply_adl() waterfall
     /// - mark_pnl <= 0 (loss) → realized via settle_warmup_to_capital (capital path)
     /// - Residual negative PnL (capital exhausted) → routed through ADL, PnL clamped to 0
+    ///
+    /// ASSUMES: Caller has already called touch_account_full() on this account.
     fn oracle_close_position_slice_core(
         &mut self,
         idx: u16,
@@ -1203,8 +1205,8 @@ impl RiskEngine {
         oracle_price: u64,
         close_abs: u128,
     ) -> Result<ClosedOutcome> {
-        // Settle account fully first
-        self.touch_account_full(idx, now_slot, oracle_price)?;
+        // NOTE: Caller must have already called touch_account_full()
+        // to settle funding, maintenance, and warmup.
 
         let pos = self.accounts[idx as usize].position_size;
         let current_abs_pos = saturating_abs_i128(pos) as u128;
@@ -1299,14 +1301,16 @@ impl RiskEngine {
     /// - Residual negative PnL (capital exhausted) → routed through ADL, PnL clamped to 0
     ///
     /// No other path creates or destroys value.
+    ///
+    /// ASSUMES: Caller has already called touch_account_full() on this account.
     fn oracle_close_position_core(
         &mut self,
         idx: u16,
-        now_slot: u64,
+        _now_slot: u64,
         oracle_price: u64,
     ) -> Result<ClosedOutcome> {
-        // Settle account fully (funding + maintenance + warmup) first
-        self.touch_account_full(idx, now_slot, oracle_price)?;
+        // NOTE: Caller must have already called touch_account_full()
+        // to settle funding, maintenance, and warmup.
 
         // Check if there's a position to close
         if self.accounts[idx as usize].position_size == 0 {
@@ -1410,7 +1414,7 @@ impl RiskEngine {
         }
 
         // Close position via appropriate helper
-        let outcome = if is_full_close {
+        let mut outcome = if is_full_close {
             self.oracle_close_position_core(idx, now_slot, oracle_price)?
         } else {
             self.oracle_close_position_slice_core(idx, now_slot, oracle_price, close_abs)?
@@ -1420,19 +1424,24 @@ impl RiskEngine {
             return Ok(false);
         }
 
-        // Post-liquidation safety check: if position remains, verify target margin is met.
-        // The conservative -1 rounding guard in compute_liquidation_close_amount ensures this.
+        // Post-liquidation safety check: if position remains and still below target,
+        // fall back to full close. This handles rare cases where mark_pnl realization
+        // during partial close reduces equity enough to miss the target.
         let remaining_pos = self.accounts[idx as usize].position_size;
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            debug_assert!(
-                self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps),
-                "Partial liquidation must leave account above target margin"
-            );
+            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+                // Fallback: close remaining position entirely
+                let fallback_outcome = self.oracle_close_position_core(idx, now_slot, oracle_price)?;
+                if fallback_outcome.position_was_closed {
+                    // Accumulate closed amount for fee calculation
+                    outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
+                }
+            }
         }
 
-        // Compute and apply liquidation fee on the closed amount (this IS fee revenue)
+        // Compute and apply liquidation fee on total closed amount (this IS fee revenue)
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
