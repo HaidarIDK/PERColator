@@ -17,7 +17,8 @@
 //! Design A (insurance routing):
 //! - Losses are realized into capital (not routed to insurance)
 //! - Insurance only changes via explicit fees/topups
-//! - Profit (mark_pnl > 0) routes through ADL waterfall
+//! - Profit (mark_pnl > 0) is funded via ADL waterfall
+//!   (unwrapped PnL → unreserved insurance → loss_accum)
 //!
 //! Note: Some proofs involving iteration over all accounts (apply_adl,
 //! check_conservation loops) are computationally expensive and may timeout.
@@ -4834,7 +4835,7 @@ fn proof_lq2_liquidation_preserves_conservation() {
 
 /// LQ3a: Liquidation routes mark_pnl > 0 (profit) through ADL
 /// When liquidated user has profit (mark_pnl > 0), it's a system deficit that must go through ADL.
-/// We verify this by checking that insurance does NOT increase by mark_pnl directly.
+/// We verify this by checking that LP's PnL is haircutted.
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -4860,35 +4861,56 @@ fn proof_lq3a_profit_routes_through_adl() {
     // User is undercollateralized (small capital, large position)
     // Position value at oracle 1.0 = 1_000_000, margin = 50_000, capital = 500 < margin
 
-    let insurance_before = engine.insurance_fund.balance;
+    let oi_before = engine.total_open_interest;
     let lp_pnl_before = engine.accounts[lp as usize].pnl;
 
     // Oracle at 1.0 - user has profit
     let oracle_price: u64 = 1_000_000;
 
-    // mark_pnl = (1.0 - 0.8) * 1 = 0.2 = 200_000 (profit for user, system deficit)
-    let expected_mark_pnl: i128 = 200_000;
-
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
     if result.is_ok() && result.unwrap() {
-        // Profit (mark_pnl > 0) should NOT go to insurance directly
-        // Instead it should be socialized via ADL (haircutting LP's positive PnL)
-        let insurance_after = engine.insurance_fund.balance;
+        let account = &engine.accounts[user as usize];
         let lp_pnl_after = engine.accounts[lp as usize].pnl;
+        let oi_after = engine.total_open_interest;
 
-        // Insurance should not have increased by mark_pnl
-        // (It may increase by liquidation fee, but not by mark_pnl)
-        // The key indicator is that LP's PnL should have been haircutted
+        // LP's PnL must be haircutted via ADL (profit routes through ADL)
         assert!(
             lp_pnl_after < lp_pnl_before,
             "LP PnL must be haircutted via ADL when user has profit"
         );
 
-        // Position must be closed
+        // OI must strictly decrease
         assert!(
-            engine.accounts[user as usize].position_size == 0,
-            "Position must be closed"
+            oi_after < oi_before,
+            "OI must strictly decrease after liquidation"
+        );
+
+        // Dust rule: remaining position is either 0 or >= min_liquidation_abs
+        let abs_pos = if account.position_size >= 0 {
+            account.position_size as u128
+        } else {
+            (-account.position_size) as u128
+        };
+        assert!(
+            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs,
+            "Dust rule: position must be 0 or >= min_liquidation_abs"
+        );
+
+        // If position remains, must be above target margin
+        if abs_pos > 0 {
+            let target_bps = engine.params.maintenance_margin_bps
+                .saturating_add(engine.params.liquidation_buffer_bps);
+            assert!(
+                engine.is_above_margin_bps(account, oracle_price, target_bps),
+                "Partial liquidation must leave account above target margin"
+            );
+        }
+
+        // Conservation must hold
+        assert!(
+            engine.check_conservation(),
+            "Conservation must hold after liquidation"
         );
     }
 }
@@ -4896,18 +4918,21 @@ fn proof_lq3a_profit_routes_through_adl() {
 /// LQ4: Liquidation fee is paid from capital to insurance
 /// Verifies that the liquidation fee is correctly calculated and transferred.
 /// Uses pnl = 0 to isolate fee-only effect (no settlement noise).
-/// Undercollateralizes via large position relative to capital.
+/// Forces full close via dust rule (min_liquidation_abs > position).
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_lq4_liquidation_fee_paid_to_insurance() {
-    let mut engine = RiskEngine::new(test_params());
+    // Use custom params with min_liquidation_abs larger than position to force full close
+    let mut params = test_params();
+    params.min_liquidation_abs = 20_000_000; // Bigger than position, forces full close
+    let mut engine = RiskEngine::new(params);
 
     // Create user with enough capital to cover fee
     let user = engine.add_user(0).unwrap();
     let _ = engine.deposit(user, 100_000); // Large capital to ensure fee is fully paid
 
-    // Give user a large position relative to capital (undercollateralized by size)
+    // Give user a position (smaller than min_liquidation_abs, so full close is forced)
     // Position: 10 units at 1.0 = notional 10_000_000
     // Required margin at 500 bps = 500_000
     // Capital 100_000 < 500_000 => undercollateralized
@@ -4932,6 +4957,12 @@ fn proof_lq4_liquidation_fee_paid_to_insurance() {
     if result.is_ok() && result.unwrap() {
         let insurance_after = engine.insurance_fund.balance;
         let fee_received = insurance_after.saturating_sub(insurance_before);
+
+        // Position must be fully closed (dust rule forces it)
+        assert!(
+            engine.accounts[user as usize].position_size == 0,
+            "Position must be fully closed"
+        );
 
         // Fee should go to insurance (exact amount since capital covers it)
         assert!(
@@ -5055,7 +5086,7 @@ fn proof_lq6_n1_boundary_after_liquidation() {
 /// LIQ-PARTIAL-1: Safety After Liquidation
 /// If liquidation succeeds:
 ///   - For full close: position = 0
-///   - For partial close: margin_ratio >= target_bps (maintenance + buffer)
+///   - For partial close: is_above_margin_bps(target) must hold
 /// This ensures that partial liquidation brings the account to safety.
 #[kani::proof]
 #[kani::unwind(10)]
@@ -5099,29 +5130,13 @@ fn proof_liq_partial_1_safety_after_liquidation() {
             (-account.position_size) as u128
         };
 
-        if abs_pos == 0 {
-            // Full close: position must be 0
+        // Post-condition: position is either 0 or above target margin
+        // Uses engine.is_above_margin_bps to match production logic exactly
+        if abs_pos > 0 {
             assert!(
-                account.position_size == 0,
-                "Full close: position must be 0"
+                engine.is_above_margin_bps(account, oracle_price, target_bps),
+                "Partial close: account must be above target margin"
             );
-        } else {
-            // Partial close: margin_ratio must be >= target_bps
-            let equity = engine.account_equity(account);
-            let notional = (abs_pos as u128)
-                .saturating_mul(oracle_price as u128)
-                / 1_000_000;
-
-            if notional > 0 && equity > 0 {
-                let margin_ratio_bps = (equity as u128)
-                    .saturating_mul(10_000)
-                    / notional;
-
-                assert!(
-                    margin_ratio_bps >= target_bps as u128,
-                    "Partial close: margin_ratio must be >= target_bps"
-                );
-            }
         }
     }
 }
@@ -5302,16 +5317,16 @@ fn proof_liq_partial_4_conservation_preservation() {
 fn proof_liq_partial_deterministic_reaches_target_or_full_close() {
     let mut engine = RiskEngine::new(test_params());
 
-    // Create user with capital
+    // Create user with small capital (obviously undercollateralized)
     let user = engine.add_user(0).unwrap();
-    let _ = engine.deposit(user, 50_000);
+    let _ = engine.deposit(user, 10_000);
 
     // Hardcoded setup:
     // - oracle_price = entry_price = 1_000_000 (mark_pnl = 0)
     // - maintenance = 500 bps, buffer = 100 bps => target = 600 bps
     // - Position: 10 units at 1.0 => notional = 10_000_000
     // - Required margin at 500 bps = 500_000
-    // - Equity = 50_000 (capital) + 0 (pnl) = 50_000 < 500_000 => undercollateralized
+    // - Equity = 10_000 (capital) + 0 (pnl) = 10_000 << 500_000 => clearly undercollateralized
     let oracle_price: u64 = 1_000_000;
     engine.accounts[user as usize].position_size = 10_000_000; // 10 units
     engine.accounts[user as usize].entry_price = 1_000_000;    // entry at 1.0
