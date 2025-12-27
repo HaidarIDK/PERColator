@@ -1190,7 +1190,7 @@ impl RiskEngine {
     /// Similar to oracle_close_position_core but:
     /// - Only closes `close_abs` units of position (not the entire position)
     /// - Computes proportional mark_pnl for the closed slice
-    /// - Updates entry_price via weighted average for remaining position
+    /// - Entry price remains unchanged (correct for same-direction partial reduction)
     ///
     /// ## PnL Routing (same invariant as full close):
     /// - mark_pnl > 0 (profit) → funded via apply_adl() waterfall
@@ -1201,7 +1201,6 @@ impl RiskEngine {
     fn oracle_close_position_slice_core(
         &mut self,
         idx: u16,
-        now_slot: u64,
         oracle_price: u64,
         close_abs: u128,
     ) -> Result<ClosedOutcome> {
@@ -1224,7 +1223,7 @@ impl RiskEngine {
 
         // If close_abs >= current position, delegate to full close
         if close_abs >= current_abs_pos {
-            return self.oracle_close_position_core(idx, now_slot, oracle_price);
+            return self.oracle_close_position_core(idx, oracle_price);
         }
 
         // Partial close: close_abs < current_abs_pos
@@ -1306,7 +1305,6 @@ impl RiskEngine {
     fn oracle_close_position_core(
         &mut self,
         idx: u16,
-        _now_slot: u64,
         oracle_price: u64,
     ) -> Result<ClosedOutcome> {
         // NOTE: Caller must have already called touch_account_full()
@@ -1415,9 +1413,9 @@ impl RiskEngine {
 
         // Close position via appropriate helper
         let mut outcome = if is_full_close {
-            self.oracle_close_position_core(idx, now_slot, oracle_price)?
+            self.oracle_close_position_core(idx, oracle_price)?
         } else {
-            self.oracle_close_position_slice_core(idx, now_slot, oracle_price, close_abs)?
+            self.oracle_close_position_slice_core(idx, oracle_price, close_abs)?
         };
 
         if !outcome.position_was_closed {
@@ -1433,9 +1431,11 @@ impl RiskEngine {
                 .saturating_add(self.params.liquidation_buffer_bps);
             if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
-                let fallback_outcome = self.oracle_close_position_core(idx, now_slot, oracle_price)?;
+                let fallback_outcome = self.oracle_close_position_core(idx, oracle_price)?;
                 if fallback_outcome.position_was_closed {
-                    // Accumulate closed amount for fee calculation
+                    // Accumulate closed amount for fee calculation.
+                    // Note: mark_pnl is not accumulated because only abs_pos is used
+                    // downstream (fee calc). PnL routing already happened in each core call.
                     outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
                 }
             }
