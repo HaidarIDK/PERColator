@@ -235,6 +235,20 @@ pub struct RiskParams {
     /// Absolute cap on liquidation fee (in capital units)
     /// Prevents whales paying enormous fees
     pub liquidation_fee_cap: u128,
+
+    // ========================================
+    // Partial Liquidation Parameters
+    // ========================================
+    /// Buffer above maintenance margin (in basis points) to target after partial liquidation.
+    /// E.g., if maintenance is 500 bps (5%) and buffer is 100 bps (1%), we target 6% margin.
+    /// This prevents immediate re-liquidation from small price movements.
+    pub liquidation_buffer_bps: u64,
+
+    /// Minimum absolute position size after partial liquidation.
+    /// If remaining position would be below this threshold, full liquidation occurs.
+    /// Prevents dust positions that are uneconomical to maintain or re-liquidate.
+    /// Denominated in base units (same scale as position_size.abs()).
+    pub min_liquidation_abs: u128,
 }
 
 /// Main risk engine state - fixed slab with bitmap
@@ -1106,6 +1120,167 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)
     }
 
+    /// Compute how much position to close for liquidation (closed-form, single-pass).
+    ///
+    /// Returns (close_abs, is_full_close) where:
+    /// - close_abs = absolute position size to close
+    /// - is_full_close = true if this is a full position close (including dust kill-switch)
+    ///
+    /// ## Algorithm:
+    /// 1. Compute target_bps = maintenance_margin_bps + liquidation_buffer_bps
+    /// 2. Compute max safe remaining position: abs_pos_safe_max = floor(E * 10_000 * 1_000_000 / (P * target_bps))
+    /// 3. close_abs = abs_pos - abs_pos_safe_max
+    /// 4. If remaining position < min_liquidation_abs, do full close (dust kill-switch)
+    ///
+    /// This is deterministic, requires no iteration, and guarantees single-pass liquidation.
+    pub fn compute_liquidation_close_amount(
+        &self,
+        account: &Account,
+        oracle_price: u64,
+    ) -> (u128, bool) {
+        let abs_pos = saturating_abs_i128(account.position_size) as u128;
+        if abs_pos == 0 {
+            return (0, false);
+        }
+
+        // Account equity (may be 0 if underwater)
+        let equity = self.account_equity(account);
+
+        // Target margin = maintenance + buffer (in basis points)
+        let target_bps = self.params.maintenance_margin_bps
+            .saturating_add(self.params.liquidation_buffer_bps);
+
+        // Maximum safe remaining position (floor-safe calculation)
+        // abs_pos_safe_max = floor(equity * 10_000 * 1_000_000 / (oracle_price * target_bps))
+        // Rearranged to avoid intermediate overflow:
+        // abs_pos_safe_max = floor(equity * 10_000_000_000 / (oracle_price * target_bps))
+        let numerator = mul_u128(equity, 10_000_000_000);
+        let denominator = mul_u128(oracle_price as u128, target_bps as u128);
+
+        let abs_pos_safe_max = if denominator == 0 {
+            0 // Edge case: full liquidation if no denominator
+        } else {
+            numerator / denominator
+        };
+
+        // Clamp to current position (can't have safe max > actual position)
+        let abs_pos_safe_max = core::cmp::min(abs_pos_safe_max, abs_pos);
+
+        // Required close amount
+        let close_abs = abs_pos.saturating_sub(abs_pos_safe_max);
+
+        // Dust kill-switch: if remaining position would be below min, do full close
+        let remaining = abs_pos.saturating_sub(close_abs);
+        if remaining < self.params.min_liquidation_abs {
+            return (abs_pos, true); // Full close
+        }
+
+        (close_abs, close_abs == abs_pos)
+    }
+
+    /// Core helper for closing a SLICE of a position at oracle price (partial liquidation).
+    ///
+    /// Similar to oracle_close_position_core but:
+    /// - Only closes `close_abs` units of position (not the entire position)
+    /// - Computes proportional mark_pnl for the closed slice
+    /// - Updates entry_price via weighted average for remaining position
+    ///
+    /// ## PnL Routing (same invariant as full close):
+    /// - mark_pnl > 0 (profit) → funded via apply_adl() waterfall
+    /// - mark_pnl <= 0 (loss) → realized via settle_warmup_to_capital (capital path)
+    /// - Residual negative PnL (capital exhausted) → routed through ADL, PnL clamped to 0
+    fn oracle_close_position_slice_core(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        close_abs: u128,
+    ) -> Result<ClosedOutcome> {
+        // Settle account fully first
+        self.touch_account_full(idx, now_slot, oracle_price)?;
+
+        let pos = self.accounts[idx as usize].position_size;
+        let current_abs_pos = saturating_abs_i128(pos) as u128;
+
+        // Validate: can't close more than we have
+        if close_abs == 0 || current_abs_pos == 0 {
+            return Ok(ClosedOutcome {
+                abs_pos: 0,
+                mark_pnl: 0,
+                cap_before: self.accounts[idx as usize].capital,
+                cap_after: self.accounts[idx as usize].capital,
+                position_was_closed: false,
+            });
+        }
+
+        // If close_abs >= current position, delegate to full close
+        if close_abs >= current_abs_pos {
+            return self.oracle_close_position_core(idx, now_slot, oracle_price);
+        }
+
+        // Partial close: close_abs < current_abs_pos
+        let entry = self.accounts[idx as usize].entry_price;
+        let cap_before = self.accounts[idx as usize].capital;
+
+        // Compute proportional mark PnL for the closed slice
+        // mark_pnl_slice = (close_abs / abs_pos) * full_mark_pnl
+        // But we compute directly: mark_pnl = diff * close_abs / 1_000_000
+        let diff: i128 = if pos > 0 {
+            (oracle_price as i128).saturating_sub(entry as i128)
+        } else {
+            (entry as i128).saturating_sub(oracle_price as i128)
+        };
+
+        let mark_pnl = diff
+            .checked_mul(close_abs as i128)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)?;
+
+        // Apply mark PnL to account
+        self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
+
+        // Update position: reduce by close_abs (maintain sign)
+        let new_abs_pos = current_abs_pos.saturating_sub(close_abs);
+        self.accounts[idx as usize].position_size = if pos > 0 {
+            new_abs_pos as i128
+        } else {
+            -(new_abs_pos as i128)
+        };
+
+        // Entry price remains unchanged for remaining position
+        // (partial close at oracle price doesn't change the entry of what remains)
+
+        // Update OI
+        self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
+
+        // Route positive mark_pnl through ADL
+        if mark_pnl > 0 {
+            self.apply_adl(mark_pnl as u128)?;
+        }
+
+        // Settle warmup
+        self.settle_warmup_to_capital(idx)?;
+
+        // Handle residual negative PnL
+        let residual_pnl = self.accounts[idx as usize].pnl;
+        if residual_pnl < 0 {
+            let unpaid = neg_i128_to_u128(residual_pnl);
+            self.apply_adl(unpaid)?;
+            self.accounts[idx as usize].pnl = 0;
+        }
+
+        let cap_after = self.accounts[idx as usize].capital;
+
+        Ok(ClosedOutcome {
+            abs_pos: close_abs,
+            mark_pnl,
+            cap_before,
+            cap_after,
+            position_was_closed: true,
+        })
+    }
+
     /// Core helper for oracle-price position close.
     ///
     /// This is the ONLY place that applies mark PnL + ADL routing + settlement
@@ -1191,7 +1366,13 @@ impl RiskEngine {
     /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
     /// This is an oracle-price force-close that does NOT require an LP/AMM.
     ///
-    /// Uses oracle_close_position_core for PnL routing, then charges liquidation fee.
+    /// ## Partial Liquidation:
+    /// Computes the minimum amount to close to bring the account to safety (above
+    /// maintenance margin + buffer). If remaining position would be below
+    /// min_liquidation_abs, full close occurs instead (dust kill-switch).
+    ///
+    /// Uses oracle_close_position_core (full) or oracle_close_position_slice_core (partial)
+    /// for PnL routing, then charges liquidation fee on the closed amount.
     pub fn liquidate_at_oracle(
         &mut self,
         idx: u16,
@@ -1214,14 +1395,25 @@ impl RiskEngine {
             return Ok(false);
         }
 
-        // Close position via core helper (handles PnL routing)
-        let outcome = self.oracle_close_position_core(idx, now_slot, oracle_price)?;
+        // Compute how much to close (closed-form, single-pass)
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+
+        if close_abs == 0 {
+            return Ok(false);
+        }
+
+        // Close position via appropriate helper
+        let outcome = if is_full_close {
+            self.oracle_close_position_core(idx, now_slot, oracle_price)?
+        } else {
+            self.oracle_close_position_slice_core(idx, now_slot, oracle_price, close_abs)?
+        };
 
         if !outcome.position_was_closed {
             return Ok(false);
         }
 
-        // Compute and apply liquidation fee (this IS fee revenue)
+        // Compute and apply liquidation fee on the closed amount (this IS fee revenue)
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);

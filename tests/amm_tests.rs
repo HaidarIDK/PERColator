@@ -17,6 +17,8 @@ fn default_params() -> RiskParams {
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,     // 0.5% liquidation fee
         liquidation_fee_cap: 100_000, // Cap at 100k units
+        liquidation_buffer_bps: 100, // 1% buffer above maintenance
+        min_liquidation_abs: 100_000, // Minimum 0.1 units
     }
 }
 

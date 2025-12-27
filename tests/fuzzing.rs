@@ -275,6 +275,8 @@ fn params_regime_a() -> RiskParams {
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 
@@ -293,6 +295,8 @@ fn params_regime_b() -> RiskParams {
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 

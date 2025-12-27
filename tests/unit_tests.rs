@@ -63,6 +63,8 @@ fn default_params() -> RiskParams {
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,     // 0.5% liquidation fee
         liquidation_fee_cap: 100_000, // Cap at 100k units
+        liquidation_buffer_bps: 100, // 1% buffer above maintenance
+        min_liquidation_abs: 100_000, // Minimum 0.1 units (scaled by 1e6)
     }
 }
 
@@ -2763,6 +2765,8 @@ fn params_with_threshold() -> RiskParams {
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 
@@ -4908,4 +4912,211 @@ fn test_liquidation_fee_calculation() {
         engine.accounts[user as usize].capital, 3_500,
         "Capital should be 4000 - 500 = 3500"
     );
+}
+
+// ============================================================================
+// PARTIAL LIQUIDATION TESTS
+// ============================================================================
+
+/// Test 1: Dust kill-switch forces full close when remaining would be too small
+#[test]
+fn test_dust_killswitch_forces_full_close() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 5_000_000; // 5 units minimum
+
+    let mut engine = RiskEngine::new(params);
+
+    // Create user with direct setup (matching test_liquidation_fee_calculation pattern)
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 6 units at $1, barely undercollateralized at oracle = entry
+    // position_value = 6_000_000
+    // MM = 6_000_000 * 5% = 300_000
+    // Set capital below MM to trigger liquidation
+    engine.accounts[user as usize].capital = 200_000;
+    engine.accounts[user as usize].position_size = 6_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 6_000_000;
+    engine.vault = 200_000;
+
+    // Oracle at entry price (no mark pnl)
+    let oracle_price = 1_000_000;
+
+    // Liquidate
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    // Due to dust kill-switch (remaining < 5 units), position should be fully closed
+    assert_eq!(
+        engine.accounts[user as usize].position_size, 0,
+        "Dust kill-switch should force full close"
+    );
+}
+
+/// Test 2: Partial liquidation reduces position to safe level
+#[test]
+fn test_partial_liquidation_brings_to_safety() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 100_000;
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 10 units at $1, small capital
+    // At oracle $1: equity = 100k, position_value = 10M
+    // MM = 10M * 5% = 500k
+    // equity (100k) < MM (500k) => undercollateralized
+    // But equity > 0, so partial liquidation will occur
+    engine.accounts[user as usize].capital = 100_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 10_000_000;
+    engine.vault = 100_000;
+
+    let oracle_price = 1_000_000;
+    let pos_before = engine.accounts[user as usize].position_size;
+
+    // Liquidate - should succeed and reduce position
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    let pos_after = engine.accounts[user as usize].position_size;
+
+    // Position should be reduced (partial liquidation)
+    assert!(
+        pos_after < pos_before,
+        "Position should be reduced after liquidation"
+    );
+    assert!(
+        pos_after > 0,
+        "Partial liquidation should leave some position"
+    );
+}
+
+/// Test 3: Liquidation fee is charged on closed notional
+#[test]
+fn test_partial_liquidation_fee_charged() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 100_000;
+    params.liquidation_fee_bps = 50; // 0.5%
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Small position to trigger full liquidation (dust rule)
+    // position_value = 500_000
+    // MM = 25_000
+    // capital = 20_000 < MM
+    engine.accounts[user as usize].capital = 20_000;
+    engine.accounts[user as usize].position_size = 500_000; // 0.5 units
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 500_000;
+    engine.vault = 20_000;
+
+    let insurance_before = engine.insurance_fund.balance;
+    let oracle_price = 1_000_000;
+
+    // Liquidate
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    let insurance_after = engine.insurance_fund.balance;
+    let fee_received = insurance_after - insurance_before;
+
+    // Fee = 500_000 * 1_000_000 / 1_000_000 * 50 / 10_000 = 2_500
+    // But capped by available capital (20_000), so full 2_500 should be charged
+    assert!(fee_received > 0, "Some fee should be charged");
+}
+
+/// Test 4: Compute liquidation close amount basic test
+#[test]
+fn test_compute_liquidation_close_amount_basic() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units, capital = 500k
+    // At oracle $1: equity = 500k, position_value = 10M
+    // MM = 10M * 5% = 500k
+    // Target = 10M * 6% = 600k
+    // abs_pos_safe_max = 500k * 10B / (1M * 600) = 8.33M
+    // close_abs = 10M - 8.33M = 1.67M
+    engine.accounts[user as usize].capital = 500_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
+
+    // Should close some but not all
+    assert!(close_abs > 0, "Should close some position");
+    assert!(close_abs < 10_000_000, "Should not close entire position");
+    assert!(!is_full, "Should be partial close");
+
+    // Remaining should be >= min_liquidation_abs
+    let remaining = 10_000_000 - close_abs;
+    assert!(
+        remaining >= params.min_liquidation_abs,
+        "Remaining should be above min threshold"
+    );
+}
+
+/// Test 5: Compute liquidation triggers dust kill when remaining too small
+#[test]
+fn test_compute_liquidation_dust_kill() {
+    let mut params = default_params();
+    params.min_liquidation_abs = 9_000_000; // 9 units minimum (so after partial, remaining < 9 triggers kill)
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units at $1, capital = 500k
+    // At oracle $1: equity = 500k, position_value = 10M
+    // Target = 6% of position_value
+    // abs_pos_safe_max = 500k * 10B / (1M * 600) = 8.33M
+    // remaining = 8.33M < 9M threshold => dust kill triggers
+    engine.accounts[user as usize].capital = 500_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
+
+    // Should trigger full close due to dust rule (remaining 8.33M < 9M min)
+    assert_eq!(close_abs, 10_000_000, "Should close entire position");
+    assert!(is_full, "Should be full close due to dust rule");
+}
+
+/// Test 6: Zero equity triggers full liquidation
+#[test]
+fn test_compute_liquidation_zero_equity() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units at $1, capital = 1M
+    // At oracle $0.85: equity = max(0, 1M - 1.5M) = 0
+    engine.accounts[user as usize].capital = 1_000_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    // Simulate the mark pnl being applied
+    engine.accounts[user as usize].pnl = -1_500_000;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 850_000);
+
+    // Zero equity means full close
+    assert_eq!(close_abs, 10_000_000, "Should close entire position");
+    assert!(is_full, "Should be full close when equity is zero");
 }
