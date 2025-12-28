@@ -14,11 +14,14 @@
 //! - LQ-PARTIAL: Liquidation reduces position to restore target margin;
 //!               dust kill-switch prevents sub-threshold remnants
 //!
-//! Design A (insurance routing):
-//! - Losses are realized into capital (not routed to insurance)
-//! - Insurance only changes via explicit fees/topups
-//! - Profit (mark_pnl > 0) is funded via ADL waterfall
-//!   (unwrapped PnL → unreserved insurance → loss_accum)
+//! Loss socialization waterfall:
+//!   unwrapped PnL → unreserved insurance above floor → loss_accum.
+//!
+//! Insurance balance increases only via:
+//!   maintenance fees + liquidation fees + trading fees + explicit top-ups.
+//!
+//! Reserved insurance (warmup_insurance_reserved) is never spendable by ADL.
+//! ADL can only spend insurance_spendable_unreserved().
 //!
 //! Note: Some proofs involving iteration over all accounts (apply_adl,
 //! check_conservation loops) are computationally expensive and may timeout.
@@ -355,6 +358,87 @@ fn snapshot_globals(engine: &RiskEngine) -> GlobalSnapshot {
         warmed_neg_total: engine.warmed_neg_total,
         warmup_insurance_reserved: engine.warmup_insurance_reserved,
     }
+}
+
+// ============================================================================
+// Waterfall Proof Helpers
+// Used to verify ADL waterfall: unwrapped PnL → unreserved insurance → loss_accum
+// ============================================================================
+
+/// Snapshot of insurance decomposition for waterfall proofs
+#[derive(Clone, Copy)]
+struct InsuranceSnap {
+    floor: u128,
+    raw: u128,        // spendable_raw = max(insurance - floor, 0)
+    reserved: u128,   // warmup_insurance_reserved
+    unreserved: u128, // spendable_unreserved = raw - reserved
+    balance: u128,    // insurance_fund.balance
+}
+
+fn snap_insurance(engine: &RiskEngine) -> InsuranceSnap {
+    let floor = engine.params.risk_reduction_threshold;
+    let raw = engine.insurance_spendable_raw();
+    let reserved = engine.warmup_insurance_reserved;
+    let unreserved = raw.saturating_sub(reserved);
+    InsuranceSnap { floor, raw, reserved, unreserved, balance: engine.insurance_fund.balance }
+}
+
+/// Expected waterfall routing amounts given a loss and pre-state totals
+#[derive(Clone, Copy)]
+struct WaterfallExpectation {
+    from_unwrapped: u128,
+    from_unreserved_insurance: u128,
+    to_loss_accum: u128,
+}
+
+/// Given total_loss and pre totals, compute expected routing amounts
+fn expected_waterfall(total_loss: u128, total_unwrapped: u128, unreserved_insurance: u128) -> WaterfallExpectation {
+    let from_unwrapped = core::cmp::min(total_loss, total_unwrapped);
+    let rem1 = total_loss.saturating_sub(from_unwrapped);
+    let from_unreserved_insurance = core::cmp::min(rem1, unreserved_insurance);
+    let rem2 = rem1.saturating_sub(from_unreserved_insurance);
+    let to_loss_accum = rem2;
+    WaterfallExpectation { from_unwrapped, from_unreserved_insurance, to_loss_accum }
+}
+
+/// Proof-side helper: compute withdrawable PnL (mirrors engine logic)
+fn proof_compute_withdrawable_pnl(engine: &RiskEngine, a: &Account) -> u128 {
+    if a.pnl <= 0 { return 0; }
+    let pos = a.pnl as u128;
+    let avail = pos.saturating_sub(a.reserved_pnl);
+
+    let effective_slot = if engine.warmup_paused {
+        core::cmp::min(engine.current_slot, engine.warmup_pause_slot)
+    } else {
+        engine.current_slot
+    };
+
+    let elapsed = effective_slot.saturating_sub(a.warmup_started_at_slot);
+    let cap = a.warmup_slope_per_step.saturating_mul(elapsed as u128);
+    core::cmp::min(avail, cap)
+}
+
+/// Proof-side helper: compute unwrapped PnL (positive PnL minus reserved minus withdrawable)
+fn proof_compute_unwrapped_pnl(engine: &RiskEngine, a: &Account) -> u128 {
+    if a.pnl <= 0 { return 0; }
+    let pos = a.pnl as u128;
+    let withdrawable = proof_compute_withdrawable_pnl(engine, a);
+    pos.saturating_sub(a.reserved_pnl).saturating_sub(withdrawable)
+}
+
+/// Proof-side helper: total unwrapped PnL across all used accounts
+fn proof_total_unwrapped(engine: &RiskEngine) -> u128 {
+    let mut total = 0u128;
+    for block in 0..BITMAP_WORDS {
+        let mut w = engine.used[block];
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            let idx = block * 64 + bit;
+            w &= w - 1;
+            total = total.saturating_add(proof_compute_unwrapped_pnl(engine, &engine.accounts[idx]));
+        }
+    }
+    total
 }
 
 // ============================================================================
@@ -718,7 +802,8 @@ fn i4_adl_haircuts_unwrapped_first() {
     engine.warmup_paused = false;
 
     engine.insurance_fund.balance = 10_000;
-    engine.vault = principal + 10_000;
+    // Include pnl in vault for conservation consistency
+    engine.vault = principal + 10_000 + (pnl as u128);
 
     let pnl_before = engine.accounts[user_idx as usize].pnl;
     let insurance_before = engine.insurance_fund.balance;
@@ -2449,6 +2534,134 @@ fn proof_r1_adl_never_spends_reserved() {
     );
 }
 
+// ============================================================================
+// ADL Waterfall Proofs
+// Prove exact routing: unwrapped PnL → unreserved insurance → loss_accum
+// ============================================================================
+
+/// Waterfall proof: when unwrapped=0, loss routes to insurance then loss_accum
+/// Setup: no unwrapped pnl, so the loss must hit insurance then loss_accum,
+/// and insurance may only drop by unreserved.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_adl_waterfall_exact_routing_single_user() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+    let user = engine.add_user(0).unwrap();
+
+    // Choose bounded values
+    let floor = engine.params.risk_reduction_threshold;
+    let reserved: u128 = 200;
+    let extra_unreserved: u128 = 300;
+    let loss: u128 = 400;
+
+    // Force state:
+    // insurance = floor + reserved + extra_unreserved
+    engine.insurance_fund.balance = floor + reserved + extra_unreserved;
+
+    // Make reserved = warmup_insurance_reserved deterministically via W+/W-
+    engine.warmed_pos_total = reserved; // W+
+    engine.warmed_neg_total = 0;        // W-
+    engine.recompute_warmup_insurance_reserved();
+    assert!(engine.warmup_insurance_reserved == reserved);
+
+    // Ensure total_unwrapped = 0
+    engine.accounts[user as usize].pnl = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+    engine.accounts[user as usize].warmup_slope_per_step = 0;
+    engine.accounts[user as usize].warmup_started_at_slot = engine.current_slot;
+
+    // Vault consistent
+    engine.vault = 10_000 + engine.insurance_fund.balance;
+    engine.accounts[user as usize].capital = 10_000;
+
+    let ins_before = snap_insurance(&engine);
+    let loss_accum_before = engine.loss_accum;
+
+    let total_unwrapped_before = proof_total_unwrapped(&engine);
+    assert!(total_unwrapped_before == 0);
+
+    // Apply ADL
+    let _ = engine.apply_adl(loss);
+
+    let ins_after = snap_insurance(&engine);
+
+    // Expected waterfall
+    let exp = expected_waterfall(loss, 0, ins_before.unreserved);
+
+    // 1) reserved never spent
+    assert!(ins_after.balance >= floor + ins_after.reserved,
+        "Waterfall: reserved must remain protected");
+
+    // 2) insurance decreases by exactly exp.from_unreserved_insurance
+    let insurance_drop = ins_before.balance.saturating_sub(ins_after.balance);
+    assert!(insurance_drop == exp.from_unreserved_insurance,
+        "Waterfall: insurance drop must equal expected unreserved spend");
+
+    // 3) loss_accum increases exactly by exp.to_loss_accum
+    let loss_accum_inc = engine.loss_accum.saturating_sub(loss_accum_before);
+    assert!(loss_accum_inc == exp.to_loss_accum,
+        "Waterfall: loss_accum increase must equal expected remainder");
+}
+
+/// Waterfall proof: when unwrapped covers loss, insurance unchanged
+/// Setup: slope=0 so all pnl is unwrapped; loss <= total_unwrapped
+/// Prove: insurance unchanged, loss_accum unchanged
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_adl_waterfall_unwrapped_first_no_insurance_touch() {
+    let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
+
+    // Deterministic setup: pnl = 100, loss = 60, all pnl is unwrapped (slope=0)
+    let pnl: i128 = 100;
+    let loss: u128 = 60;
+    let principal: u128 = 500;
+    let insurance: u128 = 10_000;
+
+    engine.accounts[user as usize].capital = principal;
+    engine.accounts[user as usize].pnl = pnl;
+    engine.accounts[user as usize].warmup_slope_per_step = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+    engine.current_slot = 0;
+    engine.warmup_paused = false;
+
+    engine.insurance_fund.balance = insurance;
+    // Include pnl in vault for conservation
+    engine.vault = principal + insurance + (pnl as u128);
+
+    let insurance_before = engine.insurance_fund.balance;
+    let loss_accum_before = engine.loss_accum;
+    let pnl_before = engine.accounts[user as usize].pnl;
+
+    // Verify setup: all pnl is unwrapped
+    let total_unwrapped = proof_total_unwrapped(&engine);
+    assert!(total_unwrapped == pnl as u128);
+
+    // Apply ADL
+    let _ = engine.apply_adl(loss);
+
+    // PROOF: insurance unchanged (loss fully covered by unwrapped)
+    assert!(
+        engine.insurance_fund.balance == insurance_before,
+        "Waterfall: insurance must not be touched when unwrapped covers loss"
+    );
+
+    // PROOF: loss_accum unchanged
+    assert!(
+        engine.loss_accum == loss_accum_before,
+        "Waterfall: loss_accum must not increase when unwrapped covers loss"
+    );
+
+    // PROOF: PnL reduced by exactly loss
+    assert!(
+        engine.accounts[user as usize].pnl == pnl_before - (loss as i128),
+        "Waterfall: PnL must be reduced by exactly the loss"
+    );
+}
+
 /// Proof R2: Reserved never exceeds raw spendable and is monotonically non-decreasing
 ///
 /// After settle_warmup_to_capital:
@@ -3095,6 +3308,75 @@ fn fast_proof_adl_conservation() {
     assert!(
         engine.check_conservation(),
         "Conservation must hold after ADL"
+    );
+}
+
+// ============================================================================
+// ADL Insurance Bounds Proofs
+// Prove: ADL never increases insurance, only spends or leaves unchanged
+// ============================================================================
+
+/// Proof: ADL never increases insurance balance
+/// Insurance can only decrease (spend) or stay same during ADL.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_adl_never_increases_insurance_balance() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+    let u = engine.add_user(0).unwrap();
+
+    // Some positive unwrapped pnl and some loss
+    engine.accounts[u as usize].capital = 1000;
+    engine.accounts[u as usize].pnl = 50;
+    engine.accounts[u as usize].warmup_slope_per_step = 0;
+    engine.accounts[u as usize].reserved_pnl = 0;
+
+    // Seed insurance
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold + 100;
+    engine.recompute_warmup_insurance_reserved();
+    engine.vault = 1000 + engine.insurance_fund.balance + 50;
+
+    let before = engine.insurance_fund.balance;
+    let _ = engine.apply_adl(80);
+    let after = engine.insurance_fund.balance;
+
+    assert!(after <= before, "ADL must not increase insurance");
+}
+
+/// Proof: Warmup settlement never changes insurance balance
+/// settle_warmup_to_capital only moves value between account.pnl and account.capital,
+/// it should not touch insurance_fund.balance at all.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_never_touches_insurance() {
+    let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
+
+    // Set up positive pnl with some slope so warmup progresses
+    let pnl: i128 = 500;
+    let slope: u128 = 10;
+    let insurance: u128 = 5_000;
+
+    engine.accounts[user as usize].capital = 1_000;
+    engine.accounts[user as usize].pnl = pnl;
+    engine.accounts[user as usize].warmup_slope_per_step = slope;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+    engine.current_slot = 50; // Some time passed
+
+    engine.insurance_fund.balance = insurance;
+    engine.vault = 1_000 + insurance + (pnl as u128);
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Settle warmup
+    let _ = engine.settle_warmup_to_capital(user);
+
+    // PROOF: insurance unchanged
+    assert!(
+        engine.insurance_fund.balance == insurance_before,
+        "settle_warmup_to_capital must not touch insurance"
     );
 }
 
