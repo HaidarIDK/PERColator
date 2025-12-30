@@ -1405,10 +1405,18 @@ impl RiskEngine {
         }
 
         // Close position via appropriate helper
+        // If partial close overflows, fall back to full close (overflow → full close safety)
         let mut outcome = if is_full_close {
             self.oracle_close_position_core(idx, oracle_price)?
         } else {
-            self.oracle_close_position_slice_core(idx, oracle_price, close_abs)?
+            match self.oracle_close_position_slice_core(idx, oracle_price, close_abs) {
+                Ok(o) => o,
+                Err(RiskError::Overflow) => {
+                    // Overflow in partial close arithmetic → force full close
+                    self.oracle_close_position_core(idx, oracle_price)?
+                }
+                Err(e) => return Err(e),
+            }
         };
 
         if !outcome.position_was_closed {
