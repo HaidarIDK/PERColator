@@ -1,5 +1,5 @@
 # Kani Proof Timing Report
-Generated: 2025-12-27
+Generated: 2025-12-30
 
 ## Summary
 
@@ -9,6 +9,33 @@ Generated: 2025-12-27
 - **Timeout**: 0
 - **Slow (>60s)**: 8
 
+### Recent Non-Vacuity Improvements (2025-12-30)
+
+The following proofs were updated to be non-vacuous (force operations to succeed
+and assert postconditions unconditionally):
+
+**Liquidation Proofs (LQ1-LQ6, LIQ-PARTIAL-1/2/3/4)**:
+- Force liquidation with `assert!(result.is_ok())` and `assert!(result.unwrap())`
+- Use deterministic setups: small capital, large position, oracle=entry
+
+**Panic Settle Proofs (PS1-PS5, C1)**:
+- Assert `panic_settle_all` succeeds under bounded inputs
+- PS4 already had this; PS1/PS2/PS3/PS5/C1 now non-vacuous
+
+**Waterfall Proofs**:
+- `proof_adl_waterfall_exact_routing_single_user`: deterministic warmup time vars
+- `proof_adl_waterfall_unwrapped_first_no_insurance_touch`: seed warmed_* = 0
+- `proof_adl_never_increases_insurance_balance`: force insurance spend
+
+### Verified Key Proofs (2025-12-30)
+
+| Proof | Time | Status |
+|-------|------|--------|
+| proof_c1_conservation_bounded_slack_panic_settle | 487s | PASS |
+| proof_ps5_panic_settle_no_insurance_minting | 438s | PASS |
+| proof_liq_partial_3_routing_is_complete_via_conservation_and_n1 | 2s | PASS |
+| proof_liq_partial_deterministic_reaches_target_or_full_close | 2s | PASS |
+
 ### Proofs Needing Attention
 
 **Slow (>60s)**:
@@ -17,9 +44,9 @@ Generated: 2025-12-27
 - `fast_valid_preserved_by_apply_adl` - 513s
 - `security_goal_bounded_net_extraction_sequence` - 507s
 - `fast_valid_preserved_by_panic_settle_all` - 438s
-- `proof_c1_conservation_bounded_slack_panic_settle` - 365s
+- `proof_c1_conservation_bounded_slack_panic_settle` - 487s
 - `panic_settle_clamps_negative_pnl` - 303s
-- `proof_ps5_panic_settle_no_insurance_minting` - 109s
+- `proof_ps5_panic_settle_no_insurance_minting` - 438s
 
 ## Full Timing Results
 
@@ -29,10 +56,10 @@ Generated: 2025-12-27
 | fast_valid_preserved_by_force_realize_losses | 520s | PASS |
 | fast_valid_preserved_by_apply_adl | 513s | PASS |
 | security_goal_bounded_net_extraction_sequence | 507s | PASS |
+| proof_c1_conservation_bounded_slack_panic_settle | 487s | PASS |
+| proof_ps5_panic_settle_no_insurance_minting | 438s | PASS |
 | fast_valid_preserved_by_panic_settle_all | 438s | PASS |
-| proof_c1_conservation_bounded_slack_panic_settle | 365s | PASS |
 | panic_settle_clamps_negative_pnl | 303s | PASS |
-| proof_ps5_panic_settle_no_insurance_minting | 109s | PASS |
 | multiple_lps_adl_preserves_all_capitals | 32s | PASS |
 | multiple_users_adl_preserves_all_principals | 31s | PASS |
 | mixed_users_and_lps_adl_preserves_all_capitals | 30s | PASS |
@@ -58,6 +85,8 @@ Generated: 2025-12-27
 | fast_maintenance_margin_uses_equity_including_negative_pnl | 3s | PASS |
 | audit_settle_idempotent_when_paused | 3s | PASS |
 | panic_settle_preserves_conservation | 2s | PASS |
+| proof_liq_partial_3_routing_is_complete_via_conservation_and_n1 | 2s | PASS |
+| proof_liq_partial_deterministic_reaches_target_or_full_close | 2s | PASS |
 | funding_p3_bounded_drift_between_opposite_positions | 2s | PASS |
 | fast_valid_preserved_by_settle_warmup_to_capital | 2s | PASS |
 | fast_frame_touch_account_only_mutates_one_account | 2s | PASS |
