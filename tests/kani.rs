@@ -55,8 +55,7 @@ fn test_params() -> RiskParams {
         max_accounts: 8,
         new_account_fee: 0,
         risk_reduction_threshold: 0,
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 0,
+        maintenance_fee_per_slot: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 10_000,
@@ -75,8 +74,7 @@ fn test_params_with_floor() -> RiskParams {
         max_accounts: 8,
         new_account_fee: 0,
         risk_reduction_threshold: 1000, // Non-zero floor
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 0,
+        maintenance_fee_per_slot: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 10_000,
@@ -86,7 +84,6 @@ fn test_params_with_floor() -> RiskParams {
 }
 
 /// Maintenance fee with fee_per_slot = 1 - used only for maintenance/keeper/fee_credit proofs
-/// maintenance_fee_per_day = slots_per_day ensures fee_per_slot = 1 (no integer division to 0)
 fn test_params_with_maintenance_fee() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
@@ -96,8 +93,7 @@ fn test_params_with_maintenance_fee() -> RiskParams {
         max_accounts: 8,
         new_account_fee: 0,
         risk_reduction_threshold: 0,
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 216_000, // fee_per_slot = 1
+        maintenance_fee_per_slot: 1, // fee_per_slot = 1 (direct, no division)
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 10_000,
@@ -4624,8 +4620,8 @@ fn proof_fee_credits_never_inflate_from_settle() {
 
     let credits_before = engine.accounts[user as usize].fee_credits;
 
-    // Settle after 1 day (now_slot = slots_per_day)
-    // With fee_per_slot = 1, due = slots_per_day
+    // Settle after 216,000 slots (dt = 216,000)
+    // With fee_per_slot = 1, due = dt = 216,000
     let _ = engine.settle_maintenance_fee(user, 216_000, 1_000_000);
 
     let credits_after = engine.accounts[user as usize].fee_credits;

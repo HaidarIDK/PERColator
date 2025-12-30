@@ -58,8 +58,7 @@ fn default_params() -> RiskParams {
         max_accounts: 1000,
         new_account_fee: 0,          // Zero fee for tests
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
-        slots_per_day: 216_000,      // ~400ms slots
-        maintenance_fee_per_day: 0,  // No maintenance fee by default
+        maintenance_fee_per_slot: 0, // No maintenance fee by default
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,     // 0.5% liquidation fee
         liquidation_fee_cap: 100_000, // Cap at 100k units
@@ -2760,8 +2759,7 @@ fn params_with_threshold() -> RiskParams {
         max_accounts: 1000,
         new_account_fee: 0,
         risk_reduction_threshold: 1000, // Non-zero threshold
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 0,
+        maintenance_fee_per_slot: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,

@@ -218,11 +218,9 @@ pub struct RiskParams {
     // ========================================
     // Maintenance Fee Parameters
     // ========================================
-    /// Number of slots per day (for fee calculations)
-    pub slots_per_day: u64,
-
-    /// Maintenance fee per account per day (in capital units)
-    pub maintenance_fee_per_day: u128,
+    /// Maintenance fee per account per slot (in capital units)
+    /// Engine is purely slot-native; any per-day conversion is wrapper/UI responsibility
+    pub maintenance_fee_per_slot: u128,
 
     /// Maximum allowed staleness before crank is required (in slots)
     /// Set to u64::MAX to disable crank freshness check
@@ -856,13 +854,8 @@ impl RiskEngine {
             return Ok(0);
         }
 
-        // Calculate fee due
-        let fee_per_slot = if self.params.slots_per_day > 0 {
-            self.params.maintenance_fee_per_day / self.params.slots_per_day as u128
-        } else {
-            0
-        };
-        let due = fee_per_slot.saturating_mul(dt as u128);
+        // Calculate fee due (engine is purely slot-native)
+        let due = self.params.maintenance_fee_per_slot.saturating_mul(dt as u128);
 
         // Update last_fee_slot
         account.last_fee_slot = now_slot;

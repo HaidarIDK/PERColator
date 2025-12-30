@@ -270,8 +270,7 @@ fn params_regime_a() -> RiskParams {
         max_accounts: 32, // Small for speed
         new_account_fee: 0,
         risk_reduction_threshold: 0,
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 0,
+        maintenance_fee_per_slot: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,
@@ -290,8 +289,7 @@ fn params_regime_b() -> RiskParams {
         max_accounts: 32, // Small for speed
         new_account_fee: 0,
         risk_reduction_threshold: 1000,
-        slots_per_day: 216_000,
-        maintenance_fee_per_day: 0,
+        maintenance_fee_per_slot: 0,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: 100_000,
