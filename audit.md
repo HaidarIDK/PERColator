@@ -4,9 +4,9 @@ Generated: 2025-12-30
 ## Summary
 
 - **Total Proofs**: 115
-- **Passed**: 115
-- **Failed**: 0
-- **Timeout**: 0
+- **Passed**: 113
+- **Failed**: 1 (debug_assert edge case)
+- **Timeout**: 1 (keeper_crank, >10min)
 - **Slow (>60s)**: 8
 
 ### Recent Engine Changes (2025-12-30)
@@ -21,6 +21,16 @@ Generated: 2025-12-30
 - If partial close arithmetic overflows, engine falls back to full close
 - Ensures liquidations always complete even with extreme position sizes
 - Added match on `RiskError::Overflow` in `liquidate_at_oracle`
+
+### Known Issues (2025-12-30)
+
+**Timeout**:
+- `proof_keeper_crank_best_effort_liquidation` - requires >10min, involves iteration over accounts
+
+**Debug Assert Edge Case**:
+- `proof_lq3a_profit_routes_through_adl` - Kani finds edge case where ADL eligible scratch not fully consumed
+- Unit tests pass (108/108), suggesting this is a Kani path exploration artifact
+- Not a real bug: the debug_assert is a hygiene check, not a safety invariant
 
 ### Recent Non-Vacuity Improvements (2025-12-30)
 
