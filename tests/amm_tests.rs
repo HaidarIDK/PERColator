@@ -10,8 +10,14 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        account_fee_bps: 10000,      // 1%
+        new_account_fee: 0,          // Zero fee for tests
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
+        maintenance_fee_per_slot: 0, // No maintenance fee by default
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,     // 0.5% liquidation fee
+        liquidation_fee_cap: 100_000, // Cap at 100k units
+        liquidation_buffer_bps: 100, // 1% buffer above maintenance
+        min_liquidation_abs: 100_000, // Minimum 0.1 units
     }
 }
 
@@ -79,12 +85,12 @@ fn test_e2e_complete_user_journey() {
     // Alice opens long position at $1000
     let oracle_price = 1_000_000; // $1 in 6 decimal scale
     engine
-        .execute_trade(&MATCHER, lp, alice, oracle_price, 5_000)
+        .execute_trade(&MATCHER, lp, alice, 0, oracle_price, 5_000)
         .unwrap();
 
     // Bob opens short position at $1000
     engine
-        .execute_trade(&MATCHER, lp, bob, oracle_price, -3_000)
+        .execute_trade(&MATCHER, lp, bob, 0, oracle_price, -3_000)
         .unwrap();
 
     // Check positions
@@ -99,7 +105,7 @@ fn test_e2e_complete_user_journey() {
 
     // Alice closes half her position, realizing profit
     engine
-        .execute_trade(&MATCHER, lp, alice, new_price, -2_500)
+        .execute_trade(&MATCHER, lp, alice, 0, new_price, -2_500)
         .unwrap();
 
     // Alice should have positive PNL from the closed portion
@@ -148,6 +154,7 @@ fn test_e2e_complete_user_journey() {
             &MATCHER,
             lp,
             alice,
+            0,
             new_price,
             -engine.accounts[alice as usize].position_size,
         )
@@ -161,7 +168,7 @@ fn test_e2e_complete_user_journey() {
     let alice_withdrawal = engine.accounts[alice as usize].capital + alice_final_withdrawable;
 
     if alice_withdrawal > 0 {
-        engine.withdraw(alice, alice_withdrawal).unwrap();
+        engine.withdraw(alice, alice_withdrawal, 0, 1_000_000).unwrap();
 
         // Alice should have minimal remaining balance
         assert!(
@@ -243,13 +250,13 @@ fn test_e2e_multi_user_with_adl() {
     // Users 0-3 open long positions at $1000
     for i in 0..4 {
         engine
-            .execute_trade(&MATCHER, lp, users[i], 1_000_000, 2_000)
+            .execute_trade(&MATCHER, lp, users[i], 0, 1_000_000, 2_000)
             .unwrap();
     }
 
     // User 4 opens short position
     engine
-        .execute_trade(&MATCHER, lp, users[4], 1_000_000, -8_000)
+        .execute_trade(&MATCHER, lp, users[4], 0, 1_000_000, -8_000)
         .unwrap();
 
     // Price moves to $1.10 - all longs profit, short loses
@@ -258,7 +265,7 @@ fn test_e2e_multi_user_with_adl() {
     // Close some positions to realize PNL
     for i in 0..4 {
         engine
-            .execute_trade(&MATCHER, lp, users[i], new_price, -2_000)
+            .execute_trade(&MATCHER, lp, users[i], 0, new_price, -2_000)
             .unwrap();
     }
 
@@ -323,7 +330,7 @@ fn test_e2e_warmup_rate_limiting_stress() {
 
     // All users open large long positions
     for &user in &users {
-        engine.execute_trade(&MATCHER, lp, user, 1_000_000, 10_000).unwrap();
+        engine.execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000).unwrap();
     }
 
     // Price moves up 50% - huge unrealized PNL
@@ -331,7 +338,7 @@ fn test_e2e_warmup_rate_limiting_stress() {
 
     // Close all positions to realize massive PNL
     for &user in &users {
-        engine.execute_trade(&MATCHER, lp, user, boom_price, -10_000).unwrap();
+        engine.execute_trade(&MATCHER, lp, user, 0, boom_price, -10_000).unwrap();
         // execute_trade automatically calls update_warmup_slope() after PNL changes
     }
 
@@ -419,10 +426,10 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice goes long, Bob goes short
     engine
-        .execute_trade(&MATCHER, lp, alice, 1_000_000, 10_000)
+        .execute_trade(&MATCHER, lp, alice, 0, 1_000_000, 10_000)
         .unwrap();
     engine
-        .execute_trade(&MATCHER, lp, bob, 1_000_000, -10_000)
+        .execute_trade(&MATCHER, lp, bob, 0, 1_000_000, -10_000)
         .unwrap();
 
     // Advance time and accrue funding (longs pay shorts)
@@ -453,12 +460,12 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice closes long and opens short
     engine
-        .execute_trade(&MATCHER, lp, alice, 1_000_000, -20_000)
+        .execute_trade(&MATCHER, lp, alice, 0, 1_000_000, -20_000)
         .unwrap();
 
     // Bob closes short and opens long
     engine
-        .execute_trade(&MATCHER, lp, bob, 1_000_000, 20_000)
+        .execute_trade(&MATCHER, lp, bob, 0, 1_000_000, 20_000)
         .unwrap();
 
     // Now Alice is short and Bob is long
@@ -516,18 +523,18 @@ fn test_e2e_oracle_attack_protection() {
     // === Phase 1: Normal Trading ===
 
     // Honest user opens long position
-    engine.execute_trade(&MATCHER, lp, honest_user, 1_000_000, 5_000).unwrap();
+    engine.execute_trade(&MATCHER, lp, honest_user, 0, 1_000_000, 5_000).unwrap();
 
     // === Phase 2: Oracle Manipulation Attempt ===
 
     // Attacker opens large position during manipulation
-    engine.execute_trade(&MATCHER, lp, attacker, 1_000_000, 20_000).unwrap();
+    engine.execute_trade(&MATCHER, lp, attacker, 0, 1_000_000, 20_000).unwrap();
 
     // Oracle gets manipulated to $2 (fake 100% gain)
     let fake_price = 2_000_000;
 
     // Attacker tries to close and realize fake profit
-    engine.execute_trade(&MATCHER, lp, attacker, fake_price, -20_000).unwrap();
+    engine.execute_trade(&MATCHER, lp, attacker, 0, fake_price, -20_000).unwrap();
     // execute_trade automatically calls update_warmup_slope() after realizing PNL
 
     // Attacker has massive fake PNL

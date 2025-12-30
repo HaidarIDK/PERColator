@@ -268,8 +268,14 @@ fn params_regime_a() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 0,
+        maintenance_fee_per_slot: 0,
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 
@@ -281,8 +287,14 @@ fn params_regime_b() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 1000,
+        maintenance_fee_per_slot: 0,
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 
@@ -605,7 +617,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.withdraw(idx, *amount);
+                let result = self.engine.withdraw(idx, *amount, 0, 1_000_000);
 
                 match result {
                     Ok(()) => {
@@ -711,7 +723,7 @@ impl FuzzState {
 
                 let result =
                     self.engine
-                        .execute_trade(&MATCHER, lp_idx, user_idx, *oracle_price, *size);
+                        .execute_trade(&MATCHER, lp_idx, user_idx, 0, *oracle_price, *size);
 
                 match result {
                     Ok(_) => {
@@ -1668,7 +1680,7 @@ proptest! {
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw(user_idx, withdraw_amount);
+        let result = engine.withdraw(user_idx, withdraw_amount, 0, 1_000_000);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1697,7 +1709,7 @@ proptest! {
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw(user_idx, amount);
+            let _ = engine.withdraw(user_idx, amount, 0, 1_000_000);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1861,7 +1873,7 @@ fn conservation_uses_settled_pnl_regression() {
 
     // Execute trade to create positions
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000)
         .unwrap();
 
     // Accrue significant funding WITHOUT touching accounts
@@ -1953,7 +1965,7 @@ fn harness_rollback_simulation_test() {
     let expected_warmup_reserved = engine.warmup_insurance_reserved;
 
     // Try to withdraw more than available - will fail
-    let result = engine.withdraw(user_idx, 999_999);
+    let result = engine.withdraw(user_idx, 999_999, 0, 1_000_000);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"

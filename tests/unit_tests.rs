@@ -56,8 +56,14 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        account_fee_bps: 10000,      // 1%
+        new_account_fee: 0,          // Zero fee for tests
         risk_reduction_threshold: 0, // Default: only trigger on full depletion
+        maintenance_fee_per_slot: 0, // No maintenance fee by default
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,     // 0.5% liquidation fee
+        liquidation_fee_cap: 100_000, // Cap at 100k units
+        liquidation_buffer_bps: 100, // 1% buffer above maintenance
+        min_liquidation_abs: 100_000, // Minimum 0.1 units (scaled by 1e6)
     }
 }
 
@@ -123,13 +129,13 @@ fn test_deposit_and_withdraw() {
 
     // Withdraw partial
     let v1 = vault_snapshot(&engine);
-    engine.withdraw(user_idx, 400).unwrap();
+    engine.withdraw(user_idx, 400, 0, 1_000_000).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 600);
     assert_vault_delta(&engine, v1, -400);
 
     // Withdraw rest
     let v2 = vault_snapshot(&engine);
-    engine.withdraw(user_idx, 600).unwrap();
+    engine.withdraw(user_idx, 600, 0, 1_000_000).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 0);
     assert_vault_delta(&engine, v2, -600);
 
@@ -144,7 +150,7 @@ fn test_withdraw_insufficient_balance() {
     engine.deposit(user_idx, 1000).unwrap();
 
     // Try to withdraw more than deposited
-    let result = engine.withdraw(user_idx, 1500);
+    let result = engine.withdraw(user_idx, 1500, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
@@ -163,7 +169,7 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
 
     // Trying to withdraw all principal would leave collateral = 0 + max(0, -800) = 0
     // This should fail because user has an open position
-    let result = engine.withdraw(user_idx, 1000);
+    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000);
 
     assert!(
         result.is_err(),
@@ -250,7 +256,7 @@ fn test_withdraw_pnl_not_warmed_up() {
 
     // Try to withdraw more than principal + warmed up PNL
     // Since PNL hasn't warmed up, can only withdraw the 1000 principal
-    let result = engine.withdraw(user_idx, 1100);
+    let result = engine.withdraw(user_idx, 1100, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
@@ -278,7 +284,7 @@ fn test_withdraw_with_warmed_up_pnl() {
 
     // Should be able to withdraw 1200 (1000 principal + 200 warmed PNL)
     // The function will automatically convert the 200 PNL to principal before withdrawal
-    engine.withdraw(user_idx, 1200).unwrap();
+    engine.withdraw(user_idx, 1200, 0, 1_000_000).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].pnl, 300); // 500 - 200 converted
     assert_eq!(engine.accounts[user_idx as usize].capital, 0); // 1000 + 200 - 1200
     assert_conserved(&engine);
@@ -309,7 +315,7 @@ fn test_conservation_simple() {
     assert!(engine.check_conservation());
 
     // Withdraw from user1's capital
-    engine.withdraw(user1, 500).unwrap();
+    engine.withdraw(user1, 500, 0, 1_000_000).unwrap();
     assert!(engine.check_conservation());
 }
 
@@ -458,7 +464,7 @@ fn test_trading_opens_position() {
     let size = 1000i128;
 
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, oracle_price, size)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, size)
         .unwrap();
 
     // Check position opened
@@ -486,12 +492,12 @@ fn test_trading_realizes_pnl() {
 
     // Open long position at $1
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000)
         .unwrap();
 
     // Close position at $1.50 (50% profit)
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 1_500_000, -1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_500_000, -1000)
         .unwrap();
 
     // Check PNL realized (approximately)
@@ -513,7 +519,7 @@ fn test_user_isolation() {
     let user2_pnl_before = engine.accounts[user2 as usize].pnl;
 
     // Operate on user1
-    engine.withdraw(user1, 500).unwrap();
+    engine.withdraw(user1, 500, 0, 1_000_000).unwrap();
     assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 300;
 
@@ -633,13 +639,13 @@ fn test_fee_accumulation() {
     let mut succeeded = 0usize;
     for _ in 0..10 {
         if engine
-            .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 10_000)
+            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 10_000)
             .is_ok()
         {
             succeeded += 1;
         }
         if engine
-            .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, -10_000)
+            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, -10_000)
             .is_ok()
         {
             succeeded += 1;
@@ -925,7 +931,7 @@ fn test_funding_partial_close() {
     assert_conserved(&engine);
 
     // Open long position of 2M base units
-    let trade_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, 2_000_000);
+    let trade_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 2_000_000);
     assert!(trade_result.is_ok(), "Trade should succeed");
 
     assert_eq!(engine.accounts[user_idx as usize].position_size, 2_000_000);
@@ -935,7 +941,7 @@ fn test_funding_partial_close() {
     engine.accrue_funding(1, 100_000_000, 10).unwrap();
 
     // Reduce position to 1M (close half)
-    let reduce_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, -1_000_000);
+    let reduce_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -1_000_000);
     assert!(reduce_result.is_ok(), "Partial close should succeed");
 
     // Position should be 1M now
@@ -970,7 +976,7 @@ fn test_funding_position_flip() {
 
     // Open long
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, 1_000_000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 1_000_000)
         .unwrap();
     assert_eq!(engine.accounts[user_idx as usize].position_size, 1_000_000);
 
@@ -982,7 +988,7 @@ fn test_funding_position_flip() {
 
     // Flip to short (trade -2M to go from +1M to -1M)
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 100_000_000, -2_000_000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -2_000_000)
         .unwrap();
 
     assert_eq!(engine.accounts[user_idx as usize].position_size, -1_000_000);
@@ -1141,7 +1147,7 @@ fn test_adl_protects_principal_during_warmup() {
     // The attacker can withdraw their principal + already-warmed PNL (which gets converted to capital)
     // But warmup is frozen, so the 45k that's still warming won't become available
     let total_withdrawable = attacker_principal + warmed_after_adl;
-    let withdraw_result = engine.withdraw(attacker, total_withdrawable);
+    let withdraw_result = engine.withdraw(attacker, total_withdrawable, 0, 1_000_000);
     assert!(
         withdraw_result.is_ok(),
         "Withdrawals of capital ARE allowed in risk mode"
@@ -1443,7 +1449,7 @@ fn test_proportional_haircut_on_withdrawal() {
     // Fair unwinding: Should get 80% regardless of order
     // Gets: 10,000 * 0.8 = 8,000
     let user1_balance_before = engine.accounts[user1 as usize].capital;
-    engine.withdraw(user1, 10_000).unwrap();
+    engine.withdraw(user1, 10_000, 0, 1_000_000).unwrap();
     let withdrawn = user1_balance_before - engine.accounts[user1 as usize].capital;
 
     assert_eq!(withdrawn, 8_000, "Should withdraw 80% due to haircut");
@@ -1452,7 +1458,7 @@ fn test_proportional_haircut_on_withdrawal() {
     // Fair unwinding: Also gets 80% (not less than user1)
     // Gets: 5,000 * 0.8 = 4,000
     let user2_balance_before = engine.accounts[user2 as usize].capital;
-    engine.withdraw(user2, 5_000).unwrap();
+    engine.withdraw(user2, 5_000, 0, 1_000_000).unwrap();
     let user2_withdrawn = user2_balance_before - engine.accounts[user2 as usize].capital;
 
     assert_eq!(user2_withdrawn, 4_000, "Should also get 80% (fair unwinding)");
@@ -1484,7 +1490,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     // User opens long position
     let matcher = NoOpMatcher;
     engine
-        .execute_trade(&matcher, lp, user, 1_000_000, 5_000)
+        .execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000)
         .unwrap();
     assert_eq!(engine.accounts[user as usize].position_size, 5_000);
 
@@ -1493,7 +1499,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     assert!(engine.risk_reduction_only);
 
     // User can CLOSE position (reducing from 5000 to 0) in risk mode
-    let result = engine.execute_trade(&matcher, lp, user, 1_000_000, -5_000);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, -5_000);
     assert!(result.is_ok(), "Closing position should be allowed");
     assert_eq!(engine.accounts[user as usize].position_size, 0);
 }
@@ -1518,7 +1524,7 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
 
     // User tries to open new position - should fail
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 1_000_000, 5_000);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000);
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 }
@@ -1571,7 +1577,7 @@ fn test_risk_mode_deposit_withdrawals_work() {
 
     // Withdraw 200 - should succeed (withdrawing from capital)
     let v0 = vault_snapshot(&engine);
-    let result = engine.withdraw(user, 200);
+    let result = engine.withdraw(user, 200, 0, 1_000_000);
     assert!(
         result.is_ok(),
         "Withdrawals of capital should work in risk mode"
@@ -1599,7 +1605,7 @@ fn test_risk_mode_pending_pnl_cannot_be_withdrawn() {
 
     // Try withdraw 1 - should fail with InsufficientBalance
     // because capital is 0 and warmup won't progress
-    let result = engine.withdraw(user, 1);
+    let result = engine.withdraw(user, 1, 0, 1_000_000);
     assert!(result.is_err(), "Should fail - no capital available");
     assert_eq!(result.unwrap_err(), RiskError::InsufficientBalance);
 }
@@ -1634,7 +1640,7 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
 
     // Call withdraw(50)
     // Should convert 100 PNL to capital, then withdraw 50
-    let result = engine.withdraw(user, 50);
+    let result = engine.withdraw(user, 50, 0, 1_000_000);
     assert!(result.is_ok(), "Should succeed: {:?}", result);
 
     // Check: pnl reduced by 100, capital increased by 100 then decreased by 50
@@ -1664,7 +1670,7 @@ fn test_risk_increasing_trade_fails_in_risk_mode() {
 
     // Try to open position (0 -> +1, increases absolute exposure)
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 100_000_000, 1);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, 1);
 
     assert!(result.is_err(), "Risk-increasing trade should fail");
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
@@ -1694,7 +1700,7 @@ fn test_reduce_only_trade_succeeds_in_risk_mode() {
 
     // Trade size -5 (reduces user from 10 to 5, LP from -10 to -5)
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 100_000_000, -5);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, -5);
 
     assert!(result.is_ok(), "Reduce-only trade should succeed");
     assert_eq!(engine.accounts[user as usize].position_size, 5);
@@ -1782,7 +1788,7 @@ fn test_deposits_allowed_in_withdrawal_mode() {
     // So user2 can withdraw: 5k - 333 ≈ 4,667
 
     let user2_balance_before = engine.accounts[user2 as usize].capital;
-    engine.withdraw(user2, 5_000).unwrap();
+    engine.withdraw(user2, 5_000, 0, 1_000_000).unwrap();
     let user2_withdrawn = user2_balance_before - engine.accounts[user2 as usize].capital;
 
     // Should be less than full amount due to proportional haircut
@@ -1831,20 +1837,20 @@ fn test_fair_unwinding_scenario() {
 
     // Alice withdraws all (10k * 75% = 7.5k)
     let alice_before = engine.accounts[alice as usize].capital;
-    engine.withdraw(alice, 10_000).unwrap();
+    engine.withdraw(alice, 10_000, 0, 1_000_000).unwrap();
     let alice_got = alice_before - engine.accounts[alice as usize].capital;
     assert_eq!(alice_got, 7_500);
 
     // Bob withdraws all (20k * 75% = 15k)
     // Fair unwinding: haircut ratio stays 75% because we track withdrawn amounts
     let bob_before = engine.accounts[bob as usize].capital;
-    engine.withdraw(bob, 20_000).unwrap();
+    engine.withdraw(bob, 20_000, 0, 1_000_000).unwrap();
     let bob_got = bob_before - engine.accounts[bob as usize].capital;
     assert_eq!(bob_got, 15_000);
 
     // Charlie withdraws all (10k * 75% = 7.5k)
     let charlie_before = engine.accounts[charlie as usize].capital;
-    engine.withdraw(charlie, 10_000).unwrap();
+    engine.withdraw(charlie, 10_000, 0, 1_000_000).unwrap();
     let charlie_got = charlie_before - engine.accounts[charlie as usize].capital;
     assert_eq!(charlie_got, 7_500);
 
@@ -1902,7 +1908,7 @@ fn test_lp_withdraw() {
 
     // withdraw converts warmed PNL to capital, then withdraws
     // After conversion: LP capital = 10,000 + 5,000 = 15,000
-    let result = engine.withdraw(lp_idx, 10_000);
+    let result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000);
     assert!(result.is_ok(), "LP withdrawal should succeed: {:?}", result);
 
     // Withdrawal should reduce vault by 10,000
@@ -1936,10 +1942,10 @@ fn test_lp_withdraw_with_haircut() {
     engine.risk_reduction_only = true;
 
     // Both should get 75% haircut
-    let user_result = engine.withdraw(user_idx, 10_000);
+    let user_result = engine.withdraw(user_idx, 10_000, 0, 1_000_000);
     assert!(user_result.is_ok());
 
-    let lp_result = engine.withdraw(lp_idx, 10_000);
+    let lp_result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000);
     assert!(lp_result.is_ok());
 
     // Both should have withdrawn same proportion
@@ -2751,8 +2757,14 @@ fn params_with_threshold() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 1000,
-        account_fee_bps: 10000,
+        new_account_fee: 0,
         risk_reduction_threshold: 1000, // Non-zero threshold
+        maintenance_fee_per_slot: 0,
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
+        liquidation_fee_cap: 100_000,
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: 100_000,
     }
 }
 
@@ -3906,7 +3918,7 @@ fn api_sequence_conservation_smoke_test() {
 
     // Execute a trade (use size > 1000 to generate non-zero fee)
     engine
-        .execute_trade(&MATCHER, lp, user, 1_000_000, 10_000)
+        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000)
         .unwrap();
     assert_conserved(&engine);
 
@@ -3917,12 +3929,12 @@ fn api_sequence_conservation_smoke_test() {
 
     // Close the position (reduces risk)
     engine
-        .execute_trade(&MATCHER, lp, user, 1_000_000, -10_000)
+        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, -10_000)
         .unwrap();
     assert_conserved(&engine);
 
     // Withdraw (should succeed since position is closed)
-    engine.withdraw(user, 1_000).unwrap();
+    engine.withdraw(user, 1_000, 0, 1_000_000).unwrap();
     assert_conserved(&engine);
 }
 
@@ -4375,7 +4387,7 @@ fn test_withdraw_rejected_when_closed_and_negative_pnl() {
     engine.vault = 10_000;
 
     // Attempt to withdraw full capital - should fail because losses must be realized first
-    let result = engine.withdraw(user_idx, 10_000);
+    let result = engine.withdraw(user_idx, 10_000, 0, 1_000_000);
 
     // The withdraw should fail with InsufficientBalance
     assert!(
@@ -4422,7 +4434,7 @@ fn test_withdraw_allows_remaining_principal_after_loss_realization() {
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
 
     // Withdraw remaining capital - should succeed
-    let result = engine.withdraw(user_idx, 1_000);
+    let result = engine.withdraw(user_idx, 1_000, 0, 1_000_000);
     assert!(result.is_ok(), "Withdraw of remaining capital should succeed");
     assert_eq!(engine.accounts[user_idx as usize].capital, 0);
 }
@@ -4522,7 +4534,7 @@ fn test_withdraw_open_position_blocks_due_to_equity() {
     engine.vault = 150;
 
     // withdraw(60) should fail - loss settles first, then balance check fails
-    let result = engine.withdraw(user_idx, 60);
+    let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
     assert!(
         result == Err(RiskError::InsufficientBalance),
         "withdraw(60) must fail: after settling 100 loss, capital=50 < 60"
@@ -4533,7 +4545,7 @@ fn test_withdraw_open_position_blocks_due_to_equity() {
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
 
     // Try withdraw(40) - would leave 10 equity < 100 IM required
-    let result = engine.withdraw(user_idx, 40);
+    let result = engine.withdraw(user_idx, 40, 0, 1_000_000);
     assert!(
         result == Err(RiskError::Undercollateralized),
         "withdraw(40) must fail: new_equity=10 < IM=100"
@@ -4561,6 +4573,9 @@ fn test_maintenance_margin_uses_equity() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = 40, MM = 50, 40 < 50 => not above MM
@@ -4583,6 +4598,9 @@ fn test_maintenance_margin_uses_equity() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
 
     // equity = max(0, 100 - 60) = 40, MM = 50, 40 < 50 => not above MM
@@ -4644,6 +4662,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_pos), 7_000);
 
@@ -4661,6 +4682,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_neg), 0);
 
@@ -4678,6 +4702,9 @@ fn test_account_equity_computes_correctly() {
         funding_index: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
+        owner: [0; 32],
+        fee_credits: 0,
+        last_fee_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_profit), 15_000);
 }
@@ -4700,7 +4727,7 @@ fn test_withdraw_rejected_when_closed_and_negative_pnl_full_amount() {
 
     // Try to withdraw full original amount (1000)
     // After settle: capital = 1000 - 300 = 700, so withdrawing 1000 should fail
-    let result = engine.withdraw(user_idx, 1000);
+    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 
     // Verify N1 invariant: after operation, pnl >= 0 || capital == 0
@@ -4721,7 +4748,7 @@ fn test_withdraw_allows_remaining_principal_after_loss_settlement() {
     engine.accounts[user_idx as usize].position_size = 0;
 
     // After settle: capital = 700. Withdraw 500 should succeed.
-    let result = engine.withdraw(user_idx, 500);
+    let result = engine.withdraw(user_idx, 500, 0, 1_000_000);
     assert!(result.is_ok());
 
     // Verify remaining capital
@@ -4744,7 +4771,7 @@ fn test_insolvent_account_blocks_any_withdrawal() {
 
     // After settle: capital = 0, pnl = -300 (remaining loss)
     // Any withdrawal should fail
-    let result = engine.withdraw(user_idx, 1);
+    let result = engine.withdraw(user_idx, 1, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 
     // Verify N1 invariant: pnl < 0 implies capital == 0
@@ -4770,11 +4797,324 @@ fn test_withdraw_im_check_blocks_when_equity_below_im() {
 
     // withdraw(60): new_capital = 90, equity = 90 < 100 (IM)
     // Should fail with Undercollateralized
-    let result = engine.withdraw(user_idx, 60);
+    let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::Undercollateralized));
 
     // withdraw(40): new_capital = 110, equity = 110 > 100 (IM)
     // Should succeed
-    let result2 = engine.withdraw(user_idx, 40);
+    let result2 = engine.withdraw(user_idx, 40, 0, 1_000_000);
     assert!(result2.is_ok());
+}
+
+// ==============================================================================
+// LIQUIDATION TESTS
+// ==============================================================================
+
+/// Test: keeper_crank returns num_liquidations > 0 when a user is under maintenance
+#[test]
+fn test_keeper_crank_liquidates_undercollateralized_user() {
+    let mut engine = RiskEngine::new(default_params());
+
+    // Create user and LP
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    let _ = engine.deposit(user, 10_000);
+    let _ = engine.deposit(lp, 100_000);
+
+    // Give user a long position at entry price 1.0
+    engine.accounts[user as usize].position_size = 1_000_000; // 1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[lp as usize].position_size = -1_000_000;
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 2_000_000;
+
+    // Set negative PnL to make user undercollateralized
+    // Position value at oracle 0.5 = 500_000
+    // Maintenance margin = 500_000 * 5% = 25_000
+    // User has capital 10_000, needs equity > 25_000 to avoid liquidation
+    engine.accounts[user as usize].pnl = -9_500; // equity = 500 < 25_000
+
+    let insurance_before = engine.insurance_fund.balance;
+
+    // Call keeper_crank with oracle price 0.5 (500_000 in e6)
+    let result = engine.keeper_crank(user, 1, 500_000, 0, false);
+    assert!(result.is_ok());
+
+    let outcome = result.unwrap();
+
+    // Should have liquidated the user
+    assert!(
+        outcome.num_liquidations > 0,
+        "Expected at least one liquidation, got {}",
+        outcome.num_liquidations
+    );
+
+    // User's position should be closed
+    assert_eq!(
+        engine.accounts[user as usize].position_size, 0,
+        "User position should be closed after liquidation"
+    );
+
+    // Insurance should have increased from liquidation fee
+    assert!(
+        engine.insurance_fund.balance >= insurance_before,
+        "Insurance should not decrease from liquidation"
+    );
+}
+
+/// Test: Liquidation fee is correctly calculated and paid
+/// Setup: small position with no mark pnl (oracle == entry), just barely undercollateralized
+#[test]
+fn test_liquidation_fee_calculation() {
+    let mut engine = RiskEngine::new(default_params());
+
+    // Create user
+    let user = engine.add_user(0).unwrap();
+
+    // Setup:
+    // position = 100_000 (0.1 unit), entry = oracle = 1_000_000 (no mark pnl)
+    // position_value = 100_000 * 1_000_000 / 1_000_000 = 100_000
+    // maintenance_margin = 100_000 * 5% = 5_000
+    // capital = 4_000 < 5_000 -> undercollateralized
+    engine.accounts[user as usize].capital = 4_000;
+    engine.accounts[user as usize].position_size = 100_000; // 0.1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 100_000;
+    engine.vault = 4_000;
+
+    let insurance_before = engine.insurance_fund.balance;
+    let oracle_price: u64 = 1_000_000; // Same as entry = no mark pnl
+
+    // Expected fee calculation:
+    // notional = 100_000 * 1_000_000 / 1_000_000 = 100_000
+    // fee = 100_000 * 50 / 10_000 = 500 (0.5% of notional)
+
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price);
+    assert!(result.is_ok());
+    assert!(result.unwrap(), "Liquidation should occur");
+
+    let insurance_after = engine.insurance_fund.balance;
+    let fee_received = insurance_after - insurance_before;
+
+    // Fee should be 0.5% of notional (100_000)
+    let expected_fee: u128 = 500;
+    assert_eq!(
+        fee_received, expected_fee,
+        "Liquidation fee should be {} but got {}",
+        expected_fee, fee_received
+    );
+
+    // Verify capital was reduced by the fee
+    assert_eq!(
+        engine.accounts[user as usize].capital, 3_500,
+        "Capital should be 4000 - 500 = 3500"
+    );
+}
+
+// ============================================================================
+// PARTIAL LIQUIDATION TESTS
+// ============================================================================
+
+/// Test 1: Dust kill-switch forces full close when remaining would be too small
+#[test]
+fn test_dust_killswitch_forces_full_close() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 5_000_000; // 5 units minimum
+
+    let mut engine = RiskEngine::new(params);
+
+    // Create user with direct setup (matching test_liquidation_fee_calculation pattern)
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 6 units at $1, barely undercollateralized at oracle = entry
+    // position_value = 6_000_000
+    // MM = 6_000_000 * 5% = 300_000
+    // Set capital below MM to trigger liquidation
+    engine.accounts[user as usize].capital = 200_000;
+    engine.accounts[user as usize].position_size = 6_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 6_000_000;
+    engine.vault = 200_000;
+
+    // Oracle at entry price (no mark pnl)
+    let oracle_price = 1_000_000;
+
+    // Liquidate
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    // Due to dust kill-switch (remaining < 5 units), position should be fully closed
+    assert_eq!(
+        engine.accounts[user as usize].position_size, 0,
+        "Dust kill-switch should force full close"
+    );
+}
+
+/// Test 2: Partial liquidation reduces position to safe level
+#[test]
+fn test_partial_liquidation_brings_to_safety() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 100_000;
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 10 units at $1, small capital
+    // At oracle $1: equity = 100k, position_value = 10M
+    // MM = 10M * 5% = 500k
+    // equity (100k) < MM (500k) => undercollateralized
+    // But equity > 0, so partial liquidation will occur
+    engine.accounts[user as usize].capital = 100_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 10_000_000;
+    engine.vault = 100_000;
+
+    let oracle_price = 1_000_000;
+    let pos_before = engine.accounts[user as usize].position_size;
+
+    // Liquidate - should succeed and reduce position
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    let pos_after = engine.accounts[user as usize].position_size;
+
+    // Position should be reduced (partial liquidation)
+    assert!(
+        pos_after < pos_before,
+        "Position should be reduced after liquidation"
+    );
+    assert!(
+        pos_after > 0,
+        "Partial liquidation should leave some position"
+    );
+}
+
+/// Test 3: Liquidation fee is charged on closed notional
+#[test]
+fn test_partial_liquidation_fee_charged() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = 100_000;
+    params.liquidation_fee_bps = 50; // 0.5%
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Small position to trigger full liquidation (dust rule)
+    // position_value = 500_000
+    // MM = 25_000
+    // capital = 20_000 < MM
+    engine.accounts[user as usize].capital = 20_000;
+    engine.accounts[user as usize].position_size = 500_000; // 0.5 units
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+    engine.total_open_interest = 500_000;
+    engine.vault = 20_000;
+
+    let insurance_before = engine.insurance_fund.balance;
+    let oracle_price = 1_000_000;
+
+    // Liquidate
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price).unwrap();
+    assert!(result, "Liquidation should succeed");
+
+    let insurance_after = engine.insurance_fund.balance;
+    let fee_received = insurance_after - insurance_before;
+
+    // Fee = 500_000 * 1_000_000 / 1_000_000 * 50 / 10_000 = 2_500
+    // But capped by available capital (20_000), so full 2_500 should be charged
+    assert!(fee_received > 0, "Some fee should be charged");
+}
+
+/// Test 4: Compute liquidation close amount basic test
+#[test]
+fn test_compute_liquidation_close_amount_basic() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units, capital = 500k
+    // At oracle $1: equity = 500k, position_value = 10M
+    // MM = 10M * 5% = 500k
+    // Target = 10M * 6% = 600k
+    // abs_pos_safe_max = 500k * 10B / (1M * 600) = 8.33M
+    // close_abs = 10M - 8.33M = 1.67M
+    engine.accounts[user as usize].capital = 500_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
+
+    // Should close some but not all
+    assert!(close_abs > 0, "Should close some position");
+    assert!(close_abs < 10_000_000, "Should not close entire position");
+    assert!(!is_full, "Should be partial close");
+
+    // Remaining should be >= min_liquidation_abs
+    let remaining = 10_000_000 - close_abs;
+    assert!(
+        remaining >= params.min_liquidation_abs,
+        "Remaining should be above min threshold"
+    );
+}
+
+/// Test 5: Compute liquidation triggers dust kill when remaining too small
+#[test]
+fn test_compute_liquidation_dust_kill() {
+    let mut params = default_params();
+    params.min_liquidation_abs = 9_000_000; // 9 units minimum (so after partial, remaining < 9 triggers kill)
+
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units at $1, capital = 500k
+    // At oracle $1: equity = 500k, position_value = 10M
+    // Target = 6% of position_value
+    // abs_pos_safe_max = 500k * 10B / (1M * 600) = 8.33M
+    // remaining = 8.33M < 9M threshold => dust kill triggers
+    engine.accounts[user as usize].capital = 500_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = 0;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
+
+    // Should trigger full close due to dust rule (remaining 8.33M < 9M min)
+    assert_eq!(close_abs, 10_000_000, "Should close entire position");
+    assert!(is_full, "Should be full close due to dust rule");
+}
+
+/// Test 6: Zero equity triggers full liquidation
+#[test]
+fn test_compute_liquidation_zero_equity() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    let user = engine.add_user(0).unwrap();
+
+    // Setup: position = 10 units at $1, capital = 1M
+    // At oracle $0.85: equity = max(0, 1M - 1.5M) = 0
+    engine.accounts[user as usize].capital = 1_000_000;
+    engine.accounts[user as usize].position_size = 10_000_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    // Simulate the mark pnl being applied
+    engine.accounts[user as usize].pnl = -1_500_000;
+
+    let account = &engine.accounts[user as usize];
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 850_000);
+
+    // Zero equity means full close
+    assert_eq!(close_abs, 10_000_000, "Should close entire position");
+    assert!(is_full, "Should be full close when equity is zero");
 }
