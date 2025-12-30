@@ -2635,6 +2635,11 @@ fn proof_adl_waterfall_unwrapped_first_no_insurance_touch() {
     engine.current_slot = 0;
     engine.warmup_paused = false;
 
+    // Seed warmed totals to zero and recompute reserved for tighter proof
+    engine.warmed_pos_total = 0;
+    engine.warmed_neg_total = 0;
+    engine.recompute_warmup_insurance_reserved();
+
     engine.insurance_fund.balance = insurance;
     // Include pnl in vault for conservation
     engine.vault = principal + insurance + (pnl as u128);
@@ -5277,22 +5282,23 @@ fn proof_lq4_liquidation_fee_paid_to_insurance() {
 
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
-    if result.is_ok() && result.unwrap() {
-        let insurance_after = engine.insurance_fund.balance;
-        let fee_received = insurance_after.saturating_sub(insurance_before);
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "setup must force liquidation to trigger");
 
-        // Position must be fully closed (dust rule forces it)
-        assert!(
-            engine.accounts[user as usize].position_size == 0,
-            "Position must be fully closed"
-        );
+    let insurance_after = engine.insurance_fund.balance;
+    let fee_received = insurance_after.saturating_sub(insurance_before);
 
-        // Fee should go to insurance (exact amount since capital covers it)
-        assert!(
-            fee_received == expected_fee,
-            "Insurance must receive exactly the expected fee"
-        );
-    }
+    // Position must be fully closed (dust rule forces it)
+    assert!(
+        engine.accounts[user as usize].position_size == 0,
+        "Position must be fully closed"
+    );
+
+    // Fee should go to insurance (exact amount since capital covers it)
+    assert!(
+        fee_received == expected_fee,
+        "Insurance must receive exactly the expected fee"
+    );
 }
 
 /// Proof: keeper_crank never fails due to liquidation errors (best-effort)
@@ -5342,15 +5348,16 @@ fn proof_lq5_no_reserved_insurance_spending() {
     let _ = engine.deposit(user, 500);
     let _ = engine.deposit(lp, 50_000);
 
-    // User long at 0.8, oracle at 1.0 means PROFIT for user (triggers ADL)
+    // User long at 0.8, oracle at 1.0 means PROFIT for user (mark_pnl = +100,000)
+    // But user has massive settled loss (-200,000) making them undercollateralized
+    // This tests: ADL triggered when user has unrealized profit but is still insolvent
     engine.accounts[user as usize].position_size = 500_000;
     engine.accounts[user as usize].entry_price = 800_000;
+    engine.accounts[user as usize].pnl = -200_000; // Big settled loss
     engine.accounts[lp as usize].position_size = -500_000;
     engine.accounts[lp as usize].entry_price = 800_000;
+    engine.accounts[lp as usize].pnl = 200_000; // Zero-sum with user
     engine.total_open_interest = 1_000_000;
-
-    // Give LP positive PnL (will be haircutted via ADL)
-    engine.accounts[lp as usize].pnl = 20_000;
 
     // Compute initial reserved
     engine.recompute_warmup_insurance_reserved();
@@ -5358,7 +5365,9 @@ fn proof_lq5_no_reserved_insurance_spending() {
     let reserved_before = engine.warmup_insurance_reserved;
 
     // Liquidate at oracle 1.0 (profit for user)
-    let _ = engine.liquidate_at_oracle(user, 0, 1_000_000);
+    let res = engine.liquidate_at_oracle(user, 0, 1_000_000);
+    assert!(res.is_ok(), "liquidation must not error");
+    assert!(res.unwrap(), "setup must force liquidation to trigger");
 
     // Assert: insurance >= floor + reserved
     assert!(
@@ -5447,22 +5456,23 @@ fn proof_liq_partial_1_safety_after_liquidation() {
 
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
-    if result.is_ok() && result.unwrap() {
-        let account = &engine.accounts[user as usize];
-        let abs_pos = if account.position_size >= 0 {
-            account.position_size as u128
-        } else {
-            (-account.position_size) as u128
-        };
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "setup must force liquidation to trigger");
 
-        // Post-condition: position is either 0 or above target margin
-        // Uses engine.is_above_margin_bps to match production logic exactly
-        if abs_pos > 0 {
-            assert!(
-                engine.is_above_margin_bps(account, oracle_price, target_bps),
-                "Partial close: account must be above target margin"
-            );
-        }
+    let account = &engine.accounts[user as usize];
+    let abs_pos = if account.position_size >= 0 {
+        account.position_size as u128
+    } else {
+        (-account.position_size) as u128
+    };
+
+    // Post-condition: position is either 0 or above target margin
+    // Uses engine.is_above_margin_bps to match production logic exactly
+    if abs_pos > 0 {
+        assert!(
+            engine.is_above_margin_bps(account, oracle_price, target_bps),
+            "Partial close: account must be above target margin"
+        );
     }
 }
 
@@ -5494,26 +5504,26 @@ fn proof_liq_partial_2_dust_elimination() {
 
     let min_liquidation_abs = engine.params.min_liquidation_abs;
 
-    // Try various oracle prices
-    let oracle_price: u64 = kani::any();
-    kani::assume(oracle_price > 100_000 && oracle_price < 5_000_000);
+    // Use oracle = entry to ensure mark_pnl = 0 and force undercollateralization
+    let oracle_price: u64 = 1_000_000;
 
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
-    if result.is_ok() && result.unwrap() {
-        let account = &engine.accounts[user as usize];
-        let abs_pos = if account.position_size >= 0 {
-            account.position_size as u128
-        } else {
-            (-account.position_size) as u128
-        };
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "setup must force liquidation to trigger");
 
-        // Dust elimination: position is either 0 or >= min_liquidation_abs
-        assert!(
-            abs_pos == 0 || abs_pos >= min_liquidation_abs,
-            "Position must be 0 or >= min_liquidation_abs (no dust)"
-        );
-    }
+    let account = &engine.accounts[user as usize];
+    let abs_pos = if account.position_size >= 0 {
+        account.position_size as u128
+    } else {
+        (-account.position_size) as u128
+    };
+
+    // Dust elimination: position is either 0 or >= min_liquidation_abs
+    assert!(
+        abs_pos == 0 || abs_pos >= min_liquidation_abs,
+        "Position must be 0 or >= min_liquidation_abs (no dust)"
+    );
 }
 
 /// LIQ-PARTIAL-3: Routing is Complete via Conservation and N1
@@ -5550,41 +5560,42 @@ fn proof_liq_partial_3_routing_is_complete_via_conservation_and_n1() {
 
     let result = engine.liquidate_at_oracle(user, 0, oracle_price);
 
-    if result.is_ok() && result.unwrap() {
-        let account = &engine.accounts[user as usize];
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "setup must force liquidation to trigger");
 
-        // Conservation holds (no silent PnL drop)
+    let account = &engine.accounts[user as usize];
+
+    // Conservation holds (no silent PnL drop)
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after liquidation"
+    );
+
+    // N1 boundary: pnl >= 0 or capital == 0
+    assert!(
+        account.pnl >= 0 || account.capital == 0,
+        "N1 boundary must hold after liquidation"
+    );
+
+    // Dust rule
+    let abs_pos = if account.position_size >= 0 {
+        account.position_size as u128
+    } else {
+        (-account.position_size) as u128
+    };
+    assert!(
+        abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs,
+        "Dust rule: position must be 0 or >= min_liquidation_abs"
+    );
+
+    // If position remains, must be above target margin
+    if abs_pos > 0 {
+        let target_bps = engine.params.maintenance_margin_bps
+            .saturating_add(engine.params.liquidation_buffer_bps);
         assert!(
-            engine.check_conservation(),
-            "Conservation must hold after liquidation"
+            engine.is_above_margin_bps(account, oracle_price, target_bps),
+            "Partial liquidation must leave account above target margin"
         );
-
-        // N1 boundary: pnl >= 0 or capital == 0
-        assert!(
-            account.pnl >= 0 || account.capital == 0,
-            "N1 boundary must hold after liquidation"
-        );
-
-        // Dust rule
-        let abs_pos = if account.position_size >= 0 {
-            account.position_size as u128
-        } else {
-            (-account.position_size) as u128
-        };
-        assert!(
-            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs,
-            "Dust rule: position must be 0 or >= min_liquidation_abs"
-        );
-
-        // If position remains, must be above target margin
-        if abs_pos > 0 {
-            let target_bps = engine.params.maintenance_margin_bps
-                .saturating_add(engine.params.liquidation_buffer_bps);
-            assert!(
-                engine.is_above_margin_bps(account, oracle_price, target_bps),
-                "Partial liquidation must leave account above target margin"
-            );
-        }
     }
 }
 
