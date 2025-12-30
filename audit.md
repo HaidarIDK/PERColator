@@ -3,11 +3,24 @@ Generated: 2025-12-30
 
 ## Summary
 
-- **Total Proofs**: 98
-- **Passed**: 98
+- **Total Proofs**: 115
+- **Passed**: 115
 - **Failed**: 0
 - **Timeout**: 0
 - **Slow (>60s)**: 8
+
+### Recent Engine Changes (2025-12-30)
+
+**Slot-Native Engine**:
+- Removed `slots_per_day` and `maintenance_fee_per_day` from RiskParams
+- Engine now uses only `maintenance_fee_per_slot` for direct calculation
+- Fee calculation: `due = maintenance_fee_per_slot * dt` (no division)
+- Any per-day conversion is wrapper/UI responsibility
+
+**Overflow Safety in Liquidation**:
+- If partial close arithmetic overflows, engine falls back to full close
+- Ensures liquidations always complete even with extreme position sizes
+- Added match on `RiskError::Overflow` in `liquidate_at_oracle`
 
 ### Recent Non-Vacuity Improvements (2025-12-30)
 
