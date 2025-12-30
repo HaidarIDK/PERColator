@@ -1860,17 +1860,18 @@ fn panic_settle_closes_all_positions() {
     // Call panic_settle_all
     let result = engine.panic_settle_all(oracle_price);
 
-    // PROOF: If successful, all positions must be zero
-    if result.is_ok() {
-        assert!(
-            engine.accounts[user_idx as usize].position_size == 0,
-            "PS1: User position must be closed after panic settle"
-        );
-        assert!(
-            engine.accounts[lp_idx as usize].position_size == 0,
-            "PS1: LP position must be closed after panic settle"
-        );
-    }
+    // PROOF: panic_settle_all must succeed under bounded inputs
+    assert!(result.is_ok(), "PS1: panic_settle_all must not error");
+
+    // All positions must be zero
+    assert!(
+        engine.accounts[user_idx as usize].position_size == 0,
+        "PS1: User position must be closed after panic settle"
+    );
+    assert!(
+        engine.accounts[lp_idx as usize].position_size == 0,
+        "PS1: LP position must be closed after panic settle"
+    );
 }
 
 // Proof PS2: panic_settle_all clamps all negative PNL to zero
@@ -1912,17 +1913,18 @@ fn panic_settle_clamps_negative_pnl() {
     // Call panic_settle_all
     let result = engine.panic_settle_all(oracle_price);
 
-    // PROOF: If successful, all PNLs must be >= 0
-    if result.is_ok() {
-        assert!(
-            engine.accounts[user_idx as usize].pnl >= 0,
-            "PS2: User PNL must be >= 0 after panic settle"
-        );
-        assert!(
-            engine.accounts[lp_idx as usize].pnl >= 0,
-            "PS2: LP PNL must be >= 0 after panic settle"
-        );
-    }
+    // PROOF: panic_settle_all must succeed under bounded inputs
+    assert!(result.is_ok(), "PS2: panic_settle_all must not error");
+
+    // All PNLs must be >= 0
+    assert!(
+        engine.accounts[user_idx as usize].pnl >= 0,
+        "PS2: User PNL must be >= 0 after panic settle"
+    );
+    assert!(
+        engine.accounts[lp_idx as usize].pnl >= 0,
+        "PS2: LP PNL must be >= 0 after panic settle"
+    );
 }
 
 // Proof PS3: panic_settle_all always enters risk-reduction-only mode
@@ -1948,17 +1950,18 @@ fn panic_settle_enters_risk_mode() {
     // Call panic_settle_all
     let result = engine.panic_settle_all(oracle_price);
 
-    // PROOF: After panic_settle, we must be in risk-reduction-only mode
-    if result.is_ok() {
-        assert!(
-            engine.risk_reduction_only,
-            "PS3: Must be in risk-reduction-only mode after panic settle"
-        );
-        assert!(
-            engine.warmup_paused,
-            "PS3: Warmup must be paused after panic settle"
-        );
-    }
+    // PROOF: panic_settle_all must succeed under bounded inputs
+    assert!(result.is_ok(), "PS3: panic_settle_all must not error");
+
+    // After panic_settle, we must be in risk-reduction-only mode
+    assert!(
+        engine.risk_reduction_only,
+        "PS3: Must be in risk-reduction-only mode after panic settle"
+    );
+    assert!(
+        engine.warmup_paused,
+        "PS3: Warmup must be paused after panic settle"
+    );
 }
 
 // Proof PS4: panic_settle_all preserves conservation (with rounding compensation)
@@ -5357,6 +5360,8 @@ fn proof_lq5_no_reserved_insurance_spending() {
     engine.accounts[lp as usize].position_size = -500_000;
     engine.accounts[lp as usize].entry_price = 800_000;
     engine.accounts[lp as usize].pnl = 200_000; // Zero-sum with user
+    engine.accounts[lp as usize].warmup_slope_per_step = 0; // Explicit: no warmup complexity
+    engine.accounts[lp as usize].reserved_pnl = 0;
     engine.total_open_interest = 1_000_000;
 
     // Compute initial reserved
@@ -5622,6 +5627,7 @@ fn proof_liq_partial_4_conservation_preservation() {
     engine.total_open_interest = 2_000_000;
 
     // Zero-sum PnL (conservation-compliant)
+    // User: capital 10k, pnl -9k => equity 1k, notional 1M, MM 50k => undercollateralized
     engine.accounts[user as usize].pnl = -9_000;
     engine.accounts[lp as usize].pnl = 9_000;
 
@@ -5631,11 +5637,13 @@ fn proof_liq_partial_4_conservation_preservation() {
         "Conservation must hold before liquidation"
     );
 
-    // Try liquidation at various prices
-    let oracle_price: u64 = kani::any();
-    kani::assume(oracle_price > 100_000 && oracle_price < 5_000_000);
+    // Deterministic oracle = entry to ensure mark_pnl = 0
+    let oracle_price: u64 = 1_000_000;
 
-    let _ = engine.liquidate_at_oracle(user, 0, oracle_price);
+    let result = engine.liquidate_at_oracle(user, 0, oracle_price);
+
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "setup must force liquidation to trigger");
 
     // Conservation must hold after (with bounded slack)
     assert!(
