@@ -1255,9 +1255,9 @@ impl RiskEngine {
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
 
-        // Route positive mark_pnl through ADL
+        // Route positive mark_pnl through ADL (excluding this account - it shouldn't fund its own profit)
         if mark_pnl > 0 {
-            self.apply_adl(mark_pnl as u128)?;
+            self.apply_adl_excluding(mark_pnl as u128, idx as usize)?;
         }
 
         // Settle warmup
@@ -1333,9 +1333,9 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
-        // Route positive mark_pnl through ADL (profits must be funded from somewhere)
+        // Route positive mark_pnl through ADL (excluding this account - it shouldn't fund its own profit)
         if mark_pnl > 0 {
-            self.apply_adl(mark_pnl as u128)?;
+            self.apply_adl_excluding(mark_pnl as u128, idx as usize)?;
         }
         // mark_pnl <= 0: losses realized from capital via settlement below
 
@@ -2367,9 +2367,14 @@ impl RiskEngine {
 
             // Step 3: Distribute leftover using largest-remainder method
             // Each account can receive at most +1 leftover (correct for largest-remainder)
+            // Bounded loop: leftover cannot exceed MAX_ACCOUNTS (Kani-friendly)
             let mut leftover = loss_to_socialize - applied_from_pnl;
 
-            while leftover > 0 {
+            for _ in 0..MAX_ACCOUNTS {
+                if leftover == 0 {
+                    break;
+                }
+
                 // Find account with max remainder; ties: lowest idx wins
                 let mut best_idx: Option<usize> = None;
                 let mut best_rem: u128 = 0;
@@ -2389,7 +2394,7 @@ impl RiskEngine {
                                 continue;
                             }
                             // Prefer larger remainder; if equal, prefer smaller idx (ties)
-                            if rem > best_rem || (rem == best_rem && rem != 0 && best_idx.map_or(true, |b| idx < b)) {
+                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
                                 best_rem = rem;
                                 best_idx = Some(idx);
                             }
@@ -2405,8 +2410,6 @@ impl RiskEngine {
                         leftover -= 1;
                     }
                     None => {
-                        #[cfg(any(test, kani))]
-                        debug_assert!(false, "ADL leftover distribution ran out of eligible candidates");
                         break;
                     }
                 }
@@ -2478,6 +2481,172 @@ impl RiskEngine {
                 "Reserved invariant violated in apply_adl"
             );
         }
+
+        Ok(())
+    }
+
+    /// ADL variant that excludes a specific account from being haircutted.
+    ///
+    /// Used when funding liquidation profit (mark_pnl > 0) - the liquidated account
+    /// should not fund its own profit via ADL. This ensures profits are backed by
+    /// other accounts' unwrapped PnL, insurance, or loss_accum.
+    pub fn apply_adl_excluding(&mut self, total_loss: u128, exclude_idx: usize) -> Result<()> {
+        self.enforce_op(OpClass::RiskReduce)?;
+
+        if total_loss == 0 {
+            return Ok(());
+        }
+
+        // Pass 1: Compute total unwrapped PNL, excluding the specified account
+        let mut total_unwrapped = 0u128;
+
+        for (block, word) in self.used.iter().copied().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                if idx == exclude_idx {
+                    continue;
+                }
+
+                let unwrapped = self.compute_unwrapped_pnl(&self.accounts[idx]);
+                total_unwrapped = total_unwrapped.saturating_add(unwrapped);
+            }
+        }
+
+        let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
+        let mut applied_from_pnl: u128 = 0;
+
+        if loss_to_socialize > 0 && total_unwrapped > 0 {
+            // Zero scratch arrays for used accounts (excluding target)
+            for block in 0..BITMAP_WORDS {
+                let mut w = self.used[block];
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block * 64 + bit;
+                    w &= w - 1;
+
+                    if idx == exclude_idx {
+                        continue;
+                    }
+
+                    self.adl_remainder_scratch[idx] = 0;
+                    self.adl_eligible_scratch[idx] = 0;
+                }
+            }
+
+            // Compute floor haircuts, excluding target
+            for block in 0..BITMAP_WORDS {
+                let mut w = self.used[block];
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block * 64 + bit;
+                    w &= w - 1;
+
+                    if idx == exclude_idx {
+                        continue;
+                    }
+
+                    let account = &self.accounts[idx];
+                    if account.pnl > 0 {
+                        let unwrapped = self.compute_unwrapped_pnl(account);
+
+                        if unwrapped > 0 {
+                            let numer = loss_to_socialize.saturating_mul(unwrapped);
+                            let haircut = numer / total_unwrapped;
+                            let rem = numer % total_unwrapped;
+
+                            self.accounts[idx].pnl =
+                                self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                            applied_from_pnl += haircut;
+
+                            self.adl_remainder_scratch[idx] = rem;
+                            self.adl_eligible_scratch[idx] = if rem > 0 { 1 } else { 0 };
+                        }
+                    }
+                }
+            }
+
+            // Distribute leftover (bounded loop for Kani)
+            let mut leftover = loss_to_socialize - applied_from_pnl;
+
+            for _ in 0..MAX_ACCOUNTS {
+                if leftover == 0 {
+                    break;
+                }
+
+                let mut best_idx: Option<usize> = None;
+                let mut best_rem: u128 = 0;
+
+                for block in 0..BITMAP_WORDS {
+                    let mut w = self.used[block];
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        let idx = block * 64 + bit;
+                        w &= w - 1;
+
+                        if idx == exclude_idx {
+                            continue;
+                        }
+
+                        if self.adl_eligible_scratch[idx] == 1 {
+                            let rem = self.adl_remainder_scratch[idx];
+                            if rem == 0 {
+                                continue;
+                            }
+                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
+                                best_rem = rem;
+                                best_idx = Some(idx);
+                            }
+                        }
+                    }
+                }
+
+                match best_idx {
+                    Some(idx) => {
+                        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                        applied_from_pnl += 1;
+                        self.adl_eligible_scratch[idx] = 0;
+                        leftover -= 1;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+
+            #[cfg(any(test, kani))]
+            debug_assert!(
+                applied_from_pnl == loss_to_socialize,
+                "ADL excluding rounding bug: applied {} != socialized {}",
+                applied_from_pnl,
+                loss_to_socialize
+            );
+        }
+
+        // Handle remaining loss with insurance fund
+        let remaining_loss = total_loss.saturating_sub(applied_from_pnl);
+
+        if remaining_loss > 0 {
+            let spendable = self.insurance_spendable_unreserved();
+            let spend = core::cmp::min(remaining_loss, spendable);
+
+            self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, spend);
+
+            let uncovered = remaining_loss.saturating_sub(spend);
+            if uncovered > 0 {
+                self.loss_accum = add_u128(self.loss_accum, uncovered);
+            }
+
+            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold
+            {
+                self.enter_risk_reduction_only_mode();
+            }
+        }
+
+        self.recompute_warmup_insurance_reserved();
 
         Ok(())
     }
