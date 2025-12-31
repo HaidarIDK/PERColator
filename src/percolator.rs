@@ -618,6 +618,9 @@ impl RiskEngine {
     // ========================================
 
     pub fn is_used(&self, idx: usize) -> bool {
+        if idx >= MAX_ACCOUNTS {
+            return false;
+        }
         let w = idx >> 6;
         let b = idx & 63;
         ((self.used[w] >> b) & 1) == 1
@@ -2333,10 +2336,14 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Helper to check if account should be skipped
-        let should_skip = |idx: usize| -> bool {
-            exclude.map_or(false, |ex| idx == ex)
-        };
+        // Inline helper - simpler for Kani than a closure
+        #[inline]
+        fn is_excluded(exclude: Option<usize>, idx: usize) -> bool {
+            match exclude {
+                Some(ex) => ex == idx,
+                None => false,
+            }
+        }
 
         // Pass 1: Compute total unwrapped PNL (excluding specified account if any)
         let mut total_unwrapped = 0u128;
@@ -2350,7 +2357,7 @@ impl RiskEngine {
                 if idx >= MAX_ACCOUNTS {
                     continue; // Guard against stray high bits in bitmap
                 }
-                if should_skip(idx) {
+                if is_excluded(exclude, idx) {
                     continue;
                 }
 
@@ -2376,7 +2383,7 @@ impl RiskEngine {
                     if idx >= MAX_ACCOUNTS {
                         continue;
                     }
-                    if should_skip(idx) {
+                    if is_excluded(exclude, idx) {
                         continue;
                     }
 
@@ -2395,7 +2402,7 @@ impl RiskEngine {
                     if idx >= MAX_ACCOUNTS {
                         continue;
                     }
-                    if should_skip(idx) {
+                    if is_excluded(exclude, idx) {
                         continue;
                     }
 
@@ -2422,10 +2429,11 @@ impl RiskEngine {
 
             // Step 3: Distribute leftover using largest-remainder method
             // Each account can receive at most +1 leftover (correct for largest-remainder)
-            // Bounded loop: leftover cannot exceed MAX_ACCOUNTS (Kani-friendly)
+            // Tighter bound: min(leftover, MAX_ACCOUNTS) reduces Kani unwind work
             let mut leftover = loss_to_socialize - applied_from_pnl;
+            let max_iters = core::cmp::min(leftover as usize, MAX_ACCOUNTS);
 
-            for _ in 0..MAX_ACCOUNTS {
+            for _ in 0..max_iters {
                 if leftover == 0 {
                     break;
                 }
@@ -2443,7 +2451,7 @@ impl RiskEngine {
                         if idx >= MAX_ACCOUNTS {
                             continue;
                         }
-                        if should_skip(idx) {
+                        if is_excluded(exclude, idx) {
                             continue;
                         }
 
@@ -2488,7 +2496,7 @@ impl RiskEngine {
                         if idx >= MAX_ACCOUNTS {
                             continue;
                         }
-                        if should_skip(idx) {
+                        if is_excluded(exclude, idx) {
                             continue;
                         }
                         debug_assert!(
@@ -2587,6 +2595,10 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
 
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
+
                 let account = &mut self.accounts[idx];
 
                 // Settle funding first (required for correct PNL accounting)
@@ -2644,6 +2656,10 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 self.settle_warmup_to_capital(idx as u16)?;
             }
@@ -2708,6 +2724,10 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 let account = &mut self.accounts[idx];
 
