@@ -5118,3 +5118,39 @@ fn test_compute_liquidation_zero_equity() {
     assert_eq!(close_abs, 10_000_000, "Should close entire position");
     assert!(is_full, "Should be full close when equity is zero");
 }
+
+// ==============================================================================
+// THRESHOLD SETTER/GETTER TESTS
+// ==============================================================================
+
+#[test]
+fn test_set_threshold_updates_value() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+
+    // Initial threshold from params
+    assert_eq!(engine.risk_reduction_threshold(), 0);
+
+    // Set new threshold
+    engine.set_risk_reduction_threshold(5_000);
+    assert_eq!(engine.risk_reduction_threshold(), 5_000);
+
+    // Update again
+    engine.set_risk_reduction_threshold(10_000);
+    assert_eq!(engine.risk_reduction_threshold(), 10_000);
+
+    // Set to zero
+    engine.set_risk_reduction_threshold(0);
+    assert_eq!(engine.risk_reduction_threshold(), 0);
+}
+
+#[test]
+fn test_set_threshold_large_value() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+
+    // Set to large value
+    let large = u128::MAX / 2;
+    engine.set_risk_reduction_threshold(large);
+    assert_eq!(engine.risk_reduction_threshold(), large);
+}

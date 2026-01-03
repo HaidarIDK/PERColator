@@ -918,8 +918,15 @@ impl RiskEngine {
 
     /// Set the risk reduction threshold (admin function).
     /// This controls when risk-reduction-only mode is triggered.
+    #[inline]
     pub fn set_risk_reduction_threshold(&mut self, new_threshold: u128) {
         self.params.risk_reduction_threshold = new_threshold;
+    }
+
+    /// Get the current risk reduction threshold.
+    #[inline]
+    pub fn risk_reduction_threshold(&self) -> u128 {
+        self.params.risk_reduction_threshold
     }
 
     /// Close an account and return its capital to the caller.
