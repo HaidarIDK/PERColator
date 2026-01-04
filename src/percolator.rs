@@ -27,14 +27,13 @@ extern crate kani;
 
 // MAX_ACCOUNTS is feature-configured, not target-configured.
 // This ensures x86 and SBF builds use the same sizes for a given feature set.
-// Use `--features small` for tests to avoid stack overflow on RiskEngine::new().
 #[cfg(kani)]
 pub const MAX_ACCOUNTS: usize = 8; // Small for fast formal verification
 
-#[cfg(all(any(feature = "fuzz", feature = "small"), not(kani)))]
-pub const MAX_ACCOUNTS: usize = 64; // Small for fuzz/test
+#[cfg(all(feature = "test", not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64; // Small for tests
 
-#[cfg(all(not(kani), not(feature = "fuzz"), not(feature = "small")))]
+#[cfg(all(not(kani), not(feature = "test")))]
 pub const MAX_ACCOUNTS: usize = 4096; // Production
 
 // Derived constants - all use size_of, no hardcoded values
