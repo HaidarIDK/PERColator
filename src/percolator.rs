@@ -40,6 +40,10 @@ pub const MAX_ACCOUNTS: usize = 4096; // Production
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
 
+/// Maximum number of dust accounts to close per crank call.
+/// Limits compute usage while still making progress on cleanup.
+pub const GC_CLOSE_BUDGET: u32 = 32;
+
 // ============================================================================
 // Core Data Structures
 // ============================================================================
@@ -411,6 +415,8 @@ pub struct CrankOutcome {
     pub did_panic_settle: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
+    /// Number of dust accounts garbage collected during this crank
+    pub num_gc_closed: u32,
 }
 
 // ============================================================================
@@ -1003,18 +1009,106 @@ impl RiskEngine {
         }
         self.vault = self.vault.saturating_sub(capital);
 
-        // Clear the account slot
-        self.accounts[idx as usize] = empty_account();
-        self.clear_used(idx as usize);
-
-        // Return to freelist
-        self.next_free[idx as usize] = self.free_head;
-        self.free_head = idx;
-
-        // Decrement used count
-        self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
+        // Free the slot
+        self.free_slot(idx);
 
         Ok(capital)
+    }
+
+    /// Free an account slot (internal helper).
+    /// Clears the account, bitmap, and returns slot to freelist.
+    /// Caller must ensure the account is safe to free (no capital, no positive pnl, etc).
+    fn free_slot(&mut self, idx: u16) {
+        self.accounts[idx as usize] = empty_account();
+        self.clear_used(idx as usize);
+        self.next_free[idx as usize] = self.free_head;
+        self.free_head = idx;
+        self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
+    }
+
+    /// Garbage collect dust accounts.
+    ///
+    /// A "dust account" is a slot that can never pay out anything:
+    /// - position_size == 0
+    /// - capital == 0
+    /// - reserved_pnl == 0
+    /// - pnl <= 0 after full settlement
+    ///
+    /// Any remaining negative PnL is socialized via ADL waterfall before freeing.
+    /// No token transfers occur - this is purely internal bookkeeping cleanup.
+    ///
+    /// Returns the number of accounts closed.
+    pub fn garbage_collect_dust(&mut self, now_slot: u64, oracle_price: u64) -> u32 {
+        let mut closed = 0u32;
+
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue;
+                }
+
+                // Budget check
+                if closed >= GC_CLOSE_BUDGET {
+                    return closed;
+                }
+
+                let account = &self.accounts[idx];
+
+                // Fast prefilter (cheap checks first)
+                if account.position_size != 0 {
+                    continue;
+                }
+                if account.capital != 0 {
+                    continue;
+                }
+                if account.reserved_pnl != 0 {
+                    continue;
+                }
+                if account.pnl > 0 {
+                    continue; // Positive PnL is potential future value
+                }
+
+                // Try full settlement (best-effort, don't fail GC if one account is weird)
+                if self.touch_account_full(idx as u16, now_slot, oracle_price).is_err() {
+                    continue;
+                }
+
+                // Re-check with settled state
+                let account = &self.accounts[idx];
+                if account.position_size != 0 {
+                    continue;
+                }
+                if account.capital != 0 {
+                    continue;
+                }
+                if account.reserved_pnl != 0 {
+                    continue;
+                }
+                if account.pnl > 0 {
+                    continue;
+                }
+
+                // If pnl < 0, socialize the loss before freeing
+                if account.pnl < 0 {
+                    let unpaid = neg_i128_to_u128(account.pnl);
+                    // Zero pnl before ADL to avoid double-counting
+                    self.accounts[idx].pnl = 0;
+                    // Route through ADL waterfall (unwrapped pnl → insurance → loss_accum)
+                    let _ = self.apply_adl(unpaid);
+                }
+
+                // Free the slot
+                self.free_slot(idx as u16);
+                closed += 1;
+            }
+        }
+
+        closed
     }
 
     // ========================================
@@ -1113,6 +1207,9 @@ impl RiskEngine {
             }
         }
 
+        // Garbage collect dust accounts (runs every crank)
+        let num_gc_closed = self.garbage_collect_dust(now_slot, oracle_price);
+
         Ok(CrankOutcome {
             advanced,
             slots_forgiven,
@@ -1120,6 +1217,7 @@ impl RiskEngine {
             did_force_realize,
             did_panic_settle,
             num_liquidations,
+            num_gc_closed,
         })
     }
 
