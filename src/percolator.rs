@@ -1032,13 +1032,15 @@ impl RiskEngine {
     /// - position_size == 0
     /// - capital == 0
     /// - reserved_pnl == 0
-    /// - pnl <= 0 after full settlement
+    /// - pnl <= 0
     ///
     /// Any remaining negative PnL is socialized via ADL waterfall before freeing.
     /// No token transfers occur - this is purely internal bookkeeping cleanup.
     ///
+    /// Called at end of keeper_crank after liquidation/settlement has already run.
+    ///
     /// Returns the number of accounts closed.
-    pub fn garbage_collect_dust(&mut self, now_slot: u64, oracle_price: u64) -> u32 {
+    pub fn garbage_collect_dust(&mut self) -> u32 {
         let mut closed = 0u32;
 
         for block in 0..BITMAP_WORDS {
@@ -1059,7 +1061,7 @@ impl RiskEngine {
 
                 let account = &self.accounts[idx];
 
-                // Fast prefilter (cheap checks first)
+                // Dust predicate: based on current state (crank already ran liquidation/settlement)
                 if account.position_size != 0 {
                     continue;
                 }
@@ -1073,33 +1075,15 @@ impl RiskEngine {
                     continue; // Positive PnL is potential future value
                 }
 
-                // Try full settlement (best-effort, don't fail GC if one account is weird)
-                if self.touch_account_full(idx as u16, now_slot, oracle_price).is_err() {
-                    continue;
-                }
-
-                // Re-check with settled state
-                let account = &self.accounts[idx];
-                if account.position_size != 0 {
-                    continue;
-                }
-                if account.capital != 0 {
-                    continue;
-                }
-                if account.reserved_pnl != 0 {
-                    continue;
-                }
-                if account.pnl > 0 {
-                    continue;
-                }
-
                 // If pnl < 0, socialize the loss before freeing
+                // Must call apply_adl BEFORE zeroing pnl to preserve ADL state
                 if account.pnl < 0 {
                     let unpaid = neg_i128_to_u128(account.pnl);
-                    // Zero pnl before ADL to avoid double-counting
-                    self.accounts[idx].pnl = 0;
                     // Route through ADL waterfall (unwrapped pnl → insurance → loss_accum)
-                    let _ = self.apply_adl(unpaid);
+                    if self.apply_adl(unpaid).is_err() {
+                        continue; // Don't mutate/free if ADL can't run
+                    }
+                    self.accounts[idx].pnl = 0;
                 }
 
                 // Free the slot
@@ -1208,7 +1192,7 @@ impl RiskEngine {
         }
 
         // Garbage collect dust accounts (runs every crank)
-        let num_gc_closed = self.garbage_collect_dust(now_slot, oracle_price);
+        let num_gc_closed = self.garbage_collect_dust();
 
         Ok(CrankOutcome {
             advanced,
