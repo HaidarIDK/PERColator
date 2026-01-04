@@ -4670,6 +4670,8 @@ fn proof_settle_maintenance_deducts_correctly() {
 }
 
 /// C. keeper_crank advances last_crank_slot correctly
+/// Note: keeper_crank now also runs garbage_collect_dust which can mutate
+/// bitmap/freelist and invoke apply_adl. This proof focuses on slot advancement.
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -4698,6 +4700,18 @@ fn proof_keeper_crank_advances_slot_monotonically() {
         assert!(!outcome.advanced, "Should not advance when now_slot <= last_crank_slot");
         assert!(engine.last_crank_slot == 100, "last_crank_slot should stay at 100");
     }
+
+    // GC budget is always respected
+    assert!(
+        outcome.num_gc_closed <= GC_CLOSE_BUDGET,
+        "GC must respect budget"
+    );
+
+    // current_slot is updated
+    assert!(
+        engine.current_slot == now_slot,
+        "current_slot must be updated by crank"
+    );
 }
 
 /// C2. keeper_crank never fails due to caller maintenance settle
@@ -5703,4 +5717,135 @@ fn proof_liq_partial_deterministic_reaches_target_or_full_close() {
 
     // Note: Target margin check removed - edge cases with fee deduction can leave
     // partial positions below target. The dust rule + N1 are the critical invariants.
+}
+
+// ==============================================================================
+// GARBAGE COLLECTION PROOFS
+// ==============================================================================
+
+/// I2: garbage_collect_dust preserves conservation
+/// GC can call apply_adl (which moves value) then free slots (drops account state).
+/// This proves conservation still holds after GC.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn fast_i2_garbage_collect_preserves_conservation() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create accounts: one will be dust, one will have positive pnl for ADL source
+    let dust_idx = engine.add_user(0).unwrap();
+    let source_idx = engine.add_user(0).unwrap();
+
+    // Source account: has positive unwrapped pnl (ADL source)
+    let source_pnl: i128 = kani::any();
+    kani::assume(source_pnl > 0 && source_pnl < 100);
+    engine.accounts[source_idx as usize].pnl = source_pnl;
+    engine.accounts[source_idx as usize].capital = 1000;
+
+    // Dust account: capital=0, position=0, reserved=0, negative pnl
+    let dust_pnl: i128 = kani::any();
+    kani::assume(dust_pnl < 0 && dust_pnl > -50);
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // Set up vault to match: source capital + source pnl (positive pnl adds to vault accounting)
+    engine.vault = 1000 + source_pnl as u128;
+
+    // Insurance fund with some balance for ADL
+    engine.insurance_fund.balance = 10_000;
+
+    // Verify conservation before
+    assert!(
+        conservation_fast_no_funding(&engine),
+        "Conservation must hold before GC"
+    );
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // GC should close the dust account (non-vacuous check)
+    assert!(closed > 0, "GC should close at least one dust account");
+
+    // Conservation must still hold after GC
+    assert!(
+        conservation_fast_no_funding(&engine),
+        "I2: GC must preserve conservation"
+    );
+}
+
+/// GC never frees an account with positive value (capital > 0 or pnl > 0)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_never_frees_account_with_positive_value() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create two accounts: one with positive value, one that's dust
+    let positive_idx = engine.add_user(0).unwrap();
+    let dust_idx = engine.add_user(0).unwrap();
+
+    // Positive account: either has capital or positive pnl
+    let has_capital: bool = kani::any();
+    if has_capital {
+        let capital: u128 = kani::any();
+        kani::assume(capital > 0 && capital < 1000);
+        engine.accounts[positive_idx as usize].capital = capital;
+        engine.vault = capital;
+    } else {
+        let pnl: i128 = kani::any();
+        kani::assume(pnl > 0 && pnl < 100);
+        engine.accounts[positive_idx as usize].pnl = pnl;
+        engine.vault = pnl as u128;
+    }
+    engine.accounts[positive_idx as usize].position_size = 0;
+    engine.accounts[positive_idx as usize].reserved_pnl = 0;
+
+    // Dust account: zero capital, zero position, zero reserved, zero pnl
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = 0;
+
+    // Record whether positive account was used before GC
+    let positive_was_used = engine.is_used(positive_idx as usize);
+    assert!(positive_was_used, "Positive account should exist");
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // The dust account should be closed (non-vacuous)
+    assert!(closed > 0, "GC should close the dust account");
+
+    // The positive value account must still exist
+    assert!(
+        engine.is_used(positive_idx as usize),
+        "GC must not free account with positive value"
+    );
+}
+
+/// Validity preserved by garbage_collect_dust
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn fast_valid_preserved_by_garbage_collect_dust() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create a dust account
+    let dust_idx = engine.add_user(0).unwrap();
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = 0;
+
+    kani::assume(valid_state(&engine));
+
+    // Run GC
+    let _ = engine.garbage_collect_dust();
+
+    assert!(
+        valid_state(&engine),
+        "valid_state preserved by garbage_collect_dust"
+    );
 }
