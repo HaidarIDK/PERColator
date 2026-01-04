@@ -1044,6 +1044,7 @@ impl RiskEngine {
         // Two separate lists: zero-pnl (always freeable) vs negative-pnl (needs ADL)
         let mut to_free_zero: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
         let mut to_free_neg: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut neg_loss: [u128; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
         let mut num_zero = 0usize;
         let mut num_neg = 0usize;
         let mut total_unpaid: u128 = 0;
@@ -1088,13 +1089,14 @@ impl RiskEngine {
 
                 if account.pnl < 0 {
                     // Track negative pnl for batched ADL
-                    let add = neg_i128_to_u128(account.pnl);
-                    let new_total = total_unpaid.saturating_add(add);
+                    let loss = neg_i128_to_u128(account.pnl);
+                    let new_total = total_unpaid.saturating_add(loss);
                     // Saturation guard: stop collecting negative-pnl if saturated
-                    if new_total == total_unpaid && add > 0 {
+                    if new_total == total_unpaid && loss > 0 {
                         break 'outer;
                     }
                     total_unpaid = new_total;
+                    neg_loss[num_neg] = loss;
                     to_free_neg[num_neg] = idx as u16;
                     num_neg += 1;
                 } else {
@@ -1106,11 +1108,23 @@ impl RiskEngine {
         }
 
         // Pass 2: Try batched ADL for negative-pnl accounts
-        let adl_ok = if total_unpaid > 0 {
-            self.apply_adl(total_unpaid).is_ok()
-        } else {
-            true
-        };
+        // IMPORTANT: Zero neg pnl BEFORE ADL to avoid double-counting loss in conservation.
+        // The loss is "extracted" from per-account ledger, then routed through ADL waterfall.
+        let mut adl_ok = true;
+        if total_unpaid > 0 {
+            // Zero the negative pnls first
+            for i in 0..num_neg {
+                self.accounts[to_free_neg[i] as usize].pnl = 0;
+            }
+
+            if self.apply_adl(total_unpaid).is_err() {
+                // Restore negative pnls on failure for transactional consistency
+                for i in 0..num_neg {
+                    self.accounts[to_free_neg[i] as usize].pnl = -(neg_loss[i] as i128);
+                }
+                adl_ok = false;
+            }
+        }
 
         let mut freed = 0u32;
 
@@ -1121,9 +1135,8 @@ impl RiskEngine {
         }
 
         // Pass 3b: Only free negative-pnl accounts if ADL succeeded
-        if adl_ok {
+        if adl_ok && num_neg > 0 {
             for i in 0..num_neg {
-                self.accounts[to_free_neg[i] as usize].pnl = 0;
                 self.free_slot(to_free_neg[i]);
                 freed += 1;
             }
