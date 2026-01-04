@@ -5750,11 +5750,16 @@ fn fast_i2_garbage_collect_preserves_conservation() {
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
     engine.accounts[dust_idx as usize].pnl = dust_pnl;
 
-    // Set up vault to match: source capital + source pnl (positive pnl adds to vault accounting)
-    engine.vault = 1000 + source_pnl as u128;
-
     // Insurance fund with some balance for ADL
-    engine.insurance_fund.balance = 10_000;
+    let insurance: u128 = 10_000;
+    engine.insurance_fund.balance = insurance;
+
+    // Conservation: vault + loss_accum >= sum_capital + insurance + sum_pnl_pos - sum_pnl_neg_abs
+    // sum_capital = 1000, sum_pnl_pos = source_pnl, sum_pnl_neg_abs = |dust_pnl|
+    // expected = 1000 + 10_000 + source_pnl - |dust_pnl|
+    // Set vault to match exactly (loss_accum starts at 0)
+    let dust_pnl_abs = (-dust_pnl) as u128;
+    engine.vault = 1000 + insurance + source_pnl as u128 - dust_pnl_abs;
 
     // Verify conservation before
     assert!(
