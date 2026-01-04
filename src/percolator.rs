@@ -1043,7 +1043,7 @@ impl RiskEngine {
     pub fn garbage_collect_dust(&mut self) -> u32 {
         let mut closed = 0u32;
 
-        for block in 0..BITMAP_WORDS {
+        'outer: for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
                 let bit = w.trailing_zeros() as usize;
@@ -1054,9 +1054,9 @@ impl RiskEngine {
                     continue;
                 }
 
-                // Budget check
+                // Budget check - break cleanly instead of early return
                 if closed >= GC_CLOSE_BUDGET {
-                    return closed;
+                    break 'outer;
                 }
 
                 let account = &self.accounts[idx];
@@ -1131,6 +1131,9 @@ impl RiskEngine {
         funding_rate_bps_per_slot: i64,
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Accrue funding first (always)
         let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
 
