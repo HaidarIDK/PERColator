@@ -1041,14 +1041,15 @@ impl RiskEngine {
     ///
     /// Returns the number of accounts closed.
     pub fn garbage_collect_dust(&mut self) -> u32 {
-        // Collect candidates first, then batch ADL to avoid O(N) per dust account
-        let mut to_free: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut to_zero_pnl: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut num_to_free = 0usize;
-        let mut num_to_zero = 0usize;
+        // Two separate lists: zero-pnl (always freeable) vs negative-pnl (needs ADL)
+        let mut to_free_zero: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut to_free_neg: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut num_zero = 0usize;
+        let mut num_neg = 0usize;
         let mut total_unpaid: u128 = 0;
 
         // Pass 1: Collect dust candidates (up to budget)
+        let total_budget = GC_CLOSE_BUDGET as usize;
         'outer: for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1060,8 +1061,8 @@ impl RiskEngine {
                     continue;
                 }
 
-                // Budget check
-                if num_to_free >= GC_CLOSE_BUDGET as usize {
+                // Budget check (combined count)
+                if num_zero + num_neg >= total_budget {
                     break 'outer;
                 }
 
@@ -1085,35 +1086,50 @@ impl RiskEngine {
                     continue;
                 }
 
-                // Track negative pnl for batched ADL
                 if account.pnl < 0 {
-                    total_unpaid = total_unpaid.saturating_add(neg_i128_to_u128(account.pnl));
-                    to_zero_pnl[num_to_zero] = idx as u16;
-                    num_to_zero += 1;
+                    // Track negative pnl for batched ADL
+                    let add = neg_i128_to_u128(account.pnl);
+                    let new_total = total_unpaid.saturating_add(add);
+                    // Saturation guard: stop collecting negative-pnl if saturated
+                    if new_total == total_unpaid && add > 0 {
+                        break 'outer;
+                    }
+                    total_unpaid = new_total;
+                    to_free_neg[num_neg] = idx as u16;
+                    num_neg += 1;
+                } else {
+                    // pnl == 0: always freeable
+                    to_free_zero[num_zero] = idx as u16;
+                    num_zero += 1;
                 }
-
-                to_free[num_to_free] = idx as u16;
-                num_to_free += 1;
             }
         }
 
-        // Pass 2: Single batched ADL call for all negative pnl
-        if total_unpaid > 0 {
-            if self.apply_adl(total_unpaid).is_err() {
-                return 0; // Can't socialize losses, don't free anything
-            }
-            // Zero pnl for all negative-pnl accounts
-            for i in 0..num_to_zero {
-                self.accounts[to_zero_pnl[i] as usize].pnl = 0;
+        // Pass 2: Try batched ADL for negative-pnl accounts
+        let adl_ok = if total_unpaid > 0 {
+            self.apply_adl(total_unpaid).is_ok()
+        } else {
+            true
+        };
+
+        let mut freed = 0u32;
+
+        // Pass 3a: Always free zero-pnl accounts
+        for i in 0..num_zero {
+            self.free_slot(to_free_zero[i]);
+            freed += 1;
+        }
+
+        // Pass 3b: Only free negative-pnl accounts if ADL succeeded
+        if adl_ok {
+            for i in 0..num_neg {
+                self.accounts[to_free_neg[i] as usize].pnl = 0;
+                self.free_slot(to_free_neg[i]);
+                freed += 1;
             }
         }
 
-        // Pass 3: Free all collected slots
-        for i in 0..num_to_free {
-            self.free_slot(to_free[i]);
-        }
-
-        num_to_free as u32
+        freed
     }
 
     // ========================================
