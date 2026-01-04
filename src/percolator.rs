@@ -25,103 +25,21 @@ extern crate kani;
 // Constants
 // ============================================================================
 
-// Use smaller array size for Kani verification, fuzz testing, and debug builds
-// to avoid stack overflow (RiskEngine is ~6MB at 4096 accounts). Production (release) uses 4096.
+// MAX_ACCOUNTS is feature-configured, not target-configured.
+// This ensures x86 and SBF builds use the same sizes for a given feature set.
+// Use `--features small` for tests to avoid stack overflow on RiskEngine::new().
 #[cfg(kani)]
 pub const MAX_ACCOUNTS: usize = 8; // Small for fast formal verification
 
-#[cfg(all(any(feature = "fuzz", debug_assertions), not(kani)))]
-pub const MAX_ACCOUNTS: usize = 64; // Small to avoid stack overflow in tests
+#[cfg(all(any(feature = "fuzz", feature = "small"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64; // Small for fuzz/test
 
-#[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
-pub const MAX_ACCOUNTS: usize = 4096;
+#[cfg(all(not(kani), not(feature = "fuzz"), not(feature = "small")))]
+pub const MAX_ACCOUNTS: usize = 4096; // Production
 
-// Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
+// Derived constants - all use size_of, no hardcoded values
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
-
-/// Maximum allowed rounding slack in conservation check.
-/// Each integer division can lose at most 1 unit of quote currency.
-/// With MAX_ACCOUNTS positions, worst-case rounding loss is MAX_ACCOUNTS units.
-/// This bounds how much "dust" can accumulate in the vault from truncation.
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
-
-// ============================================================================
-// Production Size Constants (always based on 4096 accounts)
-// ============================================================================
-// These constants are machine-independent and always reflect production sizes.
-// Use these when allocating Solana account data, regardless of test/debug config.
-
-/// Production MAX_ACCOUNTS (always 4096, even in test builds)
-pub const PROD_MAX_ACCOUNTS: usize = 4096;
-
-/// Production bitmap words (always 64 for 4096 accounts)
-pub const PROD_BITMAP_WORDS: usize = (PROD_MAX_ACCOUNTS + 63) / 64;
-
-/// Size of Account struct in bytes
-pub const ACCOUNT_SIZE: usize = core::mem::size_of::<Account>();
-
-/// Size of RiskParams struct in bytes
-pub const RISK_PARAMS_SIZE: usize = core::mem::size_of::<RiskParams>();
-
-/// Size of InsuranceFund struct in bytes
-pub const INSURANCE_FUND_SIZE: usize = core::mem::size_of::<InsuranceFund>();
-
-/// Production RiskEngine size (computed from fixed production values)
-/// Layout: fixed fields + adl_remainder_scratch + adl_eligible_scratch +
-///         used bitmap + next_free + accounts
-pub const PROD_ENGINE_SIZE: usize = {
-    // Fixed scalar fields (before arrays):
-    // vault: u128, insurance_fund: InsuranceFund, params: RiskParams,
-    // current_slot: u64, funding_index_qpb_e6: i128, last_funding_slot: u64,
-    // loss_accum: u128, risk_reduction_only: bool, risk_reduction_mode_withdrawn: u128,
-    // warmup_paused: bool, warmup_pause_slot: u64, last_crank_slot: u64,
-    // max_crank_staleness_slots: u64, total_open_interest: u128,
-    // warmed_pos_total: u128, warmed_neg_total: u128, warmup_insurance_reserved: u128,
-    // num_used_accounts: u16, next_account_id: u64, free_head: u16
-    //
-    // Rather than manually computing (error-prone), we use size_of on the current
-    // RiskEngine and adjust for the array size differences.
-    //
-    // RiskEngine arrays that scale with MAX_ACCOUNTS:
-    // - adl_remainder_scratch: [u128; MAX_ACCOUNTS]
-    // - adl_eligible_scratch: [u8; MAX_ACCOUNTS]
-    // - used: [u64; BITMAP_WORDS]
-    // - next_free: [u16; MAX_ACCOUNTS]
-    // - accounts: [Account; MAX_ACCOUNTS]
-
-    // Current size with current MAX_ACCOUNTS
-    let current_size = core::mem::size_of::<RiskEngine>();
-
-    // Subtract current array sizes
-    let current_arrays =
-        16 * MAX_ACCOUNTS +           // adl_remainder_scratch
-        1 * MAX_ACCOUNTS +            // adl_eligible_scratch
-        8 * BITMAP_WORDS +            // used bitmap
-        2 * MAX_ACCOUNTS +            // next_free
-        ACCOUNT_SIZE * MAX_ACCOUNTS;  // accounts
-
-    // Add production array sizes
-    let prod_arrays =
-        16 * PROD_MAX_ACCOUNTS +           // adl_remainder_scratch
-        1 * PROD_MAX_ACCOUNTS +            // adl_eligible_scratch
-        8 * PROD_BITMAP_WORDS +            // used bitmap
-        2 * PROD_MAX_ACCOUNTS +            // next_free
-        ACCOUNT_SIZE * PROD_MAX_ACCOUNTS;  // accounts
-
-    current_size - current_arrays + prod_arrays
-};
-
-/// Alignment of RiskEngine (same regardless of MAX_ACCOUNTS)
-pub const ENGINE_ALIGN: usize = core::mem::align_of::<RiskEngine>();
-
-// Compile-time assertion: in release builds (MAX_ACCOUNTS=4096), verify PROD_ENGINE_SIZE is correct
-#[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
-const _: () = {
-    assert!(
-        PROD_ENGINE_SIZE == core::mem::size_of::<RiskEngine>(),
-        "PROD_ENGINE_SIZE mismatch: production build should match actual RiskEngine size"
-    );
-};
 
 // ============================================================================
 // Core Data Structures

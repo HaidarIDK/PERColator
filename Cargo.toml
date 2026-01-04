@@ -17,6 +17,7 @@ proptest = "1.4"
 [features]
 default = []
 fuzz = []
+small = []  # Use MAX_ACCOUNTS=64 for tests to avoid stack overflow
 
 [profile.release]
 lto = "fat"
