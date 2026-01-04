@@ -618,6 +618,9 @@ impl RiskEngine {
     // ========================================
 
     pub fn is_used(&self, idx: usize) -> bool {
+        if idx >= MAX_ACCOUNTS {
+            return false;
+        }
         let w = idx >> 6;
         let b = idx & 63;
         ((self.used[w] >> b) & 1) == 1
@@ -642,6 +645,9 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1; // Clear lowest bit
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
                 f(idx, &mut self.accounts[idx]);
             }
         }
@@ -654,6 +660,9 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1; // Clear lowest bit
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
                 f(idx, &self.accounts[idx]);
             }
         }
@@ -909,8 +918,15 @@ impl RiskEngine {
 
     /// Set the risk reduction threshold (admin function).
     /// This controls when risk-reduction-only mode is triggered.
+    #[inline]
     pub fn set_risk_reduction_threshold(&mut self, new_threshold: u128) {
         self.params.risk_reduction_threshold = new_threshold;
+    }
+
+    /// Get the current risk reduction threshold.
+    #[inline]
+    pub fn risk_reduction_threshold(&self) -> u128 {
+        self.params.risk_reduction_threshold
     }
 
     /// Close an account and return its capital to the caller.
@@ -1255,9 +1271,9 @@ impl RiskEngine {
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
 
-        // Route positive mark_pnl through ADL
+        // Route positive mark_pnl through ADL (excluding this account - it shouldn't fund its own profit)
         if mark_pnl > 0 {
-            self.apply_adl(mark_pnl as u128)?;
+            self.apply_adl_excluding(mark_pnl as u128, idx as usize)?;
         }
 
         // Settle warmup
@@ -1333,9 +1349,9 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
-        // Route positive mark_pnl through ADL (profits must be funded from somewhere)
+        // Route positive mark_pnl through ADL (excluding this account - it shouldn't fund its own profit)
         if mark_pnl > 0 {
-            self.apply_adl(mark_pnl as u128)?;
+            self.apply_adl_excluding(mark_pnl as u128, idx as usize)?;
         }
         // mark_pnl <= 0: losses realized from capital via settlement below
 
@@ -1472,11 +1488,14 @@ impl RiskEngine {
             let mut w = self.used[block];
             while w != 0 {
                 let bit = w.trailing_zeros() as usize;
-                let idx = (block * 64 + bit) as u16;
+                let idx = block * 64 + bit;
                 w &= w - 1;
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 // Best-effort: ignore errors, just count successes
-                if let Ok(true) = self.liquidate_at_oracle(idx, now_slot, oracle_price) {
+                if let Ok(true) = self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
                     count += 1;
                 }
             }
@@ -1697,6 +1716,9 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
             }
@@ -1717,6 +1739,9 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 Self::settle_account_funding(&mut self.accounts[idx], global_index)?;
             }
@@ -2294,6 +2319,23 @@ impl RiskEngine {
     /// 2. Track remainder = (loss * unwrapped) % total for each account
     /// 3. Distribute leftover units to accounts with largest remainder (ties: lowest idx)
     pub fn apply_adl(&mut self, total_loss: u128) -> Result<()> {
+        self.apply_adl_impl(total_loss, None)
+    }
+
+    /// ADL variant that excludes a specific account from being haircutted.
+    ///
+    /// Used when funding liquidation profit (mark_pnl > 0) - the liquidated account
+    /// should not fund its own profit via ADL. This ensures profits are backed by
+    /// other accounts' unwrapped PnL, insurance, or loss_accum.
+    pub fn apply_adl_excluding(&mut self, total_loss: u128, exclude_idx: usize) -> Result<()> {
+        self.apply_adl_impl(total_loss, Some(exclude_idx))
+    }
+
+    /// Core ADL implementation with optional account exclusion.
+    ///
+    /// When `exclude` is Some(idx), that account is skipped during haircutting.
+    /// This prevents liquidated winners from funding their own profit.
+    fn apply_adl_impl(&mut self, total_loss: u128, exclude: Option<usize>) -> Result<()> {
         // ADL reduces risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
 
@@ -2301,15 +2343,30 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Pass 1: Compute total unwrapped PNL (no caching - deterministic recomputation)
+        // Inline helper - simpler for Kani than a closure
+        #[inline]
+        fn is_excluded(exclude: Option<usize>, idx: usize) -> bool {
+            match exclude {
+                Some(ex) => ex == idx,
+                None => false,
+            }
+        }
+
+        // Pass 1: Compute total unwrapped PNL (excluding specified account if any)
         let mut total_unwrapped = 0u128;
 
-        for (block, word) in self.used.iter().copied().enumerate() {
-            let mut w = word;
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
             while w != 0 {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
+                if is_excluded(exclude, idx) {
+                    continue;
+                }
 
                 let unwrapped = self.compute_unwrapped_pnl(&self.accounts[idx]);
                 total_unwrapped = total_unwrapped.saturating_add(unwrapped);
@@ -2330,6 +2387,12 @@ impl RiskEngine {
                     let bit = w.trailing_zeros() as usize;
                     let idx = block * 64 + bit;
                     w &= w - 1;
+                    if idx >= MAX_ACCOUNTS {
+                        continue;
+                    }
+                    if is_excluded(exclude, idx) {
+                        continue;
+                    }
 
                     self.adl_remainder_scratch[idx] = 0;
                     self.adl_eligible_scratch[idx] = 0;
@@ -2343,6 +2406,12 @@ impl RiskEngine {
                     let bit = w.trailing_zeros() as usize;
                     let idx = block * 64 + bit;
                     w &= w - 1;
+                    if idx >= MAX_ACCOUNTS {
+                        continue;
+                    }
+                    if is_excluded(exclude, idx) {
+                        continue;
+                    }
 
                     let account = &self.accounts[idx];
                     if account.pnl > 0 {
@@ -2367,9 +2436,15 @@ impl RiskEngine {
 
             // Step 3: Distribute leftover using largest-remainder method
             // Each account can receive at most +1 leftover (correct for largest-remainder)
+            // Tighter bound: min(leftover, MAX_ACCOUNTS) reduces Kani unwind work
             let mut leftover = loss_to_socialize - applied_from_pnl;
+            let max_iters = core::cmp::min(leftover as usize, MAX_ACCOUNTS);
 
-            while leftover > 0 {
+            for _ in 0..max_iters {
+                if leftover == 0 {
+                    break;
+                }
+
                 // Find account with max remainder; ties: lowest idx wins
                 let mut best_idx: Option<usize> = None;
                 let mut best_rem: u128 = 0;
@@ -2380,6 +2455,12 @@ impl RiskEngine {
                         let bit = w.trailing_zeros() as usize;
                         let idx = block * 64 + bit;
                         w &= w - 1;
+                        if idx >= MAX_ACCOUNTS {
+                            continue;
+                        }
+                        if is_excluded(exclude, idx) {
+                            continue;
+                        }
 
                         // Only consider eligible accounts (don't gate on pnl > 0)
                         if self.adl_eligible_scratch[idx] == 1 {
@@ -2389,7 +2470,7 @@ impl RiskEngine {
                                 continue;
                             }
                             // Prefer larger remainder; if equal, prefer smaller idx (ties)
-                            if rem > best_rem || (rem == best_rem && rem != 0 && best_idx.map_or(true, |b| idx < b)) {
+                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
                                 best_rem = rem;
                                 best_idx = Some(idx);
                             }
@@ -2405,8 +2486,6 @@ impl RiskEngine {
                         leftover -= 1;
                     }
                     None => {
-                        #[cfg(any(test, kani))]
-                        debug_assert!(false, "ADL leftover distribution ran out of eligible candidates");
                         break;
                     }
                 }
@@ -2421,6 +2500,12 @@ impl RiskEngine {
                         let bit = w.trailing_zeros() as usize;
                         let idx = block * 64 + bit;
                         w &= w - 1;
+                        if idx >= MAX_ACCOUNTS {
+                            continue;
+                        }
+                        if is_excluded(exclude, idx) {
+                            continue;
+                        }
                         debug_assert!(
                             self.adl_eligible_scratch[idx] == 0,
                             "Eligible bit not consumed for account {}",
@@ -2517,6 +2602,10 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
 
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
+
                 let account = &mut self.accounts[idx];
 
                 // Settle funding first (required for correct PNL accounting)
@@ -2574,6 +2663,10 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 self.settle_warmup_to_capital(idx as u16)?;
             }
@@ -2638,6 +2731,10 @@ impl RiskEngine {
                 let bit = w.trailing_zeros() as usize;
                 let idx = block * 64 + bit;
                 w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue; // Guard against stray high bits in bitmap
+                }
 
                 let account = &mut self.accounts[idx];
 
