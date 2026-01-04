@@ -1041,8 +1041,14 @@ impl RiskEngine {
     ///
     /// Returns the number of accounts closed.
     pub fn garbage_collect_dust(&mut self) -> u32 {
-        let mut closed = 0u32;
+        // Collect candidates first, then batch ADL to avoid O(N) per dust account
+        let mut to_free: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut to_zero_pnl: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut num_to_free = 0usize;
+        let mut num_to_zero = 0usize;
+        let mut total_unpaid: u128 = 0;
 
+        // Pass 1: Collect dust candidates (up to budget)
         'outer: for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
             while w != 0 {
@@ -1054,14 +1060,14 @@ impl RiskEngine {
                     continue;
                 }
 
-                // Budget check - break cleanly instead of early return
-                if closed >= GC_CLOSE_BUDGET {
+                // Budget check
+                if num_to_free >= GC_CLOSE_BUDGET as usize {
                     break 'outer;
                 }
 
                 let account = &self.accounts[idx];
 
-                // Dust predicate: based on current state (crank already ran liquidation/settlement)
+                // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
                 if account.position_size != 0 {
                     continue;
                 }
@@ -1072,27 +1078,42 @@ impl RiskEngine {
                     continue;
                 }
                 if account.pnl > 0 {
-                    continue; // Positive PnL is potential future value
+                    continue;
+                }
+                // Funding must be settled to avoid unsettled-value footgun
+                if account.funding_index != self.funding_index_qpb_e6 {
+                    continue;
                 }
 
-                // If pnl < 0, socialize the loss before freeing
-                // Must call apply_adl BEFORE zeroing pnl to preserve ADL state
+                // Track negative pnl for batched ADL
                 if account.pnl < 0 {
-                    let unpaid = neg_i128_to_u128(account.pnl);
-                    // Route through ADL waterfall (unwrapped pnl → insurance → loss_accum)
-                    if self.apply_adl(unpaid).is_err() {
-                        continue; // Don't mutate/free if ADL can't run
-                    }
-                    self.accounts[idx].pnl = 0;
+                    total_unpaid = total_unpaid.saturating_add(neg_i128_to_u128(account.pnl));
+                    to_zero_pnl[num_to_zero] = idx as u16;
+                    num_to_zero += 1;
                 }
 
-                // Free the slot
-                self.free_slot(idx as u16);
-                closed += 1;
+                to_free[num_to_free] = idx as u16;
+                num_to_free += 1;
             }
         }
 
-        closed
+        // Pass 2: Single batched ADL call for all negative pnl
+        if total_unpaid > 0 {
+            if self.apply_adl(total_unpaid).is_err() {
+                return 0; // Can't socialize losses, don't free anything
+            }
+            // Zero pnl for all negative-pnl accounts
+            for i in 0..num_to_zero {
+                self.accounts[to_zero_pnl[i] as usize].pnl = 0;
+            }
+        }
+
+        // Pass 3: Free all collected slots
+        for i in 0..num_to_free {
+            self.free_slot(to_free[i]);
+        }
+
+        num_to_free as u32
     }
 
     // ========================================
