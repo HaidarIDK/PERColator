@@ -571,7 +571,10 @@ impl MatchingEngine for NoOpMatcher {
 // ============================================================================
 
 impl RiskEngine {
-    /// Create a new risk engine
+    /// Create a new risk engine (stack-allocates the full struct - avoid in BPF!)
+    ///
+    /// WARNING: This allocates ~6MB on the stack at MAX_ACCOUNTS=4096.
+    /// For Solana BPF programs, use `init_in_place` instead.
     pub fn new(params: RiskParams) -> Self {
         let mut engine = Self {
             vault: 0,
@@ -611,6 +614,30 @@ impl RiskEngine {
         engine.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
 
         engine
+    }
+
+    /// Initialize a RiskEngine in place (zero-copy friendly).
+    ///
+    /// PREREQUISITE: The memory backing `self` MUST be zeroed before calling.
+    /// This method only sets non-zero fields to avoid touching the entire ~6MB struct.
+    ///
+    /// This is the correct way to initialize RiskEngine in Solana BPF programs
+    /// where stack space is limited to 4KB.
+    pub fn init_in_place(&mut self, params: RiskParams) {
+        // Set params (non-zero field)
+        self.params = params;
+        self.max_crank_staleness_slots = params.max_crank_staleness_slots;
+
+        // Initialize freelist: 0 -> 1 -> 2 -> ... -> MAX_ACCOUNTS-1 -> NONE
+        // All other fields are zero which is correct for:
+        // - vault, insurance_fund, current_slot, funding_index, etc. = 0
+        // - used bitmap = all zeros (no accounts in use)
+        // - accounts = all zeros (equivalent to empty_account())
+        // - free_head = 0 (first free slot is 0)
+        for i in 0..MAX_ACCOUNTS - 1 {
+            self.next_free[i] = (i + 1) as u16;
+        }
+        self.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
     }
 
     // ========================================
