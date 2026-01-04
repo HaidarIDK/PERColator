@@ -161,6 +161,7 @@ fn empty_account() -> Account {
 }
 
 /// Insurance fund state
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceFund {
     /// Insurance fund balance
@@ -186,6 +187,7 @@ pub struct ClosedOutcome {
 }
 
 /// Risk engine parameters
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RiskParams {
     /// Warmup period in slots (time T)
