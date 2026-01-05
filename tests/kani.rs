@@ -4788,6 +4788,8 @@ fn proof_close_account_requires_flat_and_paid() {
             result.is_err(),
             "close_account must fail if position != 0 OR fee_credits < 0 OR pnl > 0"
         );
+    } else {
+        assert!(result.is_ok(), "close_account should succeed when flat/paid and pnl==0");
     }
 }
 
@@ -4933,7 +4935,7 @@ fn proof_close_account_rejects_negative_pnl() {
     engine.accounts[user as usize].pnl = -1;
 
     // close should reject as undercollateralized
-    let res = engine.close_account(user, engine.current_slot, 1_000_000);
+    let res = engine.close_account(user, 0, 1_000_000);
     assert!(res == Err(RiskError::Undercollateralized));
 }
 
