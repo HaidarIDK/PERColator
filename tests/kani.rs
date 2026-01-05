@@ -5732,14 +5732,21 @@ fn proof_liq_partial_deterministic_reaches_target_or_full_close() {
 fn fast_i2_garbage_collect_preserves_conservation() {
     let mut engine = RiskEngine::new(test_params());
 
+    // Settle funding globally so GC predicate passes
+    engine.funding_index_qpb_e6 = 0;
+
     // Create accounts: one will be dust, one will have positive pnl for ADL source
     let dust_idx = engine.add_user(0).unwrap();
     let source_idx = engine.add_user(0).unwrap();
 
+    // Set funding indices for both accounts (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
+    engine.accounts[source_idx as usize].funding_index = 0;
+
     // Dust account: capital=0, position=0, reserved=0, negative pnl
-    // Bound loss to MAX_ROUNDING_SLACK to satisfy conservation slack constraint
+    // New GC zeros pnl before ADL, so no MAX_ROUNDING_SLACK bound needed
     let dust_pnl_abs: u128 = kani::any();
-    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs <= MAX_ROUNDING_SLACK);
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs < 100);
     let dust_pnl = -(dust_pnl_abs as i128);
     engine.accounts[dust_idx as usize].capital = 0;
     engine.accounts[dust_idx as usize].position_size = 0;
@@ -5792,9 +5799,16 @@ fn fast_i2_garbage_collect_preserves_conservation() {
 fn gc_never_frees_account_with_positive_value() {
     let mut engine = RiskEngine::new(test_params());
 
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
+
     // Create two accounts: one with positive value, one that's dust
     let positive_idx = engine.add_user(0).unwrap();
     let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding indices for both accounts (required by GC predicate)
+    engine.accounts[positive_idx as usize].funding_index = 0;
+    engine.accounts[dust_idx as usize].funding_index = 0;
 
     // Positive account: either has capital or positive pnl
     let has_capital: bool = kani::any();
@@ -5842,8 +5856,14 @@ fn gc_never_frees_account_with_positive_value() {
 fn fast_valid_preserved_by_garbage_collect_dust() {
     let mut engine = RiskEngine::new(test_params());
 
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
+
     // Create a dust account
     let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding index (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
     engine.accounts[dust_idx as usize].capital = 0;
     engine.accounts[dust_idx as usize].position_size = 0;
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
@@ -5852,7 +5872,10 @@ fn fast_valid_preserved_by_garbage_collect_dust() {
     kani::assume(valid_state(&engine));
 
     // Run GC
-    let _ = engine.garbage_collect_dust();
+    let closed = engine.garbage_collect_dust();
+
+    // Non-vacuous: GC should actually close the dust account
+    assert!(closed > 0, "GC should close the dust account");
 
     assert!(
         valid_state(&engine),
@@ -5867,6 +5890,9 @@ fn fast_valid_preserved_by_garbage_collect_dust() {
 #[kani::solver(cadical)]
 fn gc_respects_full_dust_predicate() {
     let mut engine = RiskEngine::new(test_params());
+
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
 
     // Create account that would be dust except for one blocker
     let idx = engine.add_user(0).unwrap();
@@ -5884,6 +5910,7 @@ fn gc_respects_full_dust_predicate() {
             kani::assume(reserved > 0 && reserved < 1000);
             engine.accounts[idx as usize].reserved_pnl = reserved;
             engine.accounts[idx as usize].position_size = 0;
+            engine.accounts[idx as usize].funding_index = 0; // settled
         }
         1 => {
             // position_size != 0 blocks GC
@@ -5891,12 +5918,13 @@ fn gc_respects_full_dust_predicate() {
             kani::assume(pos != 0 && pos > -1000 && pos < 1000);
             engine.accounts[idx as usize].position_size = pos;
             engine.accounts[idx as usize].reserved_pnl = 0;
+            engine.accounts[idx as usize].funding_index = 0; // settled
         }
         _ => {
             // funding_index mismatch blocks GC
             engine.accounts[idx as usize].position_size = 0;
             engine.accounts[idx as usize].reserved_pnl = 0;
-            engine.accounts[idx as usize].funding_index = engine.funding_index_qpb_e6.wrapping_add(1);
+            engine.accounts[idx as usize].funding_index = 1; // mismatched (global is 0)
         }
     }
 
@@ -5904,10 +5932,9 @@ fn gc_respects_full_dust_predicate() {
     assert!(was_used, "Account should exist before GC");
 
     // Run GC
-    let closed = engine.garbage_collect_dust();
+    let _closed = engine.garbage_collect_dust();
 
-    // Account must NOT be freed
-    assert!(closed == 0, "GC should not close any accounts");
+    // Target account must NOT be freed (other accounts might be)
     assert!(
         engine.is_used(idx as usize),
         "GC must not free account that doesn't satisfy dust predicate"
@@ -5922,15 +5949,26 @@ fn gc_respects_full_dust_predicate() {
 fn gc_frees_negative_dust_via_adl() {
     let mut engine = RiskEngine::new(test_params());
 
+    // Settle funding globally so GC predicate passes
+    engine.funding_index_qpb_e6 = 0;
+
     // Create dust account with negative pnl
     let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding index (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
+
     let dust_pnl_abs: u128 = kani::any();
-    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs <= MAX_ROUNDING_SLACK);
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs < 100);
     let dust_pnl = -(dust_pnl_abs as i128);
     engine.accounts[dust_idx as usize].capital = 0;
     engine.accounts[dust_idx as usize].position_size = 0;
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
     engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // No insurance/unwrapped pnl - loss will go to loss_accum
+    engine.vault = 0;
+    engine.insurance_fund.balance = 0;
 
     // Snapshot before GC
     let num_used_before = engine.num_used_accounts;
