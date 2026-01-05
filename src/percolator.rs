@@ -1959,25 +1959,30 @@ impl RiskEngine {
         // Full settlement: funding + maintenance fees + warmup
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
-        let account = &self.accounts[idx as usize];
+        // Read account state (scope the borrow)
+        let (old_capital, pnl, position_size) = {
+            let account = &self.accounts[idx as usize];
+            (account.capital, account.pnl, account.position_size)
+        };
 
         // Check we have enough capital
-        if account.capital < amount {
+        if old_capital < amount {
             return Err(RiskError::InsufficientBalance);
         }
 
         // Calculate new state after withdrawal
         // FIX B: Use equity (includes negative PnL) for margin checks
-        let new_capital = sub_u128(account.capital, amount);
+        let new_capital = sub_u128(old_capital, amount);
         let cap_i = u128_to_i128_clamped(new_capital);
-        let new_eq_i = cap_i.saturating_add(account.pnl);
+        let new_eq_i = cap_i.saturating_add(pnl);
         let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
-        // If account has position, must maintain initial margin
-        if account.position_size != 0 {
+        // If account has position, must maintain initial margin at ORACLE price (not entry price)
+        // This prevents withdrawing to a state that's immediately liquidatable
+        if position_size != 0 {
             let position_notional = mul_u128(
-                saturating_abs_i128(account.position_size) as u128,
-                account.entry_price as u128,
+                saturating_abs_i128(position_size) as u128,
+                oracle_price as u128,
             ) / 1_000_000;
 
             let initial_margin_required =
@@ -1991,6 +1996,17 @@ impl RiskEngine {
         // Commit the withdrawal
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
+
+        // Post-withdrawal maintenance margin check at oracle price
+        // This is a safety belt to ensure we never leave an account in liquidatable state
+        if self.accounts[idx as usize].position_size != 0 {
+            if !self.is_above_maintenance_margin(&self.accounts[idx as usize], oracle_price) {
+                // Revert the withdrawal
+                self.accounts[idx as usize].capital = old_capital;
+                self.vault = add_u128(self.vault, amount);
+                return Err(RiskError::Undercollateralized);
+            }
+        }
 
         // Regression assert: after settle + withdraw, negative PnL should have been settled
         #[cfg(any(test, kani))]
