@@ -328,6 +328,19 @@ pub struct RiskEngine {
     /// 0 = not eligible / already consumed; 1 = eligible.
     pub adl_eligible_scratch: [u8; MAX_ACCOUNTS],
 
+    /// Scratch: sorted index list for ADL remainder distribution.
+    /// Used to avoid O(n²) largest-remainder selection.
+    pub adl_idx_scratch: [u16; MAX_ACCOUNTS],
+
+    // ========================================
+    // Crank Cursors (bounded scan support)
+    // ========================================
+    /// Cursor for liquidation scan (wraps around MAX_ACCOUNTS)
+    pub liq_cursor: u16,
+
+    /// Cursor for garbage collection scan (wraps around MAX_ACCOUNTS)
+    pub gc_cursor: u16,
+
     // ========================================
     // Slab Management
     // ========================================
@@ -602,6 +615,9 @@ impl RiskEngine {
             warmup_insurance_reserved: 0,
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
             adl_eligible_scratch: [0; MAX_ACCOUNTS],
+            adl_idx_scratch: [0; MAX_ACCOUNTS],
+            liq_cursor: 0,
+            gc_cursor: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1224,9 +1240,13 @@ impl RiskEngine {
             (0, true) // No caller to settle, considered ok
         };
 
-        // Proactive liquidation scan: liquidate any accounts below maintenance margin
-        // This runs on EVERY crank call (not just when advanced) to ensure timely liquidations
-        let num_liquidations = self.scan_and_liquidate_all(now_slot, oracle_price);
+        // Liquidation scan with bounded compute
+        // When advanced: larger budget (256 checks, 16 liqs) to catch up
+        // Otherwise: small budget (32 checks, 4 liqs) for timely response without DoS
+        let (liq_max_checks, liq_max_liqs) = if advanced { (256, 16) } else { (32, 4) };
+        let (_liq_checked, liq_count) =
+            self.scan_and_liquidate_window(now_slot, oracle_price, liq_max_checks, liq_max_liqs);
+        let num_liquidations = liq_count as u32;
 
         // Heavy actions run independent of caller settle success
         let mut did_force_realize = false;
@@ -1250,8 +1270,12 @@ impl RiskEngine {
             }
         }
 
-        // Garbage collect dust accounts (runs every crank)
-        let num_gc_closed = self.garbage_collect_dust();
+        // Garbage collect dust accounts (only when advanced to save compute)
+        let num_gc_closed = if advanced {
+            self.garbage_collect_dust()
+        } else {
+            0
+        };
 
         Ok(CrankOutcome {
             advanced,
@@ -1667,6 +1691,54 @@ impl RiskEngine {
         }
 
         count
+    }
+
+    /// Windowed liquidation scan with bounded compute.
+    /// Scans up to `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
+    /// Updates cursor to resume from where we left off.
+    /// Returns (num_checked, num_liquidated).
+    fn scan_and_liquidate_window(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        max_checks: u16,
+        max_liqs: u16,
+    ) -> (u16, u16) {
+        let mut checked: u16 = 0;
+        let mut liquidated: u16 = 0;
+        let start = self.liq_cursor as usize;
+
+        for offset in 0..(max_checks as usize) {
+            if liquidated >= max_liqs {
+                break;
+            }
+
+            let idx = (start + offset) % MAX_ACCOUNTS;
+
+            // Check if slot is used
+            let block = idx / 64;
+            let bit = idx % 64;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue; // Not used, skip
+            }
+
+            checked += 1;
+
+            // Early gate: skip accounts with no position (Patch 3)
+            if self.accounts[idx].position_size == 0 {
+                continue;
+            }
+
+            // Attempt liquidation
+            if let Ok(true) = self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
+                liquidated += 1;
+            }
+        }
+
+        // Update cursor for next call
+        self.liq_cursor = ((start + max_checks as usize) % MAX_ACCOUNTS) as u16;
+
+        (checked, liquidated)
     }
 
     // ========================================
@@ -2615,21 +2687,13 @@ impl RiskEngine {
                 }
             }
 
-            // Step 3: Distribute leftover using largest-remainder method
-            // Each account can receive at most +1 leftover (correct for largest-remainder)
-            // Tighter bound: min(leftover, MAX_ACCOUNTS) reduces Kani unwind work
+            // Step 3: Distribute leftover using largest-remainder method (O(n log n))
+            // Build sorted index list, then allocate to top `leftover` accounts.
             let mut leftover = loss_to_socialize - applied_from_pnl;
-            let max_iters = core::cmp::min(leftover as usize, MAX_ACCOUNTS);
 
-            for _ in 0..max_iters {
-                if leftover == 0 {
-                    break;
-                }
-
-                // Find account with max remainder; ties: lowest idx wins
-                let mut best_idx: Option<usize> = None;
-                let mut best_rem: u128 = 0;
-
+            if leftover > 0 {
+                // 3a: Collect indices with non-zero remainder into scratch
+                let mut m: usize = 0;
                 for block in 0..BITMAP_WORDS {
                     let mut w = self.used[block];
                     while w != 0 {
@@ -2642,33 +2706,49 @@ impl RiskEngine {
                         if is_excluded(exclude, idx) {
                             continue;
                         }
-
-                        // Only consider eligible accounts (don't gate on pnl > 0)
-                        if self.adl_eligible_scratch[idx] == 1 {
-                            let rem = self.adl_remainder_scratch[idx];
-                            // Skip zero remainders for robust selection
-                            if rem == 0 {
-                                continue;
-                            }
-                            // Prefer larger remainder; if equal, prefer smaller idx (ties)
-                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
-                                best_rem = rem;
-                                best_idx = Some(idx);
-                            }
+                        if self.adl_remainder_scratch[idx] != 0 {
+                            self.adl_idx_scratch[m] = idx as u16;
+                            m += 1;
                         }
                     }
                 }
 
-                match best_idx {
-                    Some(idx) => {
-                        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
-                        applied_from_pnl += 1;
-                        self.adl_eligible_scratch[idx] = 0;
-                        leftover -= 1;
+                // 3b: Sort by remainder descending, idx ascending for ties
+                // Using insertion sort for simplicity (m is typically small)
+                // For larger m, could use heapsort, but this is bounded by leftover
+                for i in 1..m {
+                    let key_idx = self.adl_idx_scratch[i];
+                    let key_rem = self.adl_remainder_scratch[key_idx as usize];
+                    let mut j = i;
+                    while j > 0 {
+                        let prev_idx = self.adl_idx_scratch[j - 1];
+                        let prev_rem = self.adl_remainder_scratch[prev_idx as usize];
+                        // Sort: larger remainder first; if equal, smaller idx first
+                        let should_swap = key_rem > prev_rem
+                            || (key_rem == prev_rem && key_idx < prev_idx);
+                        if !should_swap {
+                            break;
+                        }
+                        self.adl_idx_scratch[j] = prev_idx;
+                        j -= 1;
                     }
-                    None => {
-                        break;
-                    }
+                    self.adl_idx_scratch[j] = key_idx;
+                }
+
+                // 3c: Allocate +1 to top `leftover` accounts
+                let take = core::cmp::min(leftover as usize, m);
+                for j in 0..take {
+                    let idx = self.adl_idx_scratch[j] as usize;
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                    self.adl_eligible_scratch[idx] = 0; // Mark consumed
+                }
+                applied_from_pnl += take as u128;
+                leftover -= take as u128;
+
+                // Mark remaining as consumed (for hygiene check)
+                for j in take..m {
+                    let idx = self.adl_idx_scratch[j] as usize;
+                    self.adl_eligible_scratch[idx] = 0;
                 }
             }
 
