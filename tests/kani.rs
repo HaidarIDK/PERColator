@@ -5736,30 +5736,35 @@ fn fast_i2_garbage_collect_preserves_conservation() {
     let dust_idx = engine.add_user(0).unwrap();
     let source_idx = engine.add_user(0).unwrap();
 
-    // Source account: has positive unwrapped pnl (ADL source)
-    let source_pnl: i128 = kani::any();
-    kani::assume(source_pnl > 0 && source_pnl < 100);
-    engine.accounts[source_idx as usize].pnl = source_pnl;
-    engine.accounts[source_idx as usize].capital = 1000;
-
     // Dust account: capital=0, position=0, reserved=0, negative pnl
-    let dust_pnl: i128 = kani::any();
-    kani::assume(dust_pnl < 0 && dust_pnl > -50);
+    // Bound loss to MAX_ROUNDING_SLACK to satisfy conservation slack constraint
+    let dust_pnl_abs: u128 = kani::any();
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs <= MAX_ROUNDING_SLACK);
+    let dust_pnl = -(dust_pnl_abs as i128);
     engine.accounts[dust_idx as usize].capital = 0;
     engine.accounts[dust_idx as usize].position_size = 0;
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
     engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // Source account: has positive unwrapped pnl (ADL source) that covers the loss
+    // source_pnl must be positive and >= dust_pnl_abs so unwrapped pnl can cover the loss
+    let source_pnl: i128 = kani::any();
+    kani::assume(source_pnl > 0 && source_pnl >= dust_pnl_abs as i128 && source_pnl < 100);
+    engine.accounts[source_idx as usize].pnl = source_pnl;
+    engine.accounts[source_idx as usize].capital = 1000;
+    // warmup_slope = 0 so all pnl is unwrapped (available for ADL)
+    engine.accounts[source_idx as usize].warmup_slope_per_step = 0;
 
     // Insurance fund with some balance for ADL
     let insurance: u128 = 10_000;
     engine.insurance_fund.balance = insurance;
 
     // Conservation: vault + loss_accum >= sum_capital + insurance + sum_pnl_pos - sum_pnl_neg_abs
-    // sum_capital = 1000, sum_pnl_pos = source_pnl, sum_pnl_neg_abs = |dust_pnl|
-    // expected = 1000 + 10_000 + source_pnl - |dust_pnl|
+    // sum_capital = 1000, sum_pnl_pos = source_pnl, sum_pnl_neg_abs = dust_pnl_abs
+    // expected = 1000 + 10_000 + source_pnl - dust_pnl_abs
     // Set vault to match exactly (loss_accum starts at 0)
-    let dust_pnl_abs = (-dust_pnl) as u128;
-    engine.vault = 1000 + insurance + source_pnl as u128 - dust_pnl_abs;
+    // Note: source_pnl >= dust_pnl_abs, so (source_pnl as u128 - dust_pnl_abs) >= 0
+    engine.vault = 1000 + insurance + (source_pnl as u128) - dust_pnl_abs;
 
     // Verify conservation before
     assert!(
@@ -5852,5 +5857,101 @@ fn fast_valid_preserved_by_garbage_collect_dust() {
     assert!(
         valid_state(&engine),
         "valid_state preserved by garbage_collect_dust"
+    );
+}
+
+/// GC never frees accounts that don't satisfy the dust predicate
+/// Tests: reserved_pnl > 0, position_size != 0, funding_index mismatch all block GC
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_respects_full_dust_predicate() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create account that would be dust except for one blocker
+    let idx = engine.add_user(0).unwrap();
+    engine.accounts[idx as usize].capital = 0;
+    engine.accounts[idx as usize].pnl = 0;
+
+    // Pick which predicate to violate
+    let blocker: u8 = kani::any();
+    kani::assume(blocker < 3);
+
+    match blocker {
+        0 => {
+            // reserved_pnl > 0 blocks GC
+            let reserved: u128 = kani::any();
+            kani::assume(reserved > 0 && reserved < 1000);
+            engine.accounts[idx as usize].reserved_pnl = reserved;
+            engine.accounts[idx as usize].position_size = 0;
+        }
+        1 => {
+            // position_size != 0 blocks GC
+            let pos: i128 = kani::any();
+            kani::assume(pos != 0 && pos > -1000 && pos < 1000);
+            engine.accounts[idx as usize].position_size = pos;
+            engine.accounts[idx as usize].reserved_pnl = 0;
+        }
+        _ => {
+            // funding_index mismatch blocks GC
+            engine.accounts[idx as usize].position_size = 0;
+            engine.accounts[idx as usize].reserved_pnl = 0;
+            engine.accounts[idx as usize].funding_index = engine.funding_index_qpb_e6.wrapping_add(1);
+        }
+    }
+
+    let was_used = engine.is_used(idx as usize);
+    assert!(was_used, "Account should exist before GC");
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // Account must NOT be freed
+    assert!(closed == 0, "GC should not close any accounts");
+    assert!(
+        engine.is_used(idx as usize),
+        "GC must not free account that doesn't satisfy dust predicate"
+    );
+}
+
+/// GC frees negative-pnl dust and routes loss through ADL waterfall
+/// Verifies: account freed, loss socialized, state consistent
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_frees_negative_dust_via_adl() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Create dust account with negative pnl
+    let dust_idx = engine.add_user(0).unwrap();
+    let dust_pnl_abs: u128 = kani::any();
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs <= MAX_ROUNDING_SLACK);
+    let dust_pnl = -(dust_pnl_abs as i128);
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // Snapshot before GC
+    let num_used_before = engine.num_used_accounts;
+
+    // Run GC - will route loss through ADL (to loss_accum since no insurance/pnl)
+    let closed = engine.garbage_collect_dust();
+
+    // Account should be freed
+    assert!(closed == 1, "GC should close the negative-pnl dust account");
+    assert!(
+        !engine.is_used(dust_idx as usize),
+        "Dust account slot should be freed"
+    );
+    assert!(
+        engine.num_used_accounts == num_used_before - 1,
+        "num_used_accounts decremented"
+    );
+
+    // Loss was routed to loss_accum (since no insurance or positive pnl)
+    assert!(
+        engine.loss_accum >= dust_pnl_abs,
+        "Loss should be in loss_accum"
     );
 }
