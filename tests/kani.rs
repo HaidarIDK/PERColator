@@ -4817,26 +4817,24 @@ fn proof_require_fresh_crank_gates_stale() {
     }
 }
 
-/// Verify close_account returns capital only (not raw pnl)
-/// Warmed pnl becomes capital via settle; unwarmed pnl is forfeited
+/// Verify close_account rejects when pnl > 0 (must warm up first)
+/// This enforces: can't bypass warmup via close, and conservation is maintained
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn proof_close_account_returns_capital_only() {
+fn proof_close_account_rejects_positive_pnl() {
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
 
     // Give the user capital via deposit
     let _ = engine.deposit(user, 7_000);
-    let cap_before_close = engine.accounts[user as usize].capital;
 
-    // Add unwarmed pnl (should be forfeited)
+    // Add unwarmed positive pnl - close should be rejected
     engine.accounts[user as usize].pnl = 1_000;
     engine.accounts[user as usize].warmup_slope_per_step = 0;
 
     let res = engine.close_account(user, 0, 1_000_000);
-    assert!(res.is_ok());
-    assert!(res.unwrap() == cap_before_close);
+    assert!(res.is_err(), "close_account should reject positive pnl");
 }
 
 /// Verify close_account includes warmed pnl that was settled to capital

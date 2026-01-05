@@ -965,9 +965,11 @@ impl RiskEngine {
     /// - Account must exist
     /// - Position must be zero (no open positions)
     /// - fee_credits >= 0 (no outstanding fees owed)
-    /// - pnl must be 0 after settlement (any unwarmed positive pnl is forfeited)
+    /// - pnl must be 0 after settlement (positive pnl must be warmed up first)
     ///
-    /// Returns the amount withdrawn (capital only - pnl must go through warmup first).
+    /// Returns Err(PnlNotWarmedUp) if pnl > 0 (user must wait for warmup).
+    /// Returns Err(Undercollateralized) if pnl < 0 (shouldn't happen after settlement).
+    /// Returns the capital amount on success.
     pub fn close_account(
         &mut self,
         idx: u16,
@@ -994,13 +996,17 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance); // Owes fees
         }
 
-        // After full settlement, negative pnl has been realized from capital.
-        // Positive unwarmed pnl remains in pnl field but is NOT withdrawable.
-        // Users must wait for warmup to convert pnl to capital before closing.
-        // If there's still positive pnl, it means warmup hasn't completed - user forfeits it.
-        // (This is the security property: can't bypass warmup via close_account)
+        // PnL must be zero to close. This enforces:
+        // 1. Users can't bypass warmup by closing with positive unwarmed pnl
+        // 2. Conservation is maintained (forfeiting pnl would create unbounded slack)
+        // 3. Negative pnl after full settlement implies insolvency
+        if account.pnl > 0 {
+            return Err(RiskError::PnlNotWarmedUp);
+        }
+        if account.pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
 
-        // Return capital only (warmed profits are already in capital, unwarmed are forfeited)
         let capital = account.capital;
 
         // Deduct from vault
