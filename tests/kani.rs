@@ -4752,32 +4752,42 @@ fn proof_close_account_requires_flat_and_paid() {
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
 
-    // Deterministic baseline
-    engine.accounts[user as usize].position_size = 0;
-    engine.accounts[user as usize].fee_credits = 0;
-    engine.accounts[user as usize].pnl = 0;
-    engine.vault = 0;
-
+    // Choose whether to violate requirements
     let has_position: bool = kani::any();
     let owes_fees: bool = kani::any();
     let has_pos_pnl: bool = kani::any();
 
+    // Construct state
     if has_position {
         engine.accounts[user as usize].position_size = 100;
+        engine.accounts[user as usize].entry_price = 1_000_000;
+    } else {
+        engine.accounts[user as usize].position_size = 0;
     }
+
     if owes_fees {
         engine.accounts[user as usize].fee_credits = -50;
+    } else {
+        engine.accounts[user as usize].fee_credits = 0;
     }
+
     if has_pos_pnl {
-        engine.accounts[user as usize].pnl = 1; // positive -> must be rejected
-        engine.accounts[user as usize].warmup_slope_per_step = 0;
+        engine.accounts[user as usize].pnl = 1;
+        engine.accounts[user as usize].reserved_pnl = 0;
         engine.accounts[user as usize].warmup_started_at_slot = 0;
+        engine.accounts[user as usize].warmup_slope_per_step = 0; // cannot warm
+        engine.current_slot = 0;
+    } else {
+        engine.accounts[user as usize].pnl = 0;
     }
 
     let result = engine.close_account(user, 0, 1_000_000);
 
     if has_position || owes_fees || has_pos_pnl {
-        assert!(result.is_err(), "close_account should fail with position, owed fees, or positive pnl");
+        assert!(
+            result.is_err(),
+            "close_account must fail if position != 0 OR fee_credits < 0 OR pnl > 0"
+        );
     }
 }
 
@@ -4834,17 +4844,17 @@ fn proof_close_account_rejects_positive_pnl() {
     // Give the user capital via deposit
     let _ = engine.deposit(user, 7_000);
 
-    // Remove maintenance-fuzz / fee-settle noise
-    engine.accounts[user as usize].last_fee_slot = 0;
+    // Deterministic warmup state: cap=0 => cannot warm anything
     engine.current_slot = 0;
-
-    // Add unwarmed positive pnl - close should be rejected specifically for warmup
-    engine.accounts[user as usize].pnl = 1_000;
-    engine.accounts[user as usize].reserved_pnl = 0;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
-    engine.accounts[user as usize].warmup_slope_per_step = 0; // cap=0 => pnl stays >0
+    engine.accounts[user as usize].warmup_slope_per_step = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+
+    // Positive pnl must block close
+    engine.accounts[user as usize].pnl = 1_000;
 
     let res = engine.close_account(user, 0, 1_000_000);
+
     assert!(
         res == Err(RiskError::PnlNotWarmedUp),
         "close_account must reject positive pnl with PnlNotWarmedUp"
@@ -4862,29 +4872,34 @@ fn proof_close_account_includes_warmed_pnl() {
     // Give the user capital via deposit
     let _ = engine.deposit(user, 5_000);
 
-    // Seed insurance to create warmup budget (floor=0 here)
+    // Seed insurance so warmup has budget (floor=0 in test_params)
     engine.insurance_fund.balance = 10_000;
-    // Keep vault roughly consistent (not strictly required for this proof)
+    // Keep vault roughly consistent (not required for close_account, but avoids weirdness)
     engine.vault = engine.vault.saturating_add(10_000);
 
-    // Set positive pnl and warmup parameters so pnl can warm
+    // Positive pnl that should fully warm with enough cap + budget
     engine.accounts[user as usize].pnl = 1_000;
     engine.accounts[user as usize].reserved_pnl = 0;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
-    engine.accounts[user as usize].warmup_slope_per_step = 100; // 100 per slot
+    engine.accounts[user as usize].warmup_slope_per_step = 100; // 100/slot
 
     // Advance time so cap >= pnl
     engine.current_slot = 200;
 
-    // Settle warmup to capital; must drive pnl to 0 with enough cap + budget
+    // Warm it
     let _ = engine.settle_warmup_to_capital(user);
-    assert!(engine.accounts[user as usize].pnl == 0, "precondition: pnl must be 0 after warming");
+
+    // Non-vacuity: must have warmed all pnl to zero to allow close
+    assert!(
+        engine.accounts[user as usize].pnl == 0,
+        "precondition: pnl must be 0 after warmup settlement"
+    );
 
     let capital_after_warmup = engine.accounts[user as usize].capital;
 
-    // Now close must succeed and return that capital
+    // Now close must succeed and return exactly that capital
     let result = engine.close_account(user, 0, 1_000_000);
-    assert!(result.is_ok(), "close_account must succeed when pnl==0, flat, and no fees owed");
+    assert!(result.is_ok(), "close_account must succeed when flat and pnl==0");
     let returned = result.unwrap();
 
     assert!(
