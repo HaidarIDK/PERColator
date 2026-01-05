@@ -1591,13 +1591,15 @@ impl RiskEngine {
             return Ok(false);
         }
 
+        // Early gate: no position = nothing to liquidate (avoids expensive touch)
+        if self.accounts[idx as usize].position_size == 0 {
+            return Ok(false);
+        }
+
         // Settle and check maintenance margin
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         let account = &self.accounts[idx as usize];
-        if account.position_size == 0 {
-            return Ok(false);
-        }
         if self.is_above_maintenance_margin(account, oracle_price) {
             return Ok(false);
         }
@@ -2369,29 +2371,48 @@ impl RiskEngine {
     // ADL (Auto-Deleveraging) - Scan-Based
     // ========================================
 
+    /// Compute effective slot for warmup (hoisted for efficiency)
+    #[inline]
+    fn effective_warmup_slot(&self) -> u64 {
+        if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        }
+    }
+
+    /// Calculate withdrawable PNL with pre-computed effective_slot
+    #[inline]
+    fn compute_withdrawable_pnl_at(&self, account: &Account, effective_slot: u64) -> u128 {
+        if account.pnl <= 0 {
+            return 0;
+        }
+        let positive_pnl = account.pnl as u128;
+        let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
+        let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
+        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
+        core::cmp::min(available_pnl, warmed_up_cap)
+    }
+
     /// Calculate withdrawable PnL for an account (inline helper)
     /// withdrawable = min(available_pnl, warmed_up_cap)
     #[inline]
     fn compute_withdrawable_pnl(&self, account: &Account) -> u128 {
+        self.compute_withdrawable_pnl_at(account, self.effective_warmup_slot())
+    }
+
+    /// Calculate unwrapped PNL with pre-computed effective_slot
+    #[inline]
+    fn compute_unwrapped_pnl_at(&self, account: &Account, effective_slot: u64) -> u128 {
         if account.pnl <= 0 {
             return 0;
         }
-
         let positive_pnl = account.pnl as u128;
-        let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
-
-        // Apply warmup pause - when paused, warmup cannot progress beyond pause_slot
-        let effective_slot = if self.warmup_paused {
-            core::cmp::min(self.current_slot, self.warmup_pause_slot)
-        } else {
-            self.current_slot
-        };
-
-        // Calculate warmed capacity
-        let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
-        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
-
-        core::cmp::min(available_pnl, warmed_up_cap)
+        let reserved = account.reserved_pnl;
+        let withdrawable = self.compute_withdrawable_pnl_at(account, effective_slot);
+        positive_pnl
+            .saturating_sub(reserved)
+            .saturating_sub(withdrawable)
     }
 
     /// Calculate unwrapped PNL for an account (inline helper for ADL)
@@ -2399,18 +2420,65 @@ impl RiskEngine {
     /// This is PnL that hasn't yet warmed and isn't reserved - subject to ADL haircuts
     #[inline]
     fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
-        if account.pnl <= 0 {
-            return 0;
+        self.compute_unwrapped_pnl_at(account, self.effective_warmup_slot())
+    }
+
+    /// ADL heap comparator: a "wins" (is larger) if rem_a > rem_b, or tie-break by lower idx
+    #[inline]
+    fn adl_heap_better(&self, a: u16, b: u16) -> bool {
+        let ra = self.adl_remainder_scratch[a as usize];
+        let rb = self.adl_remainder_scratch[b as usize];
+        ra > rb || (ra == rb && a < b)
+    }
+
+    /// Sift down for ADL max-heap
+    fn adl_sift_down(&mut self, heap_size: usize, mut pos: usize) {
+        loop {
+            let left = 2 * pos + 1;
+            if left >= heap_size {
+                break;
+            }
+            let right = left + 1;
+
+            let mut best = left;
+            if right < heap_size
+                && self.adl_heap_better(self.adl_idx_scratch[right], self.adl_idx_scratch[left])
+            {
+                best = right;
+            }
+            if self.adl_heap_better(self.adl_idx_scratch[pos], self.adl_idx_scratch[best]) {
+                break;
+            }
+            self.adl_idx_scratch.swap(pos, best);
+            pos = best;
         }
+    }
 
-        let positive_pnl = account.pnl as u128;
-        let reserved = account.reserved_pnl;
-        let withdrawable = self.compute_withdrawable_pnl(account);
+    /// Build max-heap for ADL remainder distribution
+    fn adl_build_heap(&mut self, heap_size: usize) {
+        if heap_size < 2 {
+            return;
+        }
+        let mut i = (heap_size - 2) / 2;
+        loop {
+            self.adl_sift_down(heap_size, i);
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
 
-        // unwrapped = positive_pnl - reserved - withdrawable (all saturating)
-        positive_pnl
-            .saturating_sub(reserved)
-            .saturating_sub(withdrawable)
+    /// Pop max from ADL heap, returns the index
+    fn adl_pop_max(&mut self, heap_size: &mut usize) -> u16 {
+        debug_assert!(*heap_size > 0);
+        let best = self.adl_idx_scratch[0];
+        *heap_size -= 1;
+        if *heap_size > 0 {
+            self.adl_idx_scratch[0] = self.adl_idx_scratch[*heap_size];
+            self.adl_sift_down(*heap_size, 0);
+        }
+        best
     }
 
     /// Returns insurance balance above the floor (raw spendable, before reservations)
@@ -2588,6 +2656,8 @@ impl RiskEngine {
     ///
     /// When `exclude` is Some(idx), that account is skipped during haircutting.
     /// This prevents liquidated winners from funding their own profit.
+    ///
+    /// Optimized: 2 bitmap scans (down from 4), O(m + take*log(m)) heap selection.
     fn apply_adl_impl(&mut self, total_loss: u128, exclude: Option<usize>) -> Result<()> {
         // ADL reduces risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
@@ -2605,6 +2675,9 @@ impl RiskEngine {
             }
         }
 
+        // Hoist effective_slot once (saves repeated warmup pause checks)
+        let effective_slot = self.effective_warmup_slot();
+
         // Pass 1: Compute total unwrapped PNL (excluding specified account if any)
         let mut total_unwrapped = 0u128;
 
@@ -2615,13 +2688,13 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
                 if idx >= MAX_ACCOUNTS {
-                    continue; // Guard against stray high bits in bitmap
+                    continue;
                 }
                 if is_excluded(exclude, idx) {
                     continue;
                 }
 
-                let unwrapped = self.compute_unwrapped_pnl(&self.accounts[idx]);
+                let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
                 total_unwrapped = total_unwrapped.saturating_add(unwrapped);
             }
         }
@@ -2632,27 +2705,12 @@ impl RiskEngine {
         // Track total applied for conservation
         let mut applied_from_pnl: u128 = 0;
 
+        // Index list count for heap (built inline during Pass 2)
+        let mut m: usize = 0;
+
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            // Step 1: Zero scratch arrays for used accounts only (via bitmap)
-            for block in 0..BITMAP_WORDS {
-                let mut w = self.used[block];
-                while w != 0 {
-                    let bit = w.trailing_zeros() as usize;
-                    let idx = block * 64 + bit;
-                    w &= w - 1;
-                    if idx >= MAX_ACCOUNTS {
-                        continue;
-                    }
-                    if is_excluded(exclude, idx) {
-                        continue;
-                    }
-
-                    self.adl_remainder_scratch[idx] = 0;
-                    self.adl_eligible_scratch[idx] = 0;
-                }
-            }
-
-            // Step 2: Compute floor haircuts, store remainders, mark eligible
+            // Pass 2: Compute floor haircuts, store remainders, build idx list inline
+            // (Merged: no separate scratch zeroing, no separate idx collection pass)
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
                 while w != 0 {
@@ -2667,201 +2725,48 @@ impl RiskEngine {
                     }
 
                     let account = &self.accounts[idx];
-                    if account.pnl > 0 {
-                        let unwrapped = self.compute_unwrapped_pnl(account);
+                    if account.pnl <= 0 {
+                        continue;
+                    }
 
-                        if unwrapped > 0 {
-                            let numer = loss_to_socialize.saturating_mul(unwrapped);
-                            let haircut = numer / total_unwrapped;
-                            let rem = numer % total_unwrapped;
+                    let unwrapped = self.compute_unwrapped_pnl_at(account, effective_slot);
+                    if unwrapped == 0 {
+                        continue;
+                    }
 
-                            self.accounts[idx].pnl =
-                                self.accounts[idx].pnl.saturating_sub(haircut as i128);
-                            applied_from_pnl += haircut;
+                    let numer = loss_to_socialize.saturating_mul(unwrapped);
+                    let haircut = numer / total_unwrapped;
+                    let rem = numer % total_unwrapped;
 
-                            // Store remainder and mark eligible if rem > 0
-                            self.adl_remainder_scratch[idx] = rem;
-                            self.adl_eligible_scratch[idx] = if rem > 0 { 1 } else { 0 };
-                        }
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                    applied_from_pnl += haircut;
+
+                    // Store remainder; if non-zero, add to idx list for heap selection
+                    self.adl_remainder_scratch[idx] = rem;
+                    if rem != 0 {
+                        self.adl_idx_scratch[m] = idx as u16;
+                        m += 1;
                     }
                 }
             }
 
-            // Step 3: Distribute leftover using largest-remainder method (O(n log n))
-            // Build sorted index list, then allocate to top `leftover` accounts.
-            let mut leftover = loss_to_socialize - applied_from_pnl;
+            // Step 3: Distribute leftover using largest-remainder method
+            // Use heap pop top-K: O(m) build + O(take * log m) pops
+            let leftover = loss_to_socialize - applied_from_pnl;
 
-            if leftover > 0 {
-                // 3a: Collect indices with non-zero remainder into scratch
-                let mut m: usize = 0;
-                for block in 0..BITMAP_WORDS {
-                    let mut w = self.used[block];
-                    while w != 0 {
-                        let bit = w.trailing_zeros() as usize;
-                        let idx = block * 64 + bit;
-                        w &= w - 1;
-                        if idx >= MAX_ACCOUNTS {
-                            continue;
-                        }
-                        if is_excluded(exclude, idx) {
-                            continue;
-                        }
-                        if self.adl_remainder_scratch[idx] != 0 {
-                            self.adl_idx_scratch[m] = idx as u16;
-                            m += 1;
-                        }
-                    }
-                }
-
-                // 3b: Sort by remainder descending, idx ascending for ties
-                // Using heapsort for guaranteed O(n log n) worst-case
-                // Comparator: a "wins" over b if rem_a > rem_b, or rem_a == rem_b && idx_a < idx_b
-
-                // Heapsort helper: sift down element at pos to maintain max-heap property
-                // Inline closure not great for Kani, so we inline the logic
+            if leftover > 0 && m > 0 {
+                // Build max-heap
+                self.adl_build_heap(m);
                 let mut heap_size = m;
 
-                // Build max-heap (heapify): start from last parent, sift down each
-                if m > 1 {
-                    let mut start = (m - 2) / 2; // last parent
-                    loop {
-                        // Sift down at position `start`
-                        let mut pos = start;
-                        loop {
-                            let left = 2 * pos + 1;
-                            if left >= heap_size {
-                                break;
-                            }
-                            let right = left + 1;
-
-                            // Find largest among pos, left, right
-                            let pos_idx = self.adl_idx_scratch[pos];
-                            let pos_rem = self.adl_remainder_scratch[pos_idx as usize];
-                            let left_idx = self.adl_idx_scratch[left];
-                            let left_rem = self.adl_remainder_scratch[left_idx as usize];
-
-                            let mut largest = pos;
-                            let mut largest_rem = pos_rem;
-                            let mut largest_idx = pos_idx;
-
-                            // Compare with left child
-                            if left_rem > largest_rem || (left_rem == largest_rem && left_idx < largest_idx) {
-                                largest = left;
-                                largest_rem = left_rem;
-                                largest_idx = left_idx;
-                            }
-
-                            // Compare with right child if exists
-                            if right < heap_size {
-                                let right_idx = self.adl_idx_scratch[right];
-                                let right_rem = self.adl_remainder_scratch[right_idx as usize];
-                                if right_rem > largest_rem || (right_rem == largest_rem && right_idx < largest_idx) {
-                                    largest = right;
-                                }
-                            }
-
-                            if largest == pos {
-                                break;
-                            }
-
-                            // Swap
-                            self.adl_idx_scratch.swap(pos, largest);
-                            pos = largest;
-                        }
-
-                        if start == 0 {
-                            break;
-                        }
-                        start -= 1;
-                    }
-                }
-
-                // Extract elements from heap to produce sorted order (descending by our comparator)
-                while heap_size > 1 {
-                    // Swap root (max) with last element
-                    self.adl_idx_scratch.swap(0, heap_size - 1);
-                    heap_size -= 1;
-
-                    // Sift down new root
-                    let mut pos = 0;
-                    loop {
-                        let left = 2 * pos + 1;
-                        if left >= heap_size {
-                            break;
-                        }
-                        let right = left + 1;
-
-                        let pos_idx = self.adl_idx_scratch[pos];
-                        let pos_rem = self.adl_remainder_scratch[pos_idx as usize];
-                        let left_idx = self.adl_idx_scratch[left];
-                        let left_rem = self.adl_remainder_scratch[left_idx as usize];
-
-                        let mut largest = pos;
-                        let mut largest_rem = pos_rem;
-                        let mut largest_idx = pos_idx;
-
-                        if left_rem > largest_rem || (left_rem == largest_rem && left_idx < largest_idx) {
-                            largest = left;
-                            largest_rem = left_rem;
-                            largest_idx = left_idx;
-                        }
-
-                        if right < heap_size {
-                            let right_idx = self.adl_idx_scratch[right];
-                            let right_rem = self.adl_remainder_scratch[right_idx as usize];
-                            if right_rem > largest_rem || (right_rem == largest_rem && right_idx < largest_idx) {
-                                largest = right;
-                            }
-                        }
-
-                        if largest == pos {
-                            break;
-                        }
-
-                        self.adl_idx_scratch.swap(pos, largest);
-                        pos = largest;
-                    }
-                }
-
-                // 3c: Allocate +1 to top `leftover` accounts
+                // Pop top `take` elements and apply +1 haircut to each
                 let take = core::cmp::min(leftover as usize, m);
-                for j in 0..take {
-                    let idx = self.adl_idx_scratch[j] as usize;
+                for _ in 0..take {
+                    let idx = self.adl_pop_max(&mut heap_size) as usize;
                     self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
-                    self.adl_eligible_scratch[idx] = 0; // Mark consumed
                 }
                 applied_from_pnl += take as u128;
-                leftover -= take as u128;
-
-                // Mark remaining as consumed (for hygiene check)
-                for j in take..m {
-                    let idx = self.adl_idx_scratch[j] as usize;
-                    self.adl_eligible_scratch[idx] = 0;
-                }
-            }
-
-            // Hygiene: verify all eligible bits consumed after distribution
-            #[cfg(any(test, kani))]
-            {
-                for block in 0..BITMAP_WORDS {
-                    let mut w = self.used[block];
-                    while w != 0 {
-                        let bit = w.trailing_zeros() as usize;
-                        let idx = block * 64 + bit;
-                        w &= w - 1;
-                        if idx >= MAX_ACCOUNTS {
-                            continue;
-                        }
-                        if is_excluded(exclude, idx) {
-                            continue;
-                        }
-                        debug_assert!(
-                            self.adl_eligible_scratch[idx] == 0,
-                            "Eligible bit not consumed for account {}",
-                            idx
-                        );
-                    }
-                }
             }
         }
 
