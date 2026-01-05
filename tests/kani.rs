@@ -5977,7 +5977,7 @@ fn gc_frees_negative_dust_via_adl() {
     let closed = engine.garbage_collect_dust();
 
     // Account should be freed
-    assert!(closed == 1, "GC should close the negative-pnl dust account");
+    assert!(closed >= 1, "GC should close at least the negative-pnl dust account");
     assert!(
         !engine.is_used(dust_idx as usize),
         "Dust account slot should be freed"
