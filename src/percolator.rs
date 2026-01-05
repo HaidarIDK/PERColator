@@ -2714,25 +2714,113 @@ impl RiskEngine {
                 }
 
                 // 3b: Sort by remainder descending, idx ascending for ties
-                // Using insertion sort for simplicity (m is typically small)
-                // For larger m, could use heapsort, but this is bounded by leftover
-                for i in 1..m {
-                    let key_idx = self.adl_idx_scratch[i];
-                    let key_rem = self.adl_remainder_scratch[key_idx as usize];
-                    let mut j = i;
-                    while j > 0 {
-                        let prev_idx = self.adl_idx_scratch[j - 1];
-                        let prev_rem = self.adl_remainder_scratch[prev_idx as usize];
-                        // Sort: larger remainder first; if equal, smaller idx first
-                        let should_swap = key_rem > prev_rem
-                            || (key_rem == prev_rem && key_idx < prev_idx);
-                        if !should_swap {
+                // Using heapsort for guaranteed O(n log n) worst-case
+                // Comparator: a "wins" over b if rem_a > rem_b, or rem_a == rem_b && idx_a < idx_b
+
+                // Heapsort helper: sift down element at pos to maintain max-heap property
+                // Inline closure not great for Kani, so we inline the logic
+                let mut heap_size = m;
+
+                // Build max-heap (heapify): start from last parent, sift down each
+                if m > 1 {
+                    let mut start = (m - 2) / 2; // last parent
+                    loop {
+                        // Sift down at position `start`
+                        let mut pos = start;
+                        loop {
+                            let left = 2 * pos + 1;
+                            if left >= heap_size {
+                                break;
+                            }
+                            let right = left + 1;
+
+                            // Find largest among pos, left, right
+                            let pos_idx = self.adl_idx_scratch[pos];
+                            let pos_rem = self.adl_remainder_scratch[pos_idx as usize];
+                            let left_idx = self.adl_idx_scratch[left];
+                            let left_rem = self.adl_remainder_scratch[left_idx as usize];
+
+                            let mut largest = pos;
+                            let mut largest_rem = pos_rem;
+                            let mut largest_idx = pos_idx;
+
+                            // Compare with left child
+                            if left_rem > largest_rem || (left_rem == largest_rem && left_idx < largest_idx) {
+                                largest = left;
+                                largest_rem = left_rem;
+                                largest_idx = left_idx;
+                            }
+
+                            // Compare with right child if exists
+                            if right < heap_size {
+                                let right_idx = self.adl_idx_scratch[right];
+                                let right_rem = self.adl_remainder_scratch[right_idx as usize];
+                                if right_rem > largest_rem || (right_rem == largest_rem && right_idx < largest_idx) {
+                                    largest = right;
+                                }
+                            }
+
+                            if largest == pos {
+                                break;
+                            }
+
+                            // Swap
+                            self.adl_idx_scratch.swap(pos, largest);
+                            pos = largest;
+                        }
+
+                        if start == 0 {
                             break;
                         }
-                        self.adl_idx_scratch[j] = prev_idx;
-                        j -= 1;
+                        start -= 1;
                     }
-                    self.adl_idx_scratch[j] = key_idx;
+                }
+
+                // Extract elements from heap to produce sorted order (descending by our comparator)
+                while heap_size > 1 {
+                    // Swap root (max) with last element
+                    self.adl_idx_scratch.swap(0, heap_size - 1);
+                    heap_size -= 1;
+
+                    // Sift down new root
+                    let mut pos = 0;
+                    loop {
+                        let left = 2 * pos + 1;
+                        if left >= heap_size {
+                            break;
+                        }
+                        let right = left + 1;
+
+                        let pos_idx = self.adl_idx_scratch[pos];
+                        let pos_rem = self.adl_remainder_scratch[pos_idx as usize];
+                        let left_idx = self.adl_idx_scratch[left];
+                        let left_rem = self.adl_remainder_scratch[left_idx as usize];
+
+                        let mut largest = pos;
+                        let mut largest_rem = pos_rem;
+                        let mut largest_idx = pos_idx;
+
+                        if left_rem > largest_rem || (left_rem == largest_rem && left_idx < largest_idx) {
+                            largest = left;
+                            largest_rem = left_rem;
+                            largest_idx = left_idx;
+                        }
+
+                        if right < heap_size {
+                            let right_idx = self.adl_idx_scratch[right];
+                            let right_rem = self.adl_remainder_scratch[right_idx as usize];
+                            if right_rem > largest_rem || (right_rem == largest_rem && right_idx < largest_idx) {
+                                largest = right;
+                            }
+                        }
+
+                        if largest == pos {
+                            break;
+                        }
+
+                        self.adl_idx_scratch.swap(pos, largest);
+                        pos = largest;
+                    }
                 }
 
                 // 3c: Allocate +1 to top `leftover` accounts
