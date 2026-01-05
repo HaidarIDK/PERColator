@@ -25,25 +25,24 @@ extern crate kani;
 // Constants
 // ============================================================================
 
-// Use smaller array size for Kani verification, fuzz testing, and debug builds
-// to avoid stack overflow (RiskEngine is ~6MB at 4096 accounts). Production (release) uses 4096.
+// MAX_ACCOUNTS is feature-configured, not target-configured.
+// This ensures x86 and SBF builds use the same sizes for a given feature set.
 #[cfg(kani)]
 pub const MAX_ACCOUNTS: usize = 8; // Small for fast formal verification
 
-#[cfg(all(any(feature = "fuzz", debug_assertions), not(kani)))]
-pub const MAX_ACCOUNTS: usize = 64; // Small to avoid stack overflow in tests
+#[cfg(all(feature = "test", not(kani)))]
+pub const MAX_ACCOUNTS: usize = 64; // Small for tests
 
-#[cfg(all(not(kani), not(feature = "fuzz"), not(debug_assertions)))]
-pub const MAX_ACCOUNTS: usize = 4096;
+#[cfg(all(not(kani), not(feature = "test")))]
+pub const MAX_ACCOUNTS: usize = 4096; // Production
 
-// Ceiling division ensures at least 1 word even when MAX_ACCOUNTS < 64
+// Derived constants - all use size_of, no hardcoded values
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
-
-/// Maximum allowed rounding slack in conservation check.
-/// Each integer division can lose at most 1 unit of quote currency.
-/// With MAX_ACCOUNTS positions, worst-case rounding loss is MAX_ACCOUNTS units.
-/// This bounds how much "dust" can accumulate in the vault from truncation.
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+
+/// Maximum number of dust accounts to close per crank call.
+/// Limits compute usage while still making progress on cleanup.
+pub const GC_CLOSE_BUDGET: u32 = 32;
 
 // ============================================================================
 // Core Data Structures
@@ -166,6 +165,7 @@ fn empty_account() -> Account {
 }
 
 /// Insurance fund state
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceFund {
     /// Insurance fund balance
@@ -191,6 +191,7 @@ pub struct ClosedOutcome {
 }
 
 /// Risk engine parameters
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RiskParams {
     /// Warmup period in slots (time T)
@@ -414,6 +415,8 @@ pub struct CrankOutcome {
     pub did_panic_settle: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
+    /// Number of dust accounts garbage collected during this crank
+    pub num_gc_closed: u32,
 }
 
 // ============================================================================
@@ -571,7 +574,10 @@ impl MatchingEngine for NoOpMatcher {
 // ============================================================================
 
 impl RiskEngine {
-    /// Create a new risk engine
+    /// Create a new risk engine (stack-allocates the full struct - avoid in BPF!)
+    ///
+    /// WARNING: This allocates ~6MB on the stack at MAX_ACCOUNTS=4096.
+    /// For Solana BPF programs, use `init_in_place` instead.
     pub fn new(params: RiskParams) -> Self {
         let mut engine = Self {
             vault: 0,
@@ -611,6 +617,30 @@ impl RiskEngine {
         engine.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
 
         engine
+    }
+
+    /// Initialize a RiskEngine in place (zero-copy friendly).
+    ///
+    /// PREREQUISITE: The memory backing `self` MUST be zeroed before calling.
+    /// This method only sets non-zero fields to avoid touching the entire ~6MB struct.
+    ///
+    /// This is the correct way to initialize RiskEngine in Solana BPF programs
+    /// where stack space is limited to 4KB.
+    pub fn init_in_place(&mut self, params: RiskParams) {
+        // Set params (non-zero field)
+        self.params = params;
+        self.max_crank_staleness_slots = params.max_crank_staleness_slots;
+
+        // Initialize freelist: 0 -> 1 -> 2 -> ... -> MAX_ACCOUNTS-1 -> NONE
+        // All other fields are zero which is correct for:
+        // - vault, insurance_fund, current_slot, funding_index, etc. = 0
+        // - used bitmap = all zeros (no accounts in use)
+        // - accounts = all zeros (equivalent to empty_account())
+        // - free_head = 0 (first free slot is 0)
+        for i in 0..MAX_ACCOUNTS - 1 {
+            self.next_free[i] = (i + 1) as u16;
+        }
+        self.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
     }
 
     // ========================================
@@ -935,9 +965,11 @@ impl RiskEngine {
     /// - Account must exist
     /// - Position must be zero (no open positions)
     /// - fee_credits >= 0 (no outstanding fees owed)
-    /// - pnl must be 0 after settlement (any unwarmed positive pnl is forfeited)
+    /// - pnl must be 0 after settlement (positive pnl must be warmed up first)
     ///
-    /// Returns the amount withdrawn (capital only - pnl must go through warmup first).
+    /// Returns Err(PnlNotWarmedUp) if pnl > 0 (user must wait for warmup).
+    /// Returns Err(Undercollateralized) if pnl < 0 (shouldn't happen after settlement).
+    /// Returns the capital amount on success.
     pub fn close_account(
         &mut self,
         idx: u16,
@@ -964,13 +996,17 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance); // Owes fees
         }
 
-        // After full settlement, negative pnl has been realized from capital.
-        // Positive unwarmed pnl remains in pnl field but is NOT withdrawable.
-        // Users must wait for warmup to convert pnl to capital before closing.
-        // If there's still positive pnl, it means warmup hasn't completed - user forfeits it.
-        // (This is the security property: can't bypass warmup via close_account)
+        // PnL must be zero to close. This enforces:
+        // 1. Users can't bypass warmup by closing with positive unwarmed pnl
+        // 2. Conservation is maintained (forfeiting pnl would create unbounded slack)
+        // 3. Negative pnl after full settlement implies insolvency
+        if account.pnl > 0 {
+            return Err(RiskError::PnlNotWarmedUp);
+        }
+        if account.pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
 
-        // Return capital only (warmed profits are already in capital, unwarmed are forfeited)
         let capital = account.capital;
 
         // Deduct from vault
@@ -979,18 +1015,140 @@ impl RiskEngine {
         }
         self.vault = self.vault.saturating_sub(capital);
 
-        // Clear the account slot
-        self.accounts[idx as usize] = empty_account();
-        self.clear_used(idx as usize);
-
-        // Return to freelist
-        self.next_free[idx as usize] = self.free_head;
-        self.free_head = idx;
-
-        // Decrement used count
-        self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
+        // Free the slot
+        self.free_slot(idx);
 
         Ok(capital)
+    }
+
+    /// Free an account slot (internal helper).
+    /// Clears the account, bitmap, and returns slot to freelist.
+    /// Caller must ensure the account is safe to free (no capital, no positive pnl, etc).
+    fn free_slot(&mut self, idx: u16) {
+        self.accounts[idx as usize] = empty_account();
+        self.clear_used(idx as usize);
+        self.next_free[idx as usize] = self.free_head;
+        self.free_head = idx;
+        self.num_used_accounts = self.num_used_accounts.saturating_sub(1);
+    }
+
+    /// Garbage collect dust accounts.
+    ///
+    /// A "dust account" is a slot that can never pay out anything:
+    /// - position_size == 0
+    /// - capital == 0
+    /// - reserved_pnl == 0
+    /// - pnl <= 0
+    ///
+    /// Any remaining negative PnL is socialized via ADL waterfall before freeing.
+    /// No token transfers occur - this is purely internal bookkeeping cleanup.
+    ///
+    /// Called at end of keeper_crank after liquidation/settlement has already run.
+    ///
+    /// Returns the number of accounts closed.
+    pub fn garbage_collect_dust(&mut self) -> u32 {
+        // Two separate lists: zero-pnl (always freeable) vs negative-pnl (needs ADL)
+        let mut to_free_zero: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut to_free_neg: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut neg_loss: [u128; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut num_zero = 0usize;
+        let mut num_neg = 0usize;
+        let mut total_unpaid: u128 = 0;
+
+        // Pass 1: Collect dust candidates (up to budget)
+        let total_budget = GC_CLOSE_BUDGET as usize;
+        'outer: for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+
+                if idx >= MAX_ACCOUNTS {
+                    continue;
+                }
+
+                // Budget check (combined count)
+                if num_zero + num_neg >= total_budget {
+                    break 'outer;
+                }
+
+                let account = &self.accounts[idx];
+
+                // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
+                if account.position_size != 0 {
+                    continue;
+                }
+                if account.capital != 0 {
+                    continue;
+                }
+                if account.reserved_pnl != 0 {
+                    continue;
+                }
+                if account.pnl > 0 {
+                    continue;
+                }
+                // Funding must be settled to avoid unsettled-value footgun
+                if account.funding_index != self.funding_index_qpb_e6 {
+                    continue;
+                }
+
+                if account.pnl < 0 {
+                    // Track negative pnl for batched ADL
+                    let loss = neg_i128_to_u128(account.pnl);
+                    let new_total = total_unpaid.saturating_add(loss);
+                    // Saturation guard: stop collecting negative-pnl if saturated
+                    if new_total == total_unpaid && loss > 0 {
+                        break 'outer;
+                    }
+                    total_unpaid = new_total;
+                    neg_loss[num_neg] = loss;
+                    to_free_neg[num_neg] = idx as u16;
+                    num_neg += 1;
+                } else {
+                    // pnl == 0: always freeable
+                    to_free_zero[num_zero] = idx as u16;
+                    num_zero += 1;
+                }
+            }
+        }
+
+        // Pass 2: Try batched ADL for negative-pnl accounts
+        // IMPORTANT: Zero neg pnl BEFORE ADL to avoid double-counting loss in conservation.
+        // The loss is "extracted" from per-account ledger, then routed through ADL waterfall.
+        let mut adl_ok = true;
+        if total_unpaid > 0 {
+            // Zero the negative pnls first
+            for i in 0..num_neg {
+                self.accounts[to_free_neg[i] as usize].pnl = 0;
+            }
+
+            if self.apply_adl(total_unpaid).is_err() {
+                // Restore negative pnls on failure for transactional consistency
+                for i in 0..num_neg {
+                    self.accounts[to_free_neg[i] as usize].pnl = -(neg_loss[i] as i128);
+                }
+                adl_ok = false;
+            }
+        }
+
+        let mut freed = 0u32;
+
+        // Pass 3a: Always free zero-pnl accounts
+        for i in 0..num_zero {
+            self.free_slot(to_free_zero[i]);
+            freed += 1;
+        }
+
+        // Pass 3b: Only free negative-pnl accounts if ADL succeeded
+        if adl_ok && num_neg > 0 {
+            for i in 0..num_neg {
+                self.free_slot(to_free_neg[i]);
+                freed += 1;
+            }
+        }
+
+        freed
     }
 
     // ========================================
@@ -1029,6 +1187,9 @@ impl RiskEngine {
         funding_rate_bps_per_slot: i64,
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Accrue funding first (always)
         let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
 
@@ -1089,6 +1250,9 @@ impl RiskEngine {
             }
         }
 
+        // Garbage collect dust accounts (runs every crank)
+        let num_gc_closed = self.garbage_collect_dust();
+
         Ok(CrankOutcome {
             advanced,
             slots_forgiven,
@@ -1096,6 +1260,7 @@ impl RiskEngine {
             did_force_realize,
             did_panic_settle,
             num_liquidations,
+            num_gc_closed,
         })
     }
 

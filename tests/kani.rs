@@ -4670,6 +4670,8 @@ fn proof_settle_maintenance_deducts_correctly() {
 }
 
 /// C. keeper_crank advances last_crank_slot correctly
+/// Note: keeper_crank now also runs garbage_collect_dust which can mutate
+/// bitmap/freelist and invoke apply_adl. This proof focuses on slot advancement.
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -4698,6 +4700,18 @@ fn proof_keeper_crank_advances_slot_monotonically() {
         assert!(!outcome.advanced, "Should not advance when now_slot <= last_crank_slot");
         assert!(engine.last_crank_slot == 100, "last_crank_slot should stay at 100");
     }
+
+    // GC budget is always respected
+    assert!(
+        outcome.num_gc_closed <= GC_CLOSE_BUDGET,
+        "GC must respect budget"
+    );
+
+    // current_slot is updated
+    assert!(
+        engine.current_slot == now_slot,
+        "current_slot must be updated by crank"
+    );
 }
 
 /// C2. keeper_crank never fails due to caller maintenance settle
@@ -4736,30 +4750,47 @@ fn proof_keeper_crank_best_effort_settle() {
 #[kani::solver(cadical)]
 fn proof_close_account_requires_flat_and_paid() {
     let mut engine = RiskEngine::new(test_params());
-
     let user = engine.add_user(0).unwrap();
 
-    // Try closing with arbitrary state
+    // Choose whether to violate requirements
     let has_position: bool = kani::any();
     let owes_fees: bool = kani::any();
+    let has_pos_pnl: bool = kani::any();
 
+    // Construct state
     if has_position {
-        engine.accounts[user as usize].position_size = 100; // Non-zero position
+        engine.accounts[user as usize].position_size = 100;
+        engine.accounts[user as usize].entry_price = 1_000_000;
+    } else {
+        engine.accounts[user as usize].position_size = 0;
     }
+
     if owes_fees {
-        engine.accounts[user as usize].fee_credits = -50; // Negative = owes fees
+        engine.accounts[user as usize].fee_credits = -50;
+    } else {
+        engine.accounts[user as usize].fee_credits = 0;
+    }
+
+    if has_pos_pnl {
+        engine.accounts[user as usize].pnl = 1;
+        engine.accounts[user as usize].reserved_pnl = 0;
+        engine.accounts[user as usize].warmup_started_at_slot = 0;
+        engine.accounts[user as usize].warmup_slope_per_step = 0; // cannot warm
+        engine.current_slot = 0;
+    } else {
+        engine.accounts[user as usize].pnl = 0;
     }
 
     let result = engine.close_account(user, 0, 1_000_000);
 
-    if has_position || owes_fees {
-        // Should fail if has position or owes fees
+    if has_position || owes_fees || has_pos_pnl {
         assert!(
             result.is_err(),
-            "close_account should fail with position or outstanding fees"
+            "close_account must fail if position != 0 OR fee_credits < 0 OR pnl > 0"
         );
+    } else {
+        assert!(result.is_ok(), "close_account should succeed when flat/paid and pnl==0");
     }
-    // If neither, could succeed (depends on other conditions)
 }
 
 /// E. total_open_interest tracking: starts at 0 for new engine
@@ -4803,26 +4834,33 @@ fn proof_require_fresh_crank_gates_stale() {
     }
 }
 
-/// Verify close_account returns capital only (not raw pnl)
-/// Warmed pnl becomes capital via settle; unwarmed pnl is forfeited
+/// Verify close_account rejects when pnl > 0 (must warm up first)
+/// This enforces: can't bypass warmup via close, and conservation is maintained
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn proof_close_account_returns_capital_only() {
+fn proof_close_account_rejects_positive_pnl() {
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
 
     // Give the user capital via deposit
     let _ = engine.deposit(user, 7_000);
-    let cap_before_close = engine.accounts[user as usize].capital;
 
-    // Add unwarmed pnl (should be forfeited)
-    engine.accounts[user as usize].pnl = 1_000;
+    // Deterministic warmup state: cap=0 => cannot warm anything
+    engine.current_slot = 0;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
     engine.accounts[user as usize].warmup_slope_per_step = 0;
+    engine.accounts[user as usize].reserved_pnl = 0;
+
+    // Positive pnl must block close
+    engine.accounts[user as usize].pnl = 1_000;
 
     let res = engine.close_account(user, 0, 1_000_000);
-    assert!(res.is_ok());
-    assert!(res.unwrap() == cap_before_close);
+
+    assert!(
+        res == Err(RiskError::PnlNotWarmedUp),
+        "close_account must reject positive pnl with PnlNotWarmedUp"
+    );
 }
 
 /// Verify close_account includes warmed pnl that was settled to capital
@@ -4836,29 +4874,69 @@ fn proof_close_account_includes_warmed_pnl() {
     // Give the user capital via deposit
     let _ = engine.deposit(user, 5_000);
 
-    // Set positive pnl and warmup parameters so pnl can warm
+    // Seed insurance so warmup has budget (floor=0 in test_params)
+    engine.insurance_fund.balance = 10_000;
+    // Keep vault roughly consistent (not required for close_account, but avoids weirdness)
+    engine.vault = engine.vault.saturating_add(10_000);
+
+    // Positive pnl that should fully warm with enough cap + budget
     engine.accounts[user as usize].pnl = 1_000;
+    engine.accounts[user as usize].reserved_pnl = 0;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
-    engine.accounts[user as usize].warmup_slope_per_step = 100; // 100 per slot
+    engine.accounts[user as usize].warmup_slope_per_step = 100; // 100/slot
 
-    // Advance current_slot so warmup progresses
-    engine.current_slot = 200; // 200 slots * 100/slot = 20000 warmed cap (more than pnl)
+    // Advance time so cap >= pnl
+    engine.current_slot = 200;
 
-    // Settle warmup to capital
+    // Warm it
     let _ = engine.settle_warmup_to_capital(user);
+
+    // Non-vacuity: must have warmed all pnl to zero to allow close
+    assert!(
+        engine.accounts[user as usize].pnl == 0,
+        "precondition: pnl must be 0 after warmup settlement"
+    );
 
     let capital_after_warmup = engine.accounts[user as usize].capital;
 
+    // Now close must succeed and return exactly that capital
     let result = engine.close_account(user, 0, 1_000_000);
+    assert!(result.is_ok(), "close_account must succeed when flat and pnl==0");
+    let returned = result.unwrap();
 
-    if result.is_ok() {
-        let returned = result.unwrap();
-        // Now returned should include the warmed amount (which became capital)
-        assert!(
-            returned == capital_after_warmup,
-            "close_account should return capital including warmed pnl"
-        );
-    }
+    assert!(
+        returned == capital_after_warmup,
+        "close_account should return capital including warmed pnl"
+    );
+}
+
+/// close_account rejects if pnl < 0 after full settlement (insolvent / invariant violation boundary)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_close_account_rejects_negative_pnl() {
+    let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
+
+    engine.current_slot = 0;
+    engine.accounts[user as usize].last_fee_slot = 0;
+
+    let _ = engine.deposit(user, 100);
+
+    // Flat and no fees owed
+    engine.accounts[user as usize].position_size = 0;
+    engine.accounts[user as usize].fee_credits = 0;
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user as usize].funding_index = 0;
+
+    // Force insolvent state: pnl negative, capital exhausted
+    engine.accounts[user as usize].capital = 0;
+    engine.vault = 0;
+    engine.accounts[user as usize].pnl = -1;
+
+    // close should reject as undercollateralized
+    let res = engine.close_account(user, 0, 1_000_000);
+    assert!(res == Err(RiskError::Undercollateralized));
 }
 
 /// Verify set_risk_reduction_threshold updates the parameter
@@ -5703,4 +5781,279 @@ fn proof_liq_partial_deterministic_reaches_target_or_full_close() {
 
     // Note: Target margin check removed - edge cases with fee deduction can leave
     // partial positions below target. The dust rule + N1 are the critical invariants.
+}
+
+// ==============================================================================
+// GARBAGE COLLECTION PROOFS
+// ==============================================================================
+
+/// I2: garbage_collect_dust preserves conservation
+/// GC can call apply_adl (which moves value) then free slots (drops account state).
+/// This proves conservation still holds after GC.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn fast_i2_garbage_collect_preserves_conservation() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Settle funding globally so GC predicate passes
+    engine.funding_index_qpb_e6 = 0;
+
+    // Create accounts: one will be dust, one will have positive pnl for ADL source
+    let dust_idx = engine.add_user(0).unwrap();
+    let source_idx = engine.add_user(0).unwrap();
+
+    // Set funding indices for both accounts (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
+    engine.accounts[source_idx as usize].funding_index = 0;
+
+    // Dust account: capital=0, position=0, reserved=0, negative pnl
+    // New GC zeros pnl before ADL, so no MAX_ROUNDING_SLACK bound needed
+    let dust_pnl_abs: u128 = kani::any();
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs < 100);
+    let dust_pnl = -(dust_pnl_abs as i128);
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // Source account: has positive unwrapped pnl (ADL source) that covers the loss
+    // source_pnl must be positive and >= dust_pnl_abs so unwrapped pnl can cover the loss
+    let source_pnl: i128 = kani::any();
+    kani::assume(source_pnl > 0 && source_pnl >= dust_pnl_abs as i128 && source_pnl < 100);
+    engine.accounts[source_idx as usize].pnl = source_pnl;
+    engine.accounts[source_idx as usize].capital = 1000;
+    // warmup_slope = 0 so all pnl is unwrapped (available for ADL)
+    engine.accounts[source_idx as usize].warmup_slope_per_step = 0;
+
+    // Insurance fund with some balance for ADL
+    let insurance: u128 = 10_000;
+    engine.insurance_fund.balance = insurance;
+
+    // Conservation: vault + loss_accum >= sum_capital + insurance + sum_pnl_pos - sum_pnl_neg_abs
+    // sum_capital = 1000, sum_pnl_pos = source_pnl, sum_pnl_neg_abs = dust_pnl_abs
+    // expected = 1000 + 10_000 + source_pnl - dust_pnl_abs
+    // Set vault to match exactly (loss_accum starts at 0)
+    // Note: source_pnl >= dust_pnl_abs, so (source_pnl as u128 - dust_pnl_abs) >= 0
+    engine.vault = 1000 + insurance + (source_pnl as u128) - dust_pnl_abs;
+
+    // Verify conservation before
+    assert!(
+        conservation_fast_no_funding(&engine),
+        "Conservation must hold before GC"
+    );
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // GC should close the dust account (non-vacuous check)
+    assert!(closed > 0, "GC should close at least one dust account");
+
+    // Conservation must still hold after GC
+    assert!(
+        conservation_fast_no_funding(&engine),
+        "I2: GC must preserve conservation"
+    );
+}
+
+/// GC never frees an account with positive value (capital > 0 or pnl > 0)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_never_frees_account_with_positive_value() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
+
+    // Create two accounts: one with positive value, one that's dust
+    let positive_idx = engine.add_user(0).unwrap();
+    let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding indices for both accounts (required by GC predicate)
+    engine.accounts[positive_idx as usize].funding_index = 0;
+    engine.accounts[dust_idx as usize].funding_index = 0;
+
+    // Positive account: either has capital or positive pnl
+    let has_capital: bool = kani::any();
+    if has_capital {
+        let capital: u128 = kani::any();
+        kani::assume(capital > 0 && capital < 1000);
+        engine.accounts[positive_idx as usize].capital = capital;
+        engine.vault = capital;
+    } else {
+        let pnl: i128 = kani::any();
+        kani::assume(pnl > 0 && pnl < 100);
+        engine.accounts[positive_idx as usize].pnl = pnl;
+        engine.vault = pnl as u128;
+    }
+    engine.accounts[positive_idx as usize].position_size = 0;
+    engine.accounts[positive_idx as usize].reserved_pnl = 0;
+
+    // Dust account: zero capital, zero position, zero reserved, zero pnl
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = 0;
+
+    // Record whether positive account was used before GC
+    let positive_was_used = engine.is_used(positive_idx as usize);
+    assert!(positive_was_used, "Positive account should exist");
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // The dust account should be closed (non-vacuous)
+    assert!(closed > 0, "GC should close the dust account");
+
+    // The positive value account must still exist
+    assert!(
+        engine.is_used(positive_idx as usize),
+        "GC must not free account with positive value"
+    );
+}
+
+/// Validity preserved by garbage_collect_dust
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn fast_valid_preserved_by_garbage_collect_dust() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
+
+    // Create a dust account
+    let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding index (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = 0;
+
+    kani::assume(valid_state(&engine));
+
+    // Run GC
+    let closed = engine.garbage_collect_dust();
+
+    // Non-vacuous: GC should actually close the dust account
+    assert!(closed > 0, "GC should close the dust account");
+
+    assert!(
+        valid_state(&engine),
+        "valid_state preserved by garbage_collect_dust"
+    );
+}
+
+/// GC never frees accounts that don't satisfy the dust predicate
+/// Tests: reserved_pnl > 0, position_size != 0, funding_index mismatch all block GC
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_respects_full_dust_predicate() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Set global funding index explicitly
+    engine.funding_index_qpb_e6 = 0;
+
+    // Create account that would be dust except for one blocker
+    let idx = engine.add_user(0).unwrap();
+    engine.accounts[idx as usize].capital = 0;
+    engine.accounts[idx as usize].pnl = 0;
+
+    // Pick which predicate to violate
+    let blocker: u8 = kani::any();
+    kani::assume(blocker < 3);
+
+    match blocker {
+        0 => {
+            // reserved_pnl > 0 blocks GC
+            let reserved: u128 = kani::any();
+            kani::assume(reserved > 0 && reserved < 1000);
+            engine.accounts[idx as usize].reserved_pnl = reserved;
+            engine.accounts[idx as usize].position_size = 0;
+            engine.accounts[idx as usize].funding_index = 0; // settled
+        }
+        1 => {
+            // position_size != 0 blocks GC
+            let pos: i128 = kani::any();
+            kani::assume(pos != 0 && pos > -1000 && pos < 1000);
+            engine.accounts[idx as usize].position_size = pos;
+            engine.accounts[idx as usize].reserved_pnl = 0;
+            engine.accounts[idx as usize].funding_index = 0; // settled
+        }
+        _ => {
+            // funding_index mismatch blocks GC
+            engine.accounts[idx as usize].position_size = 0;
+            engine.accounts[idx as usize].reserved_pnl = 0;
+            engine.accounts[idx as usize].funding_index = 1; // mismatched (global is 0)
+        }
+    }
+
+    let was_used = engine.is_used(idx as usize);
+    assert!(was_used, "Account should exist before GC");
+
+    // Run GC
+    let _closed = engine.garbage_collect_dust();
+
+    // Target account must NOT be freed (other accounts might be)
+    assert!(
+        engine.is_used(idx as usize),
+        "GC must not free account that doesn't satisfy dust predicate"
+    );
+}
+
+/// GC frees negative-pnl dust and routes loss through ADL waterfall
+/// Verifies: account freed, loss socialized, state consistent
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn gc_frees_negative_dust_via_adl() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Settle funding globally so GC predicate passes
+    engine.funding_index_qpb_e6 = 0;
+
+    // Create dust account with negative pnl
+    let dust_idx = engine.add_user(0).unwrap();
+
+    // Set funding index (required by GC predicate)
+    engine.accounts[dust_idx as usize].funding_index = 0;
+
+    let dust_pnl_abs: u128 = kani::any();
+    kani::assume(dust_pnl_abs > 0 && dust_pnl_abs < 100);
+    let dust_pnl = -(dust_pnl_abs as i128);
+    engine.accounts[dust_idx as usize].capital = 0;
+    engine.accounts[dust_idx as usize].position_size = 0;
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].pnl = dust_pnl;
+
+    // No insurance/unwrapped pnl - loss will go to loss_accum
+    engine.vault = 0;
+    engine.insurance_fund.balance = 0;
+
+    // Snapshot before GC
+    let num_used_before = engine.num_used_accounts;
+
+    // Run GC - will route loss through ADL (to loss_accum since no insurance/pnl)
+    let closed = engine.garbage_collect_dust();
+
+    // Account should be freed
+    assert!(closed >= 1, "GC should close at least the negative-pnl dust account");
+    assert!(
+        !engine.is_used(dust_idx as usize),
+        "Dust account slot should be freed"
+    );
+    assert!(
+        engine.num_used_accounts == num_used_before - 1,
+        "num_used_accounts decremented"
+    );
+
+    // Loss was routed to loss_accum (since no insurance or positive pnl)
+    assert!(
+        engine.loss_accum >= dust_pnl_abs,
+        "Loss should be in loss_accum"
+    );
 }

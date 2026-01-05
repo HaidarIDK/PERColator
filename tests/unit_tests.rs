@@ -5154,3 +5154,120 @@ fn test_set_threshold_large_value() {
     engine.set_risk_reduction_threshold(large);
     assert_eq!(engine.risk_reduction_threshold(), large);
 }
+
+// ==============================================================================
+// DUST GARBAGE COLLECTION TESTS
+// ==============================================================================
+
+#[test]
+fn test_gc_fee_drained_dust() {
+    // Test: account drained by maintenance fees gets GC'd
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = 100; // 100 units per slot
+    params.max_crank_staleness_slots = u64::MAX; // No staleness check
+
+    let mut engine = RiskEngine::new(params);
+
+    // Create user with small capital
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 500).unwrap();
+
+    assert!(engine.is_used(user as usize), "User should exist");
+
+    // Advance time to drain fees (500 / 100 = 5 slots)
+    // Crank will settle fees, drain capital to 0, then GC
+    let outcome = engine.keeper_crank(user, 10, 1_000_000, 0, false).unwrap();
+
+    assert!(
+        !engine.is_used(user as usize),
+        "User slot should be freed after fee drain"
+    );
+    assert_eq!(outcome.num_gc_closed, 1, "Should have GC'd one account");
+}
+
+#[test]
+fn test_gc_positive_pnl_never_collected() {
+    // Test: account with positive PnL is never GC'd
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+
+    // Create user and set up positive PnL with zero capital
+    let user = engine.add_user(0).unwrap();
+    // No deposit - capital = 0
+    engine.accounts[user as usize].pnl = 1000; // Positive PnL
+
+    assert!(engine.is_used(user as usize), "User should exist");
+
+    // Crank should NOT GC this account
+    let outcome = engine.keeper_crank(u16::MAX, 100, 1_000_000, 0, false).unwrap();
+
+    assert!(
+        engine.is_used(user as usize),
+        "User with positive PnL should NOT be GC'd"
+    );
+    assert_eq!(outcome.num_gc_closed, 0, "Should not GC any accounts");
+}
+
+#[test]
+fn test_gc_negative_pnl_socialized() {
+    // Test: account with negative PnL and zero capital is socialized then GC'd
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+
+    // Create user with negative PnL and zero capital
+    let user = engine.add_user(0).unwrap();
+
+    // Create counterparty with matching positive PnL for zero-sum
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(counterparty, 1000).unwrap(); // Needs capital to exist
+    engine.accounts[counterparty as usize].pnl = 500; // Counterparty gains
+
+    // Now set user's negative PnL (zero-sum with counterparty)
+    engine.accounts[user as usize].pnl = -500;
+
+    // Set up insurance fund
+    set_insurance(&mut engine, 10_000);
+
+    assert!(engine.is_used(user as usize), "User should exist");
+
+    // Crank should socialize the loss (via ADL haircut on counterparty) and GC the account
+    let outcome = engine.keeper_crank(u16::MAX, 100, 1_000_000, 0, false).unwrap();
+
+    assert!(
+        !engine.is_used(user as usize),
+        "User should be GC'd after loss socialization"
+    );
+    assert_eq!(outcome.num_gc_closed, 1, "Should have GC'd one account");
+
+    // Counterparty's positive PnL should be haircut by 500
+    assert_eq!(
+        engine.accounts[counterparty as usize].pnl, 0,
+        "Counterparty PnL should be haircut to zero"
+    );
+
+    // Conservation should still hold
+    assert!(engine.check_conservation(), "Conservation should hold after GC");
+}
+
+#[test]
+fn test_gc_with_position_not_collected() {
+    // Test: account with open position is never GC'd
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+
+    let user = engine.add_user(0).unwrap();
+    // Add enough capital to avoid liquidation, then set position
+    engine.deposit(user, 10_000).unwrap();
+    engine.accounts[user as usize].position_size = 1000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 1000;
+
+    // Crank should NOT GC this account (has position)
+    let outcome = engine.keeper_crank(u16::MAX, 100, 1_000_000, 0, false).unwrap();
+
+    assert!(
+        engine.is_used(user as usize),
+        "User with position should NOT be GC'd"
+    );
+    assert_eq!(outcome.num_gc_closed, 0, "Should not GC any accounts");
+}

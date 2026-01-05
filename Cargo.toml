@@ -16,7 +16,7 @@ proptest = "1.4"
 
 [features]
 default = []
-fuzz = []
+test = []  # Use MAX_ACCOUNTS=64 for tests
 
 [profile.release]
 lto = "fat"
