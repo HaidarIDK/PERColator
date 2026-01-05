@@ -159,30 +159,80 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
     }
   };
 
-  // Step 2: Commit the reserved order
+  // Step 2: Commit the reserved order (two-phase commit)
   const handleCommit = async () => {
-    if (!reservedOrder || !signTransaction) return;
+    if (!reservedOrder || !signTransaction || !publicKey) return;
 
     setLoading(true);
     try {
-      // Sign and send the reserved transaction
-      const signed = await signTransaction(reservedOrder.transaction);
-      const signature = await connection.sendRawTransaction(signed.serialize());
-      
-      await connection.confirmTransaction(signature, 'confirmed');
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+
+      // Phase 1: Sign and send the RESERVE transaction first
+      console.log('Phase 1: Signing reserve transaction...');
+      const signedReserve = await signTransaction(reservedOrder.transaction);
+      const reserveSignature = await connection.sendRawTransaction(signedReserve.serialize());
+
+      toast({
+        type: 'info',
+        title: 'Processing',
+        message: 'Reserve transaction sent, waiting for confirmation...'
+      });
+
+      await connection.confirmTransaction(reserveSignature, 'confirmed');
+      console.log('Reserve transaction confirmed:', reserveSignature);
+
+      // Phase 2: Call the commit API to get the commit transaction
+      console.log('Phase 2: Requesting commit transaction...');
+
+      const commitResponse = await fetch(`${API_URL}/api/trade/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: publicKey.toBase58(),
+          holdId: reservedOrder.holdId,
+        })
+      });
+
+      const commitResult = await commitResponse.json();
+
+      if (!commitResponse.ok || !commitResult.success) {
+        throw new Error(commitResult.error || 'Failed to get commit transaction');
+      }
+
+      // Sign and send the commit transaction
+      const commitTx = Transaction.from(Buffer.from(commitResult.transaction, 'base64'));
+      console.log('Phase 2: Signing commit transaction...');
+      const signedCommit = await signTransaction(commitTx);
+      const commitSignature = await connection.sendRawTransaction(signedCommit.serialize());
+
+      await connection.confirmTransaction(commitSignature, 'confirmed');
+      console.log('Commit transaction confirmed:', commitSignature);
+
+      // Record the fill on the server
+      await fetch(`${API_URL}/api/trade/record-fill`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: publicKey.toBase58(),
+          side: reservedOrder.side,
+          price: commitResult.vwapPrice || reservedOrder.price,
+          quantity: commitResult.filledQty || reservedOrder.size,
+          signature: commitSignature,
+        })
+      });
 
       toast({
         type: 'success',
-        title: 'Order Committed',
-        message: `${reservedOrder.side.toUpperCase()} order committed! ${reservedOrder.size} ${coinToV2(coin)} @ $${reservedOrder.price.toFixed(2)}`
+        title: 'Order Executed',
+        message: `${reservedOrder.side.toUpperCase()} order executed! ${reservedOrder.size} ${coinToV2(coin)} @ $${reservedOrder.price.toFixed(2)}`
       });
-      
+
       // Reset form
       setReservedOrder(null);
       setSize('');
       setPrice(currentPrice > 0 ? currentPrice.toFixed(2) : '');
       if (timerRef.current) clearInterval(timerRef.current);
-      
+
     } catch (error: any) {
       console.error('Failed to commit order:', error);
       toast({
