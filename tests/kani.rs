@@ -4826,15 +4826,30 @@ fn proof_close_account_rejects_positive_pnl() {
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
 
-    // Give the user capital via deposit
+    // Give the user capital via deposit (also sets vault)
     let _ = engine.deposit(user, 7_000);
 
-    // Add unwarmed positive pnl - close should be rejected
-    engine.accounts[user as usize].pnl = 1_000;
-    engine.accounts[user as usize].warmup_slope_per_step = 0;
+    // Ensure "close" preconditions won't fail for other reasons
+    engine.accounts[user as usize].position_size = 0;
+    engine.accounts[user as usize].fee_credits = 0;
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user as usize].funding_index = 0;
 
-    let res = engine.close_account(user, 0, 1_000_000);
-    assert!(res.is_err(), "close_account should reject positive pnl");
+    // Add positive pnl that is NOT warmed
+    engine.accounts[user as usize].pnl = 1_000;
+    engine.accounts[user as usize].reserved_pnl = 0;
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+    engine.accounts[user as usize].warmup_slope_per_step = 0; // cap = 0 forever
+
+    // Choose now_slot consistent with current_slot so maintenance dt isn't weird
+    engine.current_slot = 10;
+    engine.accounts[user as usize].last_fee_slot = 10;
+    let res = engine.close_account(user, engine.current_slot, 1_000_000);
+
+    assert!(
+        res == Err(RiskError::PnlNotWarmedUp),
+        "close_account must fail specifically with PnlNotWarmedUp when pnl > 0"
+    );
 }
 
 /// Verify close_account includes warmed pnl that was settled to capital
@@ -4845,32 +4860,92 @@ fn proof_close_account_includes_warmed_pnl() {
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
 
+    // Deterministic slot timeline
+    engine.current_slot = 0;
+    engine.accounts[user as usize].last_fee_slot = 0; // avoid maintenance dt surprises
+
     // Give the user capital via deposit
     let _ = engine.deposit(user, 5_000);
 
-    // Set positive pnl and warmup parameters so pnl can warm
+    // No position, no fees owed
+    engine.accounts[user as usize].position_size = 0;
+    engine.accounts[user as usize].fee_credits = 0;
+
+    // Funding settled
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user as usize].funding_index = 0;
+
+    // Insurance fund provides warmup budget for positive pnl settlement
+    engine.insurance_fund.balance = 10_000;
+
+    // Positive pnl and warmup params
     engine.accounts[user as usize].pnl = 1_000;
+    engine.accounts[user as usize].reserved_pnl = 0;
     engine.accounts[user as usize].warmup_started_at_slot = 0;
     engine.accounts[user as usize].warmup_slope_per_step = 100; // 100 per slot
 
-    // Advance current_slot so warmup progresses
-    engine.current_slot = 200; // 200 slots * 100/slot = 20000 warmed cap (more than pnl)
+    // Advance time enough that warmup cap >= pnl
+    engine.current_slot = 20; // cap = 2000 >= 1000
+    engine.accounts[user as usize].last_fee_slot = 20; // avoid maintenance dt
 
-    // Settle warmup to capital
+    // Settle warmup to move pnl -> capital
     let _ = engine.settle_warmup_to_capital(user);
+
+    // Non-vacuity: verify pnl is actually fully settled
+    assert!(
+        engine.accounts[user as usize].pnl == 0,
+        "precondition: pnl must be 0 after warmup settlement for close_account to succeed"
+    );
 
     let capital_after_warmup = engine.accounts[user as usize].capital;
 
-    let result = engine.close_account(user, 0, 1_000_000);
+    // Vault must have enough to cover the withdrawal (warmup increased capital)
+    engine.vault = capital_after_warmup;
 
-    if result.is_ok() {
-        let returned = result.unwrap();
-        // Now returned should include the warmed amount (which became capital)
-        assert!(
-            returned == capital_after_warmup,
-            "close_account should return capital including warmed pnl"
-        );
-    }
+    // Close at now_slot == current_slot (consistent)
+    let res = engine.close_account(user, engine.current_slot, 1_000_000);
+    assert!(res.is_ok(), "close_account should succeed when pnl == 0 and account is flat");
+
+    let returned = res.unwrap();
+    assert!(
+        returned == capital_after_warmup,
+        "close_account must return all capital including warmed pnl"
+    );
+
+    // Slot should be freed
+    assert!(
+        !engine.is_used(user as usize),
+        "account slot must be freed after close_account"
+    );
+}
+
+/// close_account rejects if pnl < 0 after full settlement (insolvent / invariant violation boundary)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_close_account_rejects_negative_pnl() {
+    let mut engine = RiskEngine::new(test_params());
+    let user = engine.add_user(0).unwrap();
+
+    engine.current_slot = 0;
+    engine.accounts[user as usize].last_fee_slot = 0;
+
+    let _ = engine.deposit(user, 100);
+
+    // Flat and no fees owed
+    engine.accounts[user as usize].position_size = 0;
+    engine.accounts[user as usize].fee_credits = 0;
+    engine.funding_index_qpb_e6 = 0;
+    engine.accounts[user as usize].funding_index = 0;
+
+    // Force insolvent state: pnl negative, capital exhausted
+    engine.accounts[user as usize].capital = 0;
+    engine.vault = 0;
+    engine.accounts[user as usize].pnl = -1;
+
+    // close should reject as undercollateralized
+    let res = engine.close_account(user, engine.current_slot, 1_000_000);
+    assert!(res == Err(RiskError::Undercollateralized));
 }
 
 /// Verify set_risk_reduction_threshold updates the parameter
