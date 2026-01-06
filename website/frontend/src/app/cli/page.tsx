@@ -62,7 +62,8 @@ export default function CLIPage() {
     if (!useWebSocket) return;
 
     const connectWebSocket = () => {
-      const ws = new WebSocket('ws://localhost:5001/ws/cli');
+      const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:5001/ws';
+      const ws = new WebSocket(wsUrl.replace('/ws', '/ws/cli'));
 
       ws.onopen = () => {
         console.log('✅ Connected to CLI WebSocket');
@@ -160,7 +161,8 @@ export default function CLIPage() {
   useEffect(() => {
     const checkStatus = async () => {
       try {
-        const response = await fetch('http://localhost:5001/api/cli/status');
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+        const response = await fetch(`${apiUrl}/api/cli/status`);
         const data = await response.json();
         // Always set to ready - backend will handle mock mode
         setCliStatus('ready');
@@ -211,7 +213,8 @@ export default function CLIPage() {
 
     // Fallback to HTTP API
     try {
-      const response = await fetch('http://localhost:5001/api/cli/execute', {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+      const response = await fetch(`${apiUrl}/api/cli/execute`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -377,7 +380,8 @@ export default function CLIPage() {
     setAiResponse(null);
 
     try {
-      const response = await fetch('http://localhost:5001/api/ai-assistant/suggest', {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+      const response = await fetch(`${apiUrl}/api/ai-assistant/suggest`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
