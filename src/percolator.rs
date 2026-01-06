@@ -378,15 +378,28 @@ pub struct RiskEngine {
     /// Current heap size
     pub topk_len: u16,
 
-    /// Cursor for incremental top-K candidate discovery (advances with liq_cursor)
-    pub topk_cursor: u16,
-
     /// Epoch counter for top-K deduplication (increments each sweep start)
     pub topk_epoch: u8,
 
     /// Per-account epoch marker to avoid duplicate inserts within a sweep
     /// If topk_seen_epoch[idx] == topk_epoch, already considered this sweep
     pub topk_seen_epoch: [u8; MAX_ACCOUNTS],
+
+    // ========================================
+    // Deferred Socialization Buckets (replaces global ADL)
+    // ========================================
+    /// Accumulated profit-funding needs from liquidations (mark_pnl > 0)
+    pub pending_profit_to_fund: u128,
+
+    /// Accumulated unpaid losses from liquidations (capital exhausted)
+    pub pending_unpaid_loss: u128,
+
+    /// Epoch for exclusion deduplication (increments each sweep start)
+    pub pending_epoch: u8,
+
+    /// Per-account exclusion epoch marker for profit-funding
+    /// If pending_exclude_epoch[idx] == pending_epoch, exclude from paying own profit
+    pub pending_exclude_epoch: [u8; MAX_ACCOUNTS],
 
     // ========================================
     // Crank Cursors (bounded scan support)
@@ -686,9 +699,12 @@ impl RiskEngine {
             topk_idx: [0; TOP_LIQ_K],
             topk_score: [0; TOP_LIQ_K],
             topk_len: 0,
-            topk_cursor: 0,
             topk_epoch: 0,
             topk_seen_epoch: [0; MAX_ACCOUNTS],
+            pending_profit_to_fund: 0,
+            pending_unpaid_loss: 0,
+            pending_epoch: 0,
+            pending_exclude_epoch: [0; MAX_ACCOUNTS],
             liq_cursor: 0,
             gc_cursor: 0,
             last_full_sweep_start_slot: 0,
@@ -1139,31 +1155,25 @@ impl RiskEngine {
     ///
     /// Returns the number of accounts closed.
     pub fn garbage_collect_dust(&mut self) -> u32 {
-        // Two separate lists: zero-pnl (always freeable) vs negative-pnl (needs ADL)
-        let mut to_free_zero: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut to_free_neg: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut neg_loss: [u128; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut num_zero = 0usize;
-        let mut num_neg = 0usize;
-        let mut total_unpaid: u128 = 0;
+        // Collect dust candidates: accounts with zero position, capital, reserved, and non-positive pnl
+        let mut to_free: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut num_to_free = 0usize;
 
-        // Pass 1: Collect dust candidates using windowed scan from gc_cursor
-        let total_budget = GC_CLOSE_BUDGET as usize;
         // Fixed WINDOW per crank step, capped to MAX_ACCOUNTS to avoid wrap-around
         let max_scan = if WINDOW < MAX_ACCOUNTS { WINDOW } else { MAX_ACCOUNTS };
         let start = self.gc_cursor as usize;
 
         for offset in 0..max_scan {
             // Budget check
-            if num_zero + num_neg >= total_budget {
+            if num_to_free >= GC_CLOSE_BUDGET as usize {
                 break;
             }
 
             let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
             // Check if slot is used via bitmap
-            let block = idx / 64;
-            let bit = idx % 64;
+            let block = idx >> 6;
+            let bit = idx & 63;
             if (self.used[block] & (1u64 << bit)) == 0 {
                 continue;
             }
@@ -1188,64 +1198,28 @@ impl RiskEngine {
                 continue;
             }
 
+            // Handle negative pnl by adding to pending bucket (no global ADL)
             if account.pnl < 0 {
-                // Track negative pnl for batched ADL
                 let loss = neg_i128_to_u128(account.pnl);
-                let new_total = total_unpaid.saturating_add(loss);
-                // Saturation guard: stop collecting negative-pnl if saturated
-                if new_total == total_unpaid && loss > 0 {
-                    break;
-                }
-                total_unpaid = new_total;
-                neg_loss[num_neg] = loss;
-                to_free_neg[num_neg] = idx as u16;
-                num_neg += 1;
-            } else {
-                // pnl == 0: always freeable
-                to_free_zero[num_zero] = idx as u16;
-                num_zero += 1;
+                self.pending_unpaid_loss = self.pending_unpaid_loss.saturating_add(loss);
+                // Zero the pnl so account becomes true dust
+                self.accounts[idx].pnl = 0;
             }
+
+            // Queue for freeing
+            to_free[num_to_free] = idx as u16;
+            num_to_free += 1;
         }
 
         // Update cursor for next call
         self.gc_cursor = ((start + max_scan) & ACCOUNT_IDX_MASK) as u16;
 
-        // Pass 2: Try batched ADL for negative-pnl accounts
-        // IMPORTANT: Zero neg pnl BEFORE ADL to avoid double-counting loss in conservation.
-        // The loss is "extracted" from per-account ledger, then routed through ADL waterfall.
-        let mut adl_ok = true;
-        if total_unpaid > 0 {
-            // Zero the negative pnls first
-            for i in 0..num_neg {
-                self.accounts[to_free_neg[i] as usize].pnl = 0;
-            }
-
-            if self.apply_adl(total_unpaid).is_err() {
-                // Restore negative pnls on failure for transactional consistency
-                for i in 0..num_neg {
-                    self.accounts[to_free_neg[i] as usize].pnl = -(neg_loss[i] as i128);
-                }
-                adl_ok = false;
-            }
+        // Free all collected dust accounts
+        for i in 0..num_to_free {
+            self.free_slot(to_free[i]);
         }
 
-        let mut freed = 0u32;
-
-        // Pass 3a: Always free zero-pnl accounts
-        for i in 0..num_zero {
-            self.free_slot(to_free_zero[i]);
-            freed += 1;
-        }
-
-        // Pass 3b: Only free negative-pnl accounts if ADL succeeded
-        if adl_ok && num_neg > 0 {
-            for i in 0..num_neg {
-                self.free_slot(to_free_neg[i]);
-                freed += 1;
-            }
-        }
-
-        freed
+        num_to_free as u32
     }
 
     // ========================================
@@ -1270,6 +1244,16 @@ impl RiskEngine {
             > self.max_crank_staleness_slots
         {
             return Err(RiskError::Unauthorized); // SweepStale
+        }
+        Ok(())
+    }
+
+    /// Check that no socialization debt is pending.
+    /// Blocks value extraction (withdraw, positive pnl warmup) while pending buckets non-zero.
+    /// This prevents users from withdrawing "unfunded" profit before socialization completes.
+    pub fn require_no_pending_socialization(&self) -> Result<()> {
+        if self.pending_profit_to_fund > 0 || self.pending_unpaid_loss > 0 {
+            return Err(RiskError::Unauthorized); // PendingSocialization
         }
         Ok(())
     }
@@ -1300,13 +1284,14 @@ impl RiskEngine {
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
 
-        // If starting a new sweep (step 0), record the start slot and reset top-K state
+        // If starting a new sweep (step 0), record the start slot and reset state
         if self.crank_step == 0 {
             self.last_full_sweep_start_slot = now_slot;
             // Reset top-K heap for new sweep
             self.topk_len = 0;
-            // Increment epoch (wrapping) - avoids O(MAX_ACCOUNTS) clear of topk_seen_epoch
+            // Increment epochs (wrapping) - avoids O(MAX_ACCOUNTS) clears
             self.topk_epoch = self.topk_epoch.wrapping_add(1);
+            self.pending_epoch = self.pending_epoch.wrapping_add(1);
         }
 
         // Accrue funding first (always)
@@ -1383,7 +1368,10 @@ impl RiskEngine {
             }
         }
 
-        // Garbage collect dust accounts with fixed 512 window
+        // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
+        self.socialization_step(window_start, window_len);
+
+        // Garbage collect dust accounts
         let num_gc_closed = self.garbage_collect_dust();
 
         // Advance crank step; when completing final step, record completion and wrap
@@ -2150,9 +2138,9 @@ impl RiskEngine {
         count
     }
 
-    /// Windowed liquidation scan with batched ADL.
+    /// Windowed liquidation scan with deferred socialization.
     /// Scans `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
-    /// Instead of calling ADL per-liquidation, defers ADL and runs 0-2 batched passes at end.
+    /// Accumulates profit/loss into pending buckets for bounded socialization.
     /// Updates cursor to resume from where we left off.
     /// Returns (num_checked, num_liquidated, num_errors).
     /// If any liquidation returns Err, sets risk_reduction_only = true.
@@ -2169,13 +2157,7 @@ impl RiskEngine {
         let start = self.liq_cursor as usize;
         // Cap to MAX_ACCOUNTS to avoid wrap-around
         let actual_checks = (max_checks as usize).min(MAX_ACCOUNTS);
-
-        // Batched ADL totals
-        let mut profit_total: u128 = 0;
-        let mut unpaid_total: u128 = 0;
-
-        // Track visited indices for clearing exclude scratch
-        // (We don't need a separate array - we clear as we iterate and set marks)
+        let epoch = self.pending_epoch;
 
         for offset in 0..actual_checks {
             if liquidated >= max_liqs {
@@ -2184,12 +2166,9 @@ impl RiskEngine {
 
             let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
-            // Clear exclude scratch for this index before potential use
-            self.adl_exclude_scratch[idx] = 0;
-
             // Check if slot is used
-            let block = idx / 64;
-            let bit = idx % 64;
+            let block = idx >> 6;
+            let bit = idx & 63;
             if (self.used[block] & (1u64 << bit)) == 0 {
                 continue; // Not used, skip
             }
@@ -2205,12 +2184,16 @@ impl RiskEngine {
             match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
                 Ok((true, deferred)) => {
                     liquidated += 1;
-                    // Accumulate deferred ADL amounts
-                    profit_total = profit_total.saturating_add(deferred.profit_to_fund);
-                    unpaid_total = unpaid_total.saturating_add(deferred.unpaid_loss);
-                    // Mark for exclusion from profit ADL if this account had profit
+                    // Accumulate into pending buckets (no ADL call)
+                    self.pending_profit_to_fund = self
+                        .pending_profit_to_fund
+                        .saturating_add(deferred.profit_to_fund);
+                    self.pending_unpaid_loss = self
+                        .pending_unpaid_loss
+                        .saturating_add(deferred.unpaid_loss);
+                    // Mark for exclusion from profit-funding
                     if deferred.excluded {
-                        self.adl_exclude_scratch[idx] = 1;
+                        self.pending_exclude_epoch[idx] = epoch;
                     }
                 }
                 Ok((false, _)) => {} // Not liquidatable, fine
@@ -2224,23 +2207,6 @@ impl RiskEngine {
 
         // Update cursor for next call (always advance by actual_checks)
         self.liq_cursor = ((start + actual_checks) & ACCOUNT_IDX_MASK) as u16;
-
-        // Batched ADL pass 1: Fund profits (excluding winners from haircutting themselves)
-        if profit_total > 0 {
-            // apply_adl_excluding_set uses adl_exclude_scratch to skip marked accounts
-            let _ = self.apply_adl_excluding_set(profit_total);
-            // Clear exclude marks for next potential use
-            // (Only clear visited indices to avoid full 4096 scan)
-            for offset in 0..actual_checks {
-                let idx = (start + offset) & ACCOUNT_IDX_MASK;
-                self.adl_exclude_scratch[idx] = 0;
-            }
-        }
-
-        // Batched ADL pass 2: Socialize unpaid losses (no exclusions)
-        if unpaid_total > 0 {
-            let _ = self.apply_adl(unpaid_total);
-        }
 
         (checked, liquidated, errors)
     }
@@ -2372,10 +2338,11 @@ impl RiskEngine {
         }
     }
 
-    /// Execute liquidations for selected top-K candidates with batched ADL.
+    /// Execute liquidations for selected top-K candidates.
     /// Returns (num_liquidated, num_errors).
     ///
-    /// Reads candidate indices from topk_idx[0..heap_len] (stable, never aliased by ADL).
+    /// Accumulates profit/loss into pending buckets for deferred socialization.
+    /// No global ADL scans - bounded by heap_len.
     fn run_top_liquidations(
         &mut self,
         now_slot: u64,
@@ -2388,10 +2355,7 @@ impl RiskEngine {
 
         let mut liquidated: u16 = 0;
         let mut errors: u16 = 0;
-
-        // Batched ADL totals
-        let mut profit_total: u128 = 0;
-        let mut unpaid_total: u128 = 0;
+        let epoch = self.pending_epoch;
 
         // Process each candidate (order doesn't matter)
         for i in 0..heap_len {
@@ -2403,17 +2367,20 @@ impl RiskEngine {
                 continue;
             }
 
-            // Clear exclude scratch for this index
-            self.adl_exclude_scratch[idx] = 0;
-
             // Attempt deferred liquidation (does full settlement + margin check)
             match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
                 Ok((true, deferred)) => {
                     liquidated += 1;
-                    profit_total = profit_total.saturating_add(deferred.profit_to_fund);
-                    unpaid_total = unpaid_total.saturating_add(deferred.unpaid_loss);
+                    // Accumulate into pending buckets (no ADL call)
+                    self.pending_profit_to_fund = self
+                        .pending_profit_to_fund
+                        .saturating_add(deferred.profit_to_fund);
+                    self.pending_unpaid_loss = self
+                        .pending_unpaid_loss
+                        .saturating_add(deferred.unpaid_loss);
+                    // Mark for exclusion from profit-funding
                     if deferred.excluded {
-                        self.adl_exclude_scratch[idx] = 1;
+                        self.pending_exclude_epoch[idx] = epoch;
                     }
                 }
                 Ok((false, _)) => {} // Not liquidatable (score was heuristic)
@@ -2424,22 +2391,69 @@ impl RiskEngine {
             }
         }
 
-        // Batched ADL pass 1: Fund profits (excluding winners)
-        if profit_total > 0 {
-            let _ = self.apply_adl_excluding_set(profit_total);
-            // Clear exclude marks using topk_idx (stable - ADL can't corrupt it)
-            for i in 0..heap_len {
-                let idx = self.topk_idx[i] as usize;
-                self.adl_exclude_scratch[idx] = 0;
+        (liquidated, errors)
+    }
+
+    // ========================================
+    // Bounded Socialization (replaces global ADL in crank)
+    // ========================================
+
+    /// Bounded socialization step: haircuts profits from WINDOW accounts.
+    ///
+    /// Applies pending profit-funding and loss socialization to accounts in
+    /// [start..start+len) window. Starvation-free because deterministic sweep
+    /// guarantees all accounts are eventually visited.
+    ///
+    /// Cost: O(len), bounded by WINDOW.
+    fn socialization_step(&mut self, start: usize, len: usize) {
+        let epoch = self.pending_epoch;
+
+        for offset in 0..len {
+            // Early exit if nothing left to socialize
+            if self.pending_profit_to_fund == 0 && self.pending_unpaid_loss == 0 {
+                break;
+            }
+
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+
+            // Compute unwrapped (withdrawable) PnL for this account
+            let unwrapped = self.withdrawable_pnl(&self.accounts[idx]);
+            if unwrapped == 0 {
+                continue;
+            }
+
+            let mut remaining = unwrapped;
+
+            // Pass 1: Profit funding (if not excluded)
+            if self.pending_profit_to_fund > 0 && self.pending_exclude_epoch[idx] != epoch {
+                let take = core::cmp::min(remaining, self.pending_profit_to_fund);
+                if take > 0 {
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_profit_to_fund =
+                        self.pending_profit_to_fund.saturating_sub(take);
+                    remaining = remaining.saturating_sub(take);
+                }
+            }
+
+            // Pass 2: Loss socialization (no exclusions)
+            if self.pending_unpaid_loss > 0 && remaining > 0 {
+                let take = core::cmp::min(remaining, self.pending_unpaid_loss);
+                if take > 0 {
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_unpaid_loss =
+                        self.pending_unpaid_loss.saturating_sub(take);
+                }
             }
         }
-
-        // Batched ADL pass 2: Socialize unpaid losses
-        if unpaid_total > 0 {
-            let _ = self.apply_adl(unpaid_total);
-        }
-
-        (liquidated, errors)
     }
 
     // ========================================
@@ -2723,6 +2737,10 @@ impl RiskEngine {
 
         // Require recent full sweep started
         self.require_recent_full_sweep(now_slot)?;
+
+        // Block withdrawals while socialization debt is pending
+        // This prevents extracting unfunded value
+        self.require_no_pending_socialization()?;
 
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
@@ -3305,8 +3323,11 @@ impl RiskEngine {
         let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
+        // SAFETY: Block positive conversion while socialization debt is pending
+        // This prevents converting unfunded profit to withdrawable capital
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
+            self.require_no_pending_socialization()?;
             let positive_pnl = pnl as u128;
             let reserved = self.accounts[idx as usize].reserved_pnl;
             let avail = positive_pnl.saturating_sub(reserved);

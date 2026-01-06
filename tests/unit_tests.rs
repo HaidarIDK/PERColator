@@ -5221,6 +5221,9 @@ fn test_gc_negative_pnl_socialized() {
     let counterparty = engine.add_user(0).unwrap();
     engine.deposit(counterparty, 1000).unwrap(); // Needs capital to exist
     engine.accounts[counterparty as usize].pnl = 500; // Counterparty gains
+    // Set warmup so PnL is withdrawable (needed for socialization to haircut)
+    engine.accounts[counterparty as usize].warmup_slope_per_step = 1000;
+    engine.accounts[counterparty as usize].warmup_started_at_slot = 0;
 
     // Now set user's negative PnL (zero-sum with counterparty)
     engine.accounts[user as usize].pnl = -500;
@@ -5230,7 +5233,7 @@ fn test_gc_negative_pnl_socialized() {
 
     assert!(engine.is_used(user as usize), "User should exist");
 
-    // Crank should socialize the loss (via ADL haircut on counterparty) and GC the account
+    // First crank: GC adds loss to pending bucket and frees account
     let outcome = engine.keeper_crank(u16::MAX, 100, 1_000_000, 0, false).unwrap();
 
     assert!(
@@ -5238,6 +5241,15 @@ fn test_gc_negative_pnl_socialized() {
         "User should be GC'd after loss socialization"
     );
     assert_eq!(outcome.num_gc_closed, 1, "Should have GC'd one account");
+
+    // Loss is now in pending bucket; run more cranks until socialization completes
+    // (socialization_step processes WINDOW accounts per crank)
+    for slot in 101..120 {
+        engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false).unwrap();
+        if engine.pending_unpaid_loss == 0 {
+            break;
+        }
+    }
 
     // Counterparty's positive PnL should be haircut by 500
     assert_eq!(
@@ -5279,7 +5291,7 @@ fn test_gc_with_position_not_collected() {
 #[test]
 fn test_batched_adl_profit_exclusion() {
     // Test: when liquidating an account with positive mark_pnl (profit from closing),
-    // that account should be excluded from funding its own profit via ADL.
+    // that account should be excluded from funding its own profit via ADL (socialization).
     let mut params = default_params();
     params.maintenance_margin_bps = 500;  // 5%
     params.initial_margin_bps = 1000;     // 10%
@@ -5291,21 +5303,24 @@ fn test_batched_adl_profit_exclusion() {
     let mut engine = RiskEngine::new(params);
     set_insurance(&mut engine, 100_000);
 
-    // Create two accounts that will be the ADL targets (they have positive REALIZED PnL)
-    // ADL can only haircut accounts with positive realized pnl, not unrealized gains.
-    // ADL target 1: has realized profit of 20,000
+    // Create two accounts that will be the socialization targets (they have positive REALIZED PnL)
+    // Socialization can only haircut accounts with positive withdrawable pnl.
+    // Target 1: has realized profit of 20,000
     let adl_target1 = engine.add_user(0).unwrap();
     engine.deposit(adl_target1, 50_000).unwrap();
     engine.accounts[adl_target1 as usize].pnl = 20_000; // Realized profit
-    // Note: For conservation, we need a counterparty with negative pnl
-    // This is handled by winner_liq below (it will have negative realized pnl after liquidation)
+    // Set warmup so PnL is withdrawable (needed for socialization to haircut)
+    engine.accounts[adl_target1 as usize].warmup_slope_per_step = 100_000;
+    engine.accounts[adl_target1 as usize].warmup_started_at_slot = 0;
 
-    // ADL target 2: Also has realized profit
+    // Target 2: Also has realized profit
     let adl_target2 = engine.add_user(0).unwrap();
     engine.deposit(adl_target2, 50_000).unwrap();
     engine.accounts[adl_target2 as usize].pnl = 20_000; // Realized profit
+    engine.accounts[adl_target2 as usize].warmup_slope_per_step = 100_000;
+    engine.accounts[adl_target2 as usize].warmup_started_at_slot = 0;
 
-    // Create a counterparty with negative pnl to balance the ADL targets (for conservation)
+    // Create a counterparty with negative pnl to balance the targets (for conservation)
     let counterparty = engine.add_user(0).unwrap();
     engine.deposit(counterparty, 100_000).unwrap();
     engine.accounts[counterparty as usize].pnl = -40_000; // Negative pnl balances targets
@@ -5339,27 +5354,36 @@ fn test_batched_adl_profit_exclusion() {
         "Conservation must hold before crank"
     );
 
-    // Run crank at oracle price 0.81
+    // Run crank at oracle price 0.81 - liquidation adds profit to pending bucket
     let outcome = engine.keeper_crank(u16::MAX, 1, 810_000, 0, false).unwrap();
 
-    // Verify conservation holds after
+    // Run additional cranks until socialization completes
+    // (socialization_step processes WINDOW accounts per crank)
+    for slot in 2..20 {
+        engine.keeper_crank(u16::MAX, slot, 810_000, 0, false).unwrap();
+        if engine.pending_profit_to_fund == 0 && engine.pending_unpaid_loss == 0 {
+            break;
+        }
+    }
+
+    // Verify conservation holds after socialization
     assert!(
         engine.check_conservation(),
         "Conservation must hold after batched liquidation"
     );
 
     // The liquidated account had positive mark_pnl (profit from closing).
-    // That profit should be funded by ADL from the other profitable accounts.
-    // Check that ADL targets were haircutted
+    // That profit should be funded by socialization from the other profitable accounts.
+    // Check that targets were haircutted
     let target1_pnl_after = engine.accounts[adl_target1 as usize].pnl;
     let target2_pnl_after = engine.accounts[adl_target2 as usize].pnl;
 
-    // At least one of the ADL targets should have been haircutted
+    // At least one of the targets should have been haircutted
     let total_haircut = (target1_pnl_before - target1_pnl_after)
         + (target2_pnl_before - target2_pnl_after);
     assert!(
         total_haircut > 0 || outcome.num_liquidations == 0,
-        "ADL targets should be haircutted to fund winner's profit (or no liquidation occurred)"
+        "Targets should be haircutted to fund winner's profit (or no liquidation occurred)"
     );
 }
 
