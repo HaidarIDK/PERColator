@@ -129,13 +129,13 @@ fn test_deposit_and_withdraw() {
 
     // Withdraw partial
     let v1 = vault_snapshot(&engine);
-    engine.withdraw(user_idx, 400, 0, 1_000_000).unwrap();
+    engine.withdraw(user_idx, 400, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 600);
     assert_vault_delta(&engine, v1, -400);
 
     // Withdraw rest
     let v2 = vault_snapshot(&engine);
-    engine.withdraw(user_idx, 600, 0, 1_000_000).unwrap();
+    engine.withdraw(user_idx, 600, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital, 0);
     assert_vault_delta(&engine, v2, -600);
 
@@ -150,7 +150,7 @@ fn test_withdraw_insufficient_balance() {
     engine.deposit(user_idx, 1000).unwrap();
 
     // Try to withdraw more than deposited
-    let result = engine.withdraw(user_idx, 1500, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1500, 0, 1_000_000, engine.crank_sweep);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
@@ -169,7 +169,7 @@ fn test_withdraw_principal_with_negative_pnl_should_fail() {
 
     // Trying to withdraw all principal would leave collateral = 0 + max(0, -800) = 0
     // This should fail because user has an open position
-    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000, engine.crank_sweep);
 
     assert!(
         result.is_err(),
@@ -256,7 +256,7 @@ fn test_withdraw_pnl_not_warmed_up() {
 
     // Try to withdraw more than principal + warmed up PNL
     // Since PNL hasn't warmed up, can only withdraw the 1000 principal
-    let result = engine.withdraw(user_idx, 1100, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1100, 0, 1_000_000, engine.crank_sweep);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 }
 
@@ -284,7 +284,7 @@ fn test_withdraw_with_warmed_up_pnl() {
 
     // Should be able to withdraw 1200 (1000 principal + 200 warmed PNL)
     // The function will automatically convert the 200 PNL to principal before withdrawal
-    engine.withdraw(user_idx, 1200, 0, 1_000_000).unwrap();
+    engine.withdraw(user_idx, 1200, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].pnl, 300); // 500 - 200 converted
     assert_eq!(engine.accounts[user_idx as usize].capital, 0); // 1000 + 200 - 1200
     assert_conserved(&engine);
@@ -315,7 +315,7 @@ fn test_conservation_simple() {
     assert!(engine.check_conservation());
 
     // Withdraw from user1's capital
-    engine.withdraw(user1, 500, 0, 1_000_000).unwrap();
+    engine.withdraw(user1, 500, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert!(engine.check_conservation());
 }
 
@@ -464,7 +464,7 @@ fn test_trading_opens_position() {
     let size = 1000i128;
 
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, size)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, size, engine.crank_sweep)
         .unwrap();
 
     // Check position opened
@@ -492,12 +492,12 @@ fn test_trading_realizes_pnl() {
 
     // Open long position at $1
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000, engine.crank_sweep)
         .unwrap();
 
     // Close position at $1.50 (50% profit)
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_500_000, -1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_500_000, -1000, engine.crank_sweep)
         .unwrap();
 
     // Check PNL realized (approximately)
@@ -519,7 +519,7 @@ fn test_user_isolation() {
     let user2_pnl_before = engine.accounts[user2 as usize].pnl;
 
     // Operate on user1
-    engine.withdraw(user1, 500, 0, 1_000_000).unwrap();
+    engine.withdraw(user1, 500, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert_eq!(engine.accounts[user1 as usize].pnl, 0);
     engine.accounts[user1 as usize].pnl = 300;
 
@@ -639,13 +639,13 @@ fn test_fee_accumulation() {
     let mut succeeded = 0usize;
     for _ in 0..10 {
         if engine
-            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 10_000)
+            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 10_000, engine.crank_sweep)
             .is_ok()
         {
             succeeded += 1;
         }
         if engine
-            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, -10_000)
+            .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, -10_000, engine.crank_sweep)
             .is_ok()
         {
             succeeded += 1;
@@ -931,7 +931,7 @@ fn test_funding_partial_close() {
     assert_conserved(&engine);
 
     // Open long position of 2M base units
-    let trade_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 2_000_000);
+    let trade_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 2_000_000, engine.crank_sweep);
     assert!(trade_result.is_ok(), "Trade should succeed");
 
     assert_eq!(engine.accounts[user_idx as usize].position_size, 2_000_000);
@@ -941,7 +941,7 @@ fn test_funding_partial_close() {
     engine.accrue_funding(1, 100_000_000, 10).unwrap();
 
     // Reduce position to 1M (close half)
-    let reduce_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -1_000_000);
+    let reduce_result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -1_000_000, engine.crank_sweep);
     assert!(reduce_result.is_ok(), "Partial close should succeed");
 
     // Position should be 1M now
@@ -976,7 +976,7 @@ fn test_funding_position_flip() {
 
     // Open long
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 1_000_000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, 1_000_000, engine.crank_sweep)
         .unwrap();
     assert_eq!(engine.accounts[user_idx as usize].position_size, 1_000_000);
 
@@ -988,7 +988,7 @@ fn test_funding_position_flip() {
 
     // Flip to short (trade -2M to go from +1M to -1M)
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -2_000_000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 100_000_000, -2_000_000, engine.crank_sweep)
         .unwrap();
 
     assert_eq!(engine.accounts[user_idx as usize].position_size, -1_000_000);
@@ -1147,7 +1147,7 @@ fn test_adl_protects_principal_during_warmup() {
     // The attacker can withdraw their principal + already-warmed PNL (which gets converted to capital)
     // But warmup is frozen, so the 45k that's still warming won't become available
     let total_withdrawable = attacker_principal + warmed_after_adl;
-    let withdraw_result = engine.withdraw(attacker, total_withdrawable, 0, 1_000_000);
+    let withdraw_result = engine.withdraw(attacker, total_withdrawable, 0, 1_000_000, engine.crank_sweep);
     assert!(
         withdraw_result.is_ok(),
         "Withdrawals of capital ARE allowed in risk mode"
@@ -1449,7 +1449,7 @@ fn test_proportional_haircut_on_withdrawal() {
     // Fair unwinding: Should get 80% regardless of order
     // Gets: 10,000 * 0.8 = 8,000
     let user1_balance_before = engine.accounts[user1 as usize].capital;
-    engine.withdraw(user1, 10_000, 0, 1_000_000).unwrap();
+    engine.withdraw(user1, 10_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let withdrawn = user1_balance_before - engine.accounts[user1 as usize].capital;
 
     assert_eq!(withdrawn, 8_000, "Should withdraw 80% due to haircut");
@@ -1458,7 +1458,7 @@ fn test_proportional_haircut_on_withdrawal() {
     // Fair unwinding: Also gets 80% (not less than user1)
     // Gets: 5,000 * 0.8 = 4,000
     let user2_balance_before = engine.accounts[user2 as usize].capital;
-    engine.withdraw(user2, 5_000, 0, 1_000_000).unwrap();
+    engine.withdraw(user2, 5_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let user2_withdrawn = user2_balance_before - engine.accounts[user2 as usize].capital;
 
     assert_eq!(user2_withdrawn, 4_000, "Should also get 80% (fair unwinding)");
@@ -1490,7 +1490,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     // User opens long position
     let matcher = NoOpMatcher;
     engine
-        .execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000)
+        .execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000, engine.crank_sweep)
         .unwrap();
     assert_eq!(engine.accounts[user as usize].position_size, 5_000);
 
@@ -1499,7 +1499,7 @@ fn test_closing_positions_allowed_in_withdrawal_mode() {
     assert!(engine.risk_reduction_only);
 
     // User can CLOSE position (reducing from 5000 to 0) in risk mode
-    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, -5_000);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, -5_000, engine.crank_sweep);
     assert!(result.is_ok(), "Closing position should be allowed");
     assert_eq!(engine.accounts[user as usize].position_size, 0);
 }
@@ -1524,7 +1524,7 @@ fn test_opening_positions_blocked_in_withdrawal_mode() {
 
     // User tries to open new position - should fail
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 1_000_000, 5_000, engine.crank_sweep);
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
 }
@@ -1577,7 +1577,7 @@ fn test_risk_mode_deposit_withdrawals_work() {
 
     // Withdraw 200 - should succeed (withdrawing from capital)
     let v0 = vault_snapshot(&engine);
-    let result = engine.withdraw(user, 200, 0, 1_000_000);
+    let result = engine.withdraw(user, 200, 0, 1_000_000, engine.crank_sweep);
     assert!(
         result.is_ok(),
         "Withdrawals of capital should work in risk mode"
@@ -1605,7 +1605,7 @@ fn test_risk_mode_pending_pnl_cannot_be_withdrawn() {
 
     // Try withdraw 1 - should fail with InsufficientBalance
     // because capital is 0 and warmup won't progress
-    let result = engine.withdraw(user, 1, 0, 1_000_000);
+    let result = engine.withdraw(user, 1, 0, 1_000_000, engine.crank_sweep);
     assert!(result.is_err(), "Should fail - no capital available");
     assert_eq!(result.unwrap_err(), RiskError::InsufficientBalance);
 }
@@ -1640,7 +1640,7 @@ fn test_risk_mode_already_warmed_pnl_withdrawable() {
 
     // Call withdraw(50)
     // Should convert 100 PNL to capital, then withdraw 50
-    let result = engine.withdraw(user, 50, 0, 1_000_000);
+    let result = engine.withdraw(user, 50, 0, 1_000_000, engine.crank_sweep);
     assert!(result.is_ok(), "Should succeed: {:?}", result);
 
     // Check: pnl reduced by 100, capital increased by 100 then decreased by 50
@@ -1670,7 +1670,7 @@ fn test_risk_increasing_trade_fails_in_risk_mode() {
 
     // Try to open position (0 -> +1, increases absolute exposure)
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, 1);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, 1, engine.crank_sweep);
 
     assert!(result.is_err(), "Risk-increasing trade should fail");
     assert_eq!(result.unwrap_err(), RiskError::RiskReductionOnlyMode);
@@ -1700,7 +1700,7 @@ fn test_reduce_only_trade_succeeds_in_risk_mode() {
 
     // Trade size -5 (reduces user from 10 to 5, LP from -10 to -5)
     let matcher = NoOpMatcher;
-    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, -5);
+    let result = engine.execute_trade(&matcher, lp, user, 0, 100_000_000, -5, engine.crank_sweep);
 
     assert!(result.is_ok(), "Reduce-only trade should succeed");
     assert_eq!(engine.accounts[user as usize].position_size, 5);
@@ -1788,7 +1788,7 @@ fn test_deposits_allowed_in_withdrawal_mode() {
     // So user2 can withdraw: 5k - 333 ≈ 4,667
 
     let user2_balance_before = engine.accounts[user2 as usize].capital;
-    engine.withdraw(user2, 5_000, 0, 1_000_000).unwrap();
+    engine.withdraw(user2, 5_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let user2_withdrawn = user2_balance_before - engine.accounts[user2 as usize].capital;
 
     // Should be less than full amount due to proportional haircut
@@ -1837,20 +1837,20 @@ fn test_fair_unwinding_scenario() {
 
     // Alice withdraws all (10k * 75% = 7.5k)
     let alice_before = engine.accounts[alice as usize].capital;
-    engine.withdraw(alice, 10_000, 0, 1_000_000).unwrap();
+    engine.withdraw(alice, 10_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let alice_got = alice_before - engine.accounts[alice as usize].capital;
     assert_eq!(alice_got, 7_500);
 
     // Bob withdraws all (20k * 75% = 15k)
     // Fair unwinding: haircut ratio stays 75% because we track withdrawn amounts
     let bob_before = engine.accounts[bob as usize].capital;
-    engine.withdraw(bob, 20_000, 0, 1_000_000).unwrap();
+    engine.withdraw(bob, 20_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let bob_got = bob_before - engine.accounts[bob as usize].capital;
     assert_eq!(bob_got, 15_000);
 
     // Charlie withdraws all (10k * 75% = 7.5k)
     let charlie_before = engine.accounts[charlie as usize].capital;
-    engine.withdraw(charlie, 10_000, 0, 1_000_000).unwrap();
+    engine.withdraw(charlie, 10_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     let charlie_got = charlie_before - engine.accounts[charlie as usize].capital;
     assert_eq!(charlie_got, 7_500);
 
@@ -1908,7 +1908,7 @@ fn test_lp_withdraw() {
 
     // withdraw converts warmed PNL to capital, then withdraws
     // After conversion: LP capital = 10,000 + 5,000 = 15,000
-    let result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000);
+    let result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000, engine.crank_sweep);
     assert!(result.is_ok(), "LP withdrawal should succeed: {:?}", result);
 
     // Withdrawal should reduce vault by 10,000
@@ -1942,10 +1942,10 @@ fn test_lp_withdraw_with_haircut() {
     engine.risk_reduction_only = true;
 
     // Both should get 75% haircut
-    let user_result = engine.withdraw(user_idx, 10_000, 0, 1_000_000);
+    let user_result = engine.withdraw(user_idx, 10_000, 0, 1_000_000, engine.crank_sweep);
     assert!(user_result.is_ok());
 
-    let lp_result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000);
+    let lp_result = engine.withdraw(lp_idx, 10_000, 0, 1_000_000, engine.crank_sweep);
     assert!(lp_result.is_ok());
 
     // Both should have withdrawn same proportion
@@ -3918,7 +3918,7 @@ fn api_sequence_conservation_smoke_test() {
 
     // Execute a trade (use size > 1000 to generate non-zero fee)
     engine
-        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000)
+        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000, engine.crank_sweep)
         .unwrap();
     assert_conserved(&engine);
 
@@ -3929,12 +3929,12 @@ fn api_sequence_conservation_smoke_test() {
 
     // Close the position (reduces risk)
     engine
-        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, -10_000)
+        .execute_trade(&MATCHER, lp, user, 0, 1_000_000, -10_000, engine.crank_sweep)
         .unwrap();
     assert_conserved(&engine);
 
     // Withdraw (should succeed since position is closed)
-    engine.withdraw(user, 1_000, 0, 1_000_000).unwrap();
+    engine.withdraw(user, 1_000, 0, 1_000_000, engine.crank_sweep).unwrap();
     assert_conserved(&engine);
 }
 
@@ -4387,7 +4387,7 @@ fn test_withdraw_rejected_when_closed_and_negative_pnl() {
     engine.vault = 10_000;
 
     // Attempt to withdraw full capital - should fail because losses must be realized first
-    let result = engine.withdraw(user_idx, 10_000, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 10_000, 0, 1_000_000, engine.crank_sweep);
 
     // The withdraw should fail with InsufficientBalance
     assert!(
@@ -4434,7 +4434,7 @@ fn test_withdraw_allows_remaining_principal_after_loss_realization() {
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
 
     // Withdraw remaining capital - should succeed
-    let result = engine.withdraw(user_idx, 1_000, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1_000, 0, 1_000_000, engine.crank_sweep);
     assert!(result.is_ok(), "Withdraw of remaining capital should succeed");
     assert_eq!(engine.accounts[user_idx as usize].capital, 0);
 }
@@ -4534,7 +4534,7 @@ fn test_withdraw_open_position_blocks_due_to_equity() {
     engine.vault = 150;
 
     // withdraw(60) should fail - loss settles first, then balance check fails
-    let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 60, 0, 1_000_000, engine.crank_sweep);
     assert!(
         result == Err(RiskError::InsufficientBalance),
         "withdraw(60) must fail: after settling 100 loss, capital=50 < 60"
@@ -4545,7 +4545,7 @@ fn test_withdraw_open_position_blocks_due_to_equity() {
     assert_eq!(engine.accounts[user_idx as usize].pnl, 0);
 
     // Try withdraw(40) - would leave 10 equity < 100 IM required
-    let result = engine.withdraw(user_idx, 40, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 40, 0, 1_000_000, engine.crank_sweep);
     assert!(
         result == Err(RiskError::Undercollateralized),
         "withdraw(40) must fail: new_equity=10 < IM=100"
@@ -4727,7 +4727,7 @@ fn test_withdraw_rejected_when_closed_and_negative_pnl_full_amount() {
 
     // Try to withdraw full original amount (1000)
     // After settle: capital = 1000 - 300 = 700, so withdrawing 1000 should fail
-    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1000, 0, 1_000_000, engine.crank_sweep);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 
     // Verify N1 invariant: after operation, pnl >= 0 || capital == 0
@@ -4748,7 +4748,7 @@ fn test_withdraw_allows_remaining_principal_after_loss_settlement() {
     engine.accounts[user_idx as usize].position_size = 0;
 
     // After settle: capital = 700. Withdraw 500 should succeed.
-    let result = engine.withdraw(user_idx, 500, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 500, 0, 1_000_000, engine.crank_sweep);
     assert!(result.is_ok());
 
     // Verify remaining capital
@@ -4771,7 +4771,7 @@ fn test_insolvent_account_blocks_any_withdrawal() {
 
     // After settle: capital = 0, pnl = -300 (remaining loss)
     // Any withdrawal should fail
-    let result = engine.withdraw(user_idx, 1, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 1, 0, 1_000_000, engine.crank_sweep);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
 
     // Verify N1 invariant: pnl < 0 implies capital == 0
@@ -4797,12 +4797,12 @@ fn test_withdraw_im_check_blocks_when_equity_below_im() {
 
     // withdraw(60): new_capital = 90, equity = 90 < 100 (IM)
     // Should fail with Undercollateralized
-    let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 60, 0, 1_000_000, engine.crank_sweep);
     assert_eq!(result, Err(RiskError::Undercollateralized));
 
     // withdraw(40): new_capital = 110, equity = 110 > 100 (IM)
     // Should succeed
-    let result2 = engine.withdraw(user_idx, 40, 0, 1_000_000);
+    let result2 = engine.withdraw(user_idx, 40, 0, 1_000_000, engine.crank_sweep);
     assert!(result2.is_ok());
 }
 

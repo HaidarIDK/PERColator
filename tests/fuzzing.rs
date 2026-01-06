@@ -617,7 +617,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.withdraw(idx, *amount, 0, 1_000_000);
+                let result = self.engine.withdraw(idx, *amount, 0, 1_000_000, engine.crank_sweep);
 
                 match result {
                     Ok(()) => {
@@ -723,7 +723,7 @@ impl FuzzState {
 
                 let result =
                     self.engine
-                        .execute_trade(&MATCHER, lp_idx, user_idx, 0, *oracle_price, *size);
+                        .execute_trade(&MATCHER, lp_idx, user_idx, 0, *oracle_price, *size, engine.crank_sweep);
 
                 match result {
                     Ok(_) => {
@@ -1680,7 +1680,7 @@ proptest! {
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw(user_idx, withdraw_amount, 0, 1_000_000);
+        let result = engine.withdraw(user_idx, withdraw_amount, 0, 1_000_000, engine.crank_sweep);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1709,7 +1709,7 @@ proptest! {
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw(user_idx, amount, 0, 1_000_000);
+            let _ = engine.withdraw(user_idx, amount, 0, 1_000_000, engine.crank_sweep);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1873,7 +1873,7 @@ fn conservation_uses_settled_pnl_regression() {
 
     // Execute trade to create positions
     engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000)
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, 1_000_000, 1000, engine.crank_sweep)
         .unwrap();
 
     // Accrue significant funding WITHOUT touching accounts
@@ -1965,7 +1965,7 @@ fn harness_rollback_simulation_test() {
     let expected_warmup_reserved = engine.warmup_insurance_reserved;
 
     // Try to withdraw more than available - will fail
-    let result = engine.withdraw(user_idx, 999_999, 0, 1_000_000);
+    let result = engine.withdraw(user_idx, 999_999, 0, 1_000_000, engine.crank_sweep);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"

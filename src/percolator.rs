@@ -339,6 +339,12 @@ pub struct RiskEngine {
     /// Cursor for garbage collection scan (wraps around MAX_ACCOUNTS)
     pub gc_cursor: u16,
 
+    /// Crank sweep counter - increments after 8 crank steps (full 4096 scan)
+    pub crank_sweep: u64,
+
+    /// Crank step within current sweep (0..7)
+    pub crank_step: u8,
+
     // ========================================
     // Slab Management
     // ========================================
@@ -615,6 +621,8 @@ impl RiskEngine {
             adl_idx_scratch: [0; MAX_ACCOUNTS],
             liq_cursor: 0,
             gc_cursor: 0,
+            crank_sweep: 0,
+            crank_step: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1070,7 +1078,7 @@ impl RiskEngine {
 
         // Pass 1: Collect dust candidates using windowed scan from gc_cursor
         let total_budget = GC_CLOSE_BUDGET as usize;
-        let max_scan = 256usize; // Bounded scan per crank
+        let max_scan = 512usize; // Fixed 512 window per crank step
         let start = self.gc_cursor as usize;
 
         for offset in 0..max_scan {
@@ -1241,12 +1249,9 @@ impl RiskEngine {
             (0, true) // No caller to settle, considered ok
         };
 
-        // Liquidation scan with bounded compute
-        // When advanced: larger budget (256 checks, 16 liqs) to catch up
-        // Otherwise: small budget (32 checks, 4 liqs) for timely response without DoS
-        let (liq_max_checks, liq_max_liqs) = if advanced { (256, 16) } else { (32, 4) };
+        // Liquidation scan with fixed 512 window (one step = 512 accounts)
         let (_liq_checked, liq_count) =
-            self.scan_and_liquidate_window(now_slot, oracle_price, liq_max_checks, liq_max_liqs);
+            self.scan_and_liquidate_window(now_slot, oracle_price, 512, 32);
         let num_liquidations = liq_count as u32;
 
         // Heavy actions run independent of caller settle success
@@ -1271,12 +1276,15 @@ impl RiskEngine {
             }
         }
 
-        // Garbage collect dust accounts (only when advanced to save compute)
-        let num_gc_closed = if advanced {
-            self.garbage_collect_dust()
-        } else {
-            0
-        };
+        // Garbage collect dust accounts with fixed 512 window
+        let num_gc_closed = self.garbage_collect_dust();
+
+        // Bump crank step; after 8 steps (full 4096 sweep), increment sweep counter
+        self.crank_step += 1;
+        if self.crank_step >= 8 {
+            self.crank_step = 0;
+            self.crank_sweep += 1;
+        }
 
         Ok(CrankOutcome {
             advanced,
@@ -2019,9 +2027,15 @@ impl RiskEngine {
         amount: u128,
         now_slot: u64,
         oracle_price: u64,
+        expected_sweep: u64,
     ) -> Result<()> {
-        // Require fresh crank before state-changing operations
+        // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
+
+        // Require sweep freshness (full scan completed since caller last checked)
+        if self.crank_sweep != expected_sweep {
+            return Err(RiskError::Unauthorized); // SweepMismatch
+        }
 
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
@@ -2146,8 +2160,9 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
         size: i128,
+        expected_sweep: u64,
     ) -> Result<()> {
-        // Require fresh crank before state-changing operations
+        // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
 
         // Validate indices
@@ -2173,6 +2188,10 @@ impl RiskEngine {
         let lp_inc = saturating_abs_i128(new_lp_pos) > saturating_abs_i128(old_lp_pos);
 
         if user_inc || lp_inc {
+            // Risk-increasing: require sweep freshness
+            if self.crank_sweep != expected_sweep {
+                return Err(RiskError::Unauthorized); // SweepMismatch
+            }
             self.enforce_op(OpClass::RiskIncrease)?;
         } else {
             self.enforce_op(OpClass::RiskReduce)?;
