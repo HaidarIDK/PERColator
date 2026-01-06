@@ -367,6 +367,18 @@ pub struct RiskEngine {
     pub adl_exclude_scratch: [u8; MAX_ACCOUNTS],
 
     // ========================================
+    // Top-K Liquidation Scratch (does NOT alias ADL scratch)
+    // ========================================
+    /// Heap of account indices for top-K liquidation selection
+    pub topk_idx: [u16; TOP_LIQ_K],
+
+    /// Scores for heap entries (parallel to topk_idx)
+    pub topk_score: [u128; TOP_LIQ_K],
+
+    /// Current heap size
+    pub topk_len: u16,
+
+    // ========================================
     // Crank Cursors (bounded scan support)
     // ========================================
     /// Cursor for liquidation scan (wraps around MAX_ACCOUNTS)
@@ -661,6 +673,9 @@ impl RiskEngine {
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
             adl_idx_scratch: [0; MAX_ACCOUNTS],
             adl_exclude_scratch: [0; MAX_ACCOUNTS],
+            topk_idx: [0; TOP_LIQ_K],
+            topk_score: [0; TOP_LIQ_K],
+            topk_len: 0,
             liq_cursor: 0,
             gc_cursor: 0,
             last_full_sweep_start_slot: 0,
@@ -1121,8 +1136,8 @@ impl RiskEngine {
 
         // Pass 1: Collect dust candidates using windowed scan from gc_cursor
         let total_budget = GC_CLOSE_BUDGET as usize;
-        // Fixed 512 window per crank step, capped to MAX_ACCOUNTS to avoid wrap-around
-        let max_scan = if 512 < MAX_ACCOUNTS { 512 } else { MAX_ACCOUNTS };
+        // Fixed WINDOW per crank step, capped to MAX_ACCOUNTS to avoid wrap-around
+        let max_scan = if WINDOW < MAX_ACCOUNTS { WINDOW } else { MAX_ACCOUNTS };
         let start = self.gc_cursor as usize;
 
         for offset in 0..max_scan {
@@ -2214,13 +2229,25 @@ impl RiskEngine {
     // Top-K Priority Liquidation (global selection + execution)
     // ========================================
 
-    /// Min-heap comparison: returns true if score at heap position a < score at b.
-    /// Uses adl_remainder_scratch to store scores for heap indices.
+    /// Min-heap comparison: returns true if heap position a < heap position b.
+    /// Uses topk_score for comparison with topk_idx as tie-breaker for determinism.
     #[inline]
     fn topk_heap_less(&self, a: usize, b: usize) -> bool {
-        let idx_a = self.adl_idx_scratch[a] as usize;
-        let idx_b = self.adl_idx_scratch[b] as usize;
-        self.adl_remainder_scratch[idx_a] < self.adl_remainder_scratch[idx_b]
+        let score_a = self.topk_score[a];
+        let score_b = self.topk_score[b];
+        if score_a != score_b {
+            score_a < score_b
+        } else {
+            // Tie-breaker: lower index wins (determinism)
+            self.topk_idx[a] < self.topk_idx[b]
+        }
+    }
+
+    /// Swap heap entries at positions i and j.
+    #[inline]
+    fn topk_swap(&mut self, i: usize, j: usize) {
+        self.topk_idx.swap(i, j);
+        self.topk_score.swap(i, j);
     }
 
     /// Sift up in min-heap (for insertion).
@@ -2229,7 +2256,7 @@ impl RiskEngine {
         while i > 0 {
             let parent = (i - 1) / 2;
             if self.topk_heap_less(i, parent) {
-                self.adl_idx_scratch.swap(i, parent);
+                self.topk_swap(i, parent);
                 i = parent;
             } else {
                 break;
@@ -2253,7 +2280,7 @@ impl RiskEngine {
             }
 
             if smallest != i {
-                self.adl_idx_scratch.swap(i, smallest);
+                self.topk_swap(i, smallest);
                 i = smallest;
             } else {
                 break;
@@ -2264,15 +2291,16 @@ impl RiskEngine {
     /// Select top-K liquidation candidates globally using cheap priority score.
     /// Returns heap_len (number of candidates selected).
     ///
-    /// Uses existing scratch arrays:
-    /// - adl_idx_scratch[0..heap_len] = heap of candidate indices
-    /// - adl_remainder_scratch[idx] = score for selected idx
+    /// Uses dedicated topk_* arrays (never aliases ADL scratch):
+    /// - topk_idx[0..heap_len] = min-heap of candidate account indices
+    /// - topk_score[0..heap_len] = scores for heap entries (parallel array)
+    /// - topk_len = number of candidates
     ///
-    /// This function does NOT mutate accounts - only fills scratch arrays.
+    /// This function does NOT mutate accounts - only fills topk_* arrays.
     /// A "wrong" top-K pick is harmless: real liquidation still checks margin.
     fn select_top_liquidations(&mut self, oracle_price: u64) -> usize {
-        let heap_size = TOP_LIQ_K.min(MAX_ACCOUNTS);
-        let mut heap_len: usize = 0;
+        // Reset heap
+        self.topk_len = 0;
 
         // Scan all used accounts via bitmap
         for block in 0..BITMAP_WORDS {
@@ -2297,34 +2325,35 @@ impl RiskEngine {
                     continue;
                 }
 
-                if heap_len < heap_size {
+                let heap_len = self.topk_len as usize;
+
+                if heap_len < TOP_LIQ_K {
                     // Heap not full: add directly
-                    self.adl_remainder_scratch[idx] = score;
-                    self.adl_idx_scratch[heap_len] = idx as u16;
-                    heap_len += 1;
-                    self.topk_sift_up(heap_len - 1);
+                    self.topk_idx[heap_len] = idx as u16;
+                    self.topk_score[heap_len] = score;
+                    self.topk_len += 1;
+                    self.topk_sift_up(heap_len);
                 } else {
                     // Heap full: check if new score beats minimum (root)
-                    let root_idx = self.adl_idx_scratch[0] as usize;
-                    let root_score = self.adl_remainder_scratch[root_idx];
+                    let root_score = self.topk_score[0];
 
                     if score > root_score {
                         // Replace root with new candidate
-                        self.adl_remainder_scratch[idx] = score;
-                        self.adl_idx_scratch[0] = idx as u16;
+                        self.topk_idx[0] = idx as u16;
+                        self.topk_score[0] = score;
                         self.topk_sift_down(0, heap_len);
                     }
                 }
             }
         }
 
-        heap_len
+        self.topk_len as usize
     }
 
     /// Execute liquidations for selected top-K candidates with batched ADL.
     /// Returns (num_liquidated, num_errors).
     ///
-    /// Reads candidate indices from adl_idx_scratch[0..heap_len].
+    /// Reads candidate indices from topk_idx[0..heap_len] (stable, never aliased by ADL).
     fn run_top_liquidations(
         &mut self,
         now_slot: u64,
@@ -2344,7 +2373,7 @@ impl RiskEngine {
 
         // Process each candidate (order doesn't matter)
         for i in 0..heap_len {
-            let idx = self.adl_idx_scratch[i] as usize;
+            let idx = self.topk_idx[i] as usize;
 
             // Clear exclude scratch for this index
             self.adl_exclude_scratch[idx] = 0;
@@ -2370,9 +2399,9 @@ impl RiskEngine {
         // Batched ADL pass 1: Fund profits (excluding winners)
         if profit_total > 0 {
             let _ = self.apply_adl_excluding_set(profit_total);
-            // Clear exclude marks using heap indices
+            // Clear exclude marks using topk_idx (stable - ADL can't corrupt it)
             for i in 0..heap_len {
-                let idx = self.adl_idx_scratch[i] as usize;
+                let idx = self.topk_idx[i] as usize;
                 self.adl_exclude_scratch[idx] = 0;
             }
         }
