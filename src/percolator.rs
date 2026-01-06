@@ -378,6 +378,16 @@ pub struct RiskEngine {
     /// Current heap size
     pub topk_len: u16,
 
+    /// Cursor for incremental top-K candidate discovery (advances with liq_cursor)
+    pub topk_cursor: u16,
+
+    /// Epoch counter for top-K deduplication (increments each sweep start)
+    pub topk_epoch: u8,
+
+    /// Per-account epoch marker to avoid duplicate inserts within a sweep
+    /// If topk_seen_epoch[idx] == topk_epoch, already considered this sweep
+    pub topk_seen_epoch: [u8; MAX_ACCOUNTS],
+
     // ========================================
     // Crank Cursors (bounded scan support)
     // ========================================
@@ -676,6 +686,9 @@ impl RiskEngine {
             topk_idx: [0; TOP_LIQ_K],
             topk_score: [0; TOP_LIQ_K],
             topk_len: 0,
+            topk_cursor: 0,
+            topk_epoch: 0,
+            topk_seen_epoch: [0; MAX_ACCOUNTS],
             liq_cursor: 0,
             gc_cursor: 0,
             last_full_sweep_start_slot: 0,
@@ -1287,9 +1300,13 @@ impl RiskEngine {
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
 
-        // If starting a new sweep (step 0), record the start slot
+        // If starting a new sweep (step 0), record the start slot and reset top-K state
         if self.crank_step == 0 {
             self.last_full_sweep_start_slot = now_slot;
+            // Reset top-K heap for new sweep
+            self.topk_len = 0;
+            // Increment epoch (wrapping) - avoids O(MAX_ACCOUNTS) clear of topk_seen_epoch
+            self.topk_epoch = self.topk_epoch.wrapping_add(1);
         }
 
         // Accrue funding first (always)
@@ -1327,15 +1344,18 @@ impl RiskEngine {
         };
 
         // Two-phase liquidation:
-        // Phase A: Global top-K selection + execution (O(N log K) cheap scan, then real liquidations)
-        let heap_len = self.select_top_liquidations(oracle_price);
-        let (top_liq_count, top_liq_errors) =
-            self.run_top_liquidations(now_slot, oracle_price, heap_len);
+        // Compute window parameters (shared by top-K build and deterministic sweep)
+        let window_start = self.liq_cursor as usize;
+        let window_len = WINDOW.min(MAX_ACCOUNTS);
 
-        // Phase B: Deterministic window sweep (starvation-proof, doesn't touch cursor from Phase A)
-        let actual_window = WINDOW.min(MAX_ACCOUNTS);
+        // Phase A: Incremental top-K build + execution (O(WINDOW log K), then real liquidations)
+        self.topk_build_step(oracle_price, window_start, window_len);
+        let (top_liq_count, top_liq_errors) =
+            self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize);
+
+        // Phase B: Deterministic window sweep (starvation-proof)
         let (_sweep_checked, sweep_liqs, sweep_errors) =
-            self.scan_and_liquidate_window(now_slot, oracle_price, actual_window as u16, actual_window as u16);
+            self.scan_and_liquidate_window(now_slot, oracle_price, window_len as u16, window_len as u16);
 
         // Combine liquidation counts
         let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
@@ -2288,66 +2308,68 @@ impl RiskEngine {
         }
     }
 
-    /// Select top-K liquidation candidates globally using cheap priority score.
-    /// Returns heap_len (number of candidates selected).
+    /// Incremental top-K candidate discovery for a window of accounts.
     ///
-    /// Uses dedicated topk_* arrays (never aliases ADL scratch):
-    /// - topk_idx[0..heap_len] = min-heap of candidate account indices
-    /// - topk_score[0..heap_len] = scores for heap entries (parallel array)
-    /// - topk_len = number of candidates
+    /// Scans [start..start+len) (wrapping), inserting candidates into topk_* heap.
+    /// Uses topk_epoch/topk_seen_epoch to avoid duplicate inserts within a sweep.
     ///
-    /// This function does NOT mutate accounts - only fills topk_* arrays.
+    /// Cost: O(len log K), bounded by WINDOW.
+    ///
+    /// This function does NOT reset the heap - caller must reset at sweep boundary.
     /// A "wrong" top-K pick is harmless: real liquidation still checks margin.
-    fn select_top_liquidations(&mut self, oracle_price: u64) -> usize {
-        // Reset heap
-        self.topk_len = 0;
+    fn topk_build_step(&mut self, oracle_price: u64, start: usize, len: usize) {
+        let epoch = self.topk_epoch;
 
-        // Scan all used accounts via bitmap
-        for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
+        for offset in 0..len {
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
+            // Check if slot is used via bitmap
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
 
-                // Super cheap early gate
-                if self.accounts[idx].position_size == 0 {
-                    continue;
-                }
+            // Super cheap early gate
+            if self.accounts[idx].position_size == 0 {
+                continue;
+            }
 
-                // Compute cheap priority score
-                let score = self.liq_priority_score(&self.accounts[idx], oracle_price);
-                if score == 0 {
-                    continue;
-                }
+            // Skip if already considered this sweep (epoch deduplication)
+            if self.topk_seen_epoch[idx] == epoch {
+                continue;
+            }
 
-                let heap_len = self.topk_len as usize;
+            // Compute cheap priority score
+            let score = self.liq_priority_score(&self.accounts[idx], oracle_price);
+            if score == 0 {
+                continue;
+            }
 
-                if heap_len < TOP_LIQ_K {
-                    // Heap not full: add directly
-                    self.topk_idx[heap_len] = idx as u16;
-                    self.topk_score[heap_len] = score;
-                    self.topk_len += 1;
-                    self.topk_sift_up(heap_len);
-                } else {
-                    // Heap full: check if new score beats minimum (root)
-                    let root_score = self.topk_score[0];
+            // Mark as seen this epoch
+            self.topk_seen_epoch[idx] = epoch;
 
-                    if score > root_score {
-                        // Replace root with new candidate
-                        self.topk_idx[0] = idx as u16;
-                        self.topk_score[0] = score;
-                        self.topk_sift_down(0, heap_len);
-                    }
+            // Insert into heap
+            let heap_len = self.topk_len as usize;
+
+            if heap_len < TOP_LIQ_K {
+                // Heap not full: add directly
+                self.topk_idx[heap_len] = idx as u16;
+                self.topk_score[heap_len] = score;
+                self.topk_len += 1;
+                self.topk_sift_up(heap_len);
+            } else {
+                // Heap full: check if new score beats minimum (root)
+                let root_score = self.topk_score[0];
+
+                if score > root_score {
+                    // Replace root with new candidate
+                    self.topk_idx[0] = idx as u16;
+                    self.topk_score[0] = score;
+                    self.topk_sift_down(0, heap_len);
                 }
             }
         }
-
-        self.topk_len as usize
     }
 
     /// Execute liquidations for selected top-K candidates with batched ADL.
@@ -2374,6 +2396,12 @@ impl RiskEngine {
         // Process each candidate (order doesn't matter)
         for i in 0..heap_len {
             let idx = self.topk_idx[i] as usize;
+
+            // Skip stale entries: account no longer used or position already closed
+            // (heap entries can become stale across multiple cranks within a sweep)
+            if !self.is_used(idx) || self.accounts[idx].position_size == 0 {
+                continue;
+            }
 
             // Clear exclude scratch for this index
             self.adl_exclude_scratch[idx] = 0;
