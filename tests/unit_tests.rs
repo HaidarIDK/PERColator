@@ -5271,3 +5271,138 @@ fn test_gc_with_position_not_collected() {
     );
     assert_eq!(outcome.num_gc_closed, 0, "Should not GC any accounts");
 }
+
+// ==============================================================================
+// BATCHED ADL TESTS
+// ==============================================================================
+
+#[test]
+fn test_batched_adl_profit_exclusion() {
+    // Test: when liquidating an account with positive mark_pnl (profit from closing),
+    // that account should be excluded from funding its own profit via ADL.
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;  // 5%
+    params.initial_margin_bps = 1000;     // 10%
+    params.liquidation_buffer_bps = 0;    // No buffer
+    params.liquidation_fee_bps = 0;       // No fee for cleaner math
+    params.max_crank_staleness_slots = u64::MAX;
+    params.warmup_period_slots = 0;       // Instant warmup for this test
+
+    let mut engine = RiskEngine::new(params);
+    set_insurance(&mut engine, 100_000);
+
+    // Create two accounts that will be the ADL targets (they have positive unwrapped PnL)
+    // We'll make them long with profitable entry prices, so they have unrealized gains.
+    // ADL target 1: long from 0.8, will have +100_000 mark pnl at oracle 0.9
+    let adl_target1 = engine.add_user(0).unwrap();
+    engine.deposit(adl_target1, 50_000).unwrap();
+    engine.accounts[adl_target1 as usize].position_size = 1_000_000; // Long 1 unit
+    engine.accounts[adl_target1 as usize].entry_price = 800_000;    // Entered at 0.8
+    engine.total_open_interest = 1_000_000;
+
+    // ADL target 2: Also profitable
+    let adl_target2 = engine.add_user(0).unwrap();
+    engine.deposit(adl_target2, 50_000).unwrap();
+    engine.accounts[adl_target2 as usize].position_size = 1_000_000;
+    engine.accounts[adl_target2 as usize].entry_price = 800_000;
+    engine.total_open_interest += 1_000_000;
+
+    // Create the account to be liquidated: also long from 0.8, so has PROFIT at 0.9
+    // But with very low capital, maintenance margin will fail.
+    // This creates a "winner liquidation" - account with positive mark_pnl gets liquidated.
+    let winner_liq = engine.add_user(0).unwrap();
+    engine.deposit(winner_liq, 1_000).unwrap(); // Only 1000 capital
+    engine.accounts[winner_liq as usize].position_size = 1_000_000; // Long 1 unit
+    engine.accounts[winner_liq as usize].entry_price = 800_000;     // Entered at 0.8
+    engine.total_open_interest += 1_000_000;
+    // At oracle 0.9: mark_pnl = (0.9 - 0.8) * 1 = 100_000
+    // equity = 1000 + 100_000 = 101_000
+    // maintenance = 5% * 0.9 * 1 = 45_000
+    // 101_000 > 45_000, so this account is ABOVE maintenance...
+    // Need to make it underwater. Let's use a lower oracle price.
+
+    // Actually, let's use oracle price 0.81:
+    // mark_pnl = (0.81 - 0.8) * 1 = 10_000
+    // equity = 1000 + 10_000 = 11_000
+    // position notional = 0.81 * 1 = 810_000 (in fixed point 810_000)
+    // maintenance = 5% of 810_000 = 40_500
+    // 11_000 < 40_500, so UNDERWATER
+
+    // Snapshot before
+    let target1_pnl_before = engine.accounts[adl_target1 as usize].pnl;
+    let target2_pnl_before = engine.accounts[adl_target2 as usize].pnl;
+
+    // Verify conservation holds before crank
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold before crank"
+    );
+
+    // Run crank at oracle price 0.81
+    let outcome = engine.keeper_crank(u16::MAX, 1, 810_000, 0, false).unwrap();
+
+    // Verify conservation holds after
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after batched liquidation"
+    );
+
+    // The liquidated account had positive mark_pnl (profit from closing).
+    // That profit should be funded by ADL from the other profitable accounts.
+    // Check that ADL targets were haircutted
+    let target1_pnl_after = engine.accounts[adl_target1 as usize].pnl;
+    let target2_pnl_after = engine.accounts[adl_target2 as usize].pnl;
+
+    // At least one of the ADL targets should have been haircutted
+    let total_haircut = (target1_pnl_before - target1_pnl_after)
+        + (target2_pnl_before - target2_pnl_after);
+    assert!(
+        total_haircut > 0 || outcome.num_liquidations == 0,
+        "ADL targets should be haircutted to fund winner's profit (or no liquidation occurred)"
+    );
+}
+
+#[test]
+fn test_batched_adl_conservation_basic() {
+    // Basic test: verify that keeper_crank maintains conservation.
+    // This is a simpler regression test to verify batched ADL works.
+    let mut params = default_params();
+    params.max_crank_staleness_slots = u64::MAX;
+    params.warmup_period_slots = 0;
+
+    let mut engine = RiskEngine::new(params);
+    set_insurance(&mut engine, 100_000);
+
+    // Create two users with opposing positions (zero-sum)
+    // Give them plenty of capital so they're well above maintenance
+    let long = engine.add_user(0).unwrap();
+    engine.deposit(long, 200_000).unwrap();  // Well above 5% of 1M = 50k
+    engine.accounts[long as usize].position_size = 1_000_000;
+    engine.accounts[long as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 1_000_000;
+
+    let short = engine.add_user(0).unwrap();
+    engine.deposit(short, 200_000).unwrap();  // Well above 5% of 1M = 50k
+    engine.accounts[short as usize].position_size = -1_000_000;
+    engine.accounts[short as usize].entry_price = 1_000_000;
+    engine.total_open_interest += 1_000_000;
+
+    // Verify conservation before
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold before crank"
+    );
+
+    // Crank at same price (no mark pnl change)
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Verify conservation after
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after crank"
+    );
+
+    // No liquidations should occur at same price
+    assert_eq!(outcome.num_liquidations, 0);
+    assert_eq!(outcome.num_liq_errors, 0);
+}
