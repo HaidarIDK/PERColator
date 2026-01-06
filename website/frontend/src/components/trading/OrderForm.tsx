@@ -351,12 +351,40 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-600 pointer-events-none">{coinV2}</span>
             </div>
+
+            {/* Quick Size Presets */}
+            <div className="flex gap-1">
+              {[25, 50, 75, 100].map((percent) => (
+                <button
+                  key={percent}
+                  type="button"
+                  onClick={() => {
+                    // Calculate size based on available balance (mock for now)
+                    const mockBalance = 1000; // USDC
+                    const effectivePrice = orderType === 'limit' ? parseFloat(price) || currentPrice : currentPrice;
+                    if (effectivePrice > 0) {
+                      const maxSize = mockBalance / effectivePrice;
+                      setSize((maxSize * percent / 100).toFixed(4));
+                    }
+                  }}
+                  className="flex-1 py-1 text-[10px] font-medium text-zinc-500 hover:text-zinc-300 hover:bg-white/5 rounded transition-colors"
+                >
+                  {percent}%
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Total Value */}
-          <div className="flex justify-between items-center px-1">
-            <span className="text-xs text-zinc-500">Total Value</span>
-            <span className="text-xs font-mono text-zinc-300">{totalValue} USDC</span>
+          {/* Total Value & Fees */}
+          <div className="space-y-1 px-1">
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-zinc-500">Total Value</span>
+              <span className="text-xs font-mono text-zinc-300">{totalValue} USDC</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] text-zinc-600">Est. Fee (0.1%)</span>
+              <span className="text-[10px] font-mono text-zinc-500">{(parseFloat(totalValue) * 0.001).toFixed(4)} USDC</span>
+            </div>
           </div>
 
           {/* Reserve Button */}
