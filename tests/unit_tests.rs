@@ -5291,37 +5291,38 @@ fn test_batched_adl_profit_exclusion() {
     let mut engine = RiskEngine::new(params);
     set_insurance(&mut engine, 100_000);
 
-    // Create two accounts that will be the ADL targets (they have positive unwrapped PnL)
-    // We'll make them long with profitable entry prices, so they have unrealized gains.
-    // ADL target 1: long from 0.8, will have +100_000 mark pnl at oracle 0.9
+    // Create two accounts that will be the ADL targets (they have positive REALIZED PnL)
+    // ADL can only haircut accounts with positive realized pnl, not unrealized gains.
+    // ADL target 1: has realized profit of 20,000
     let adl_target1 = engine.add_user(0).unwrap();
     engine.deposit(adl_target1, 50_000).unwrap();
-    engine.accounts[adl_target1 as usize].position_size = 1_000_000; // Long 1 unit
-    engine.accounts[adl_target1 as usize].entry_price = 800_000;    // Entered at 0.8
-    engine.total_open_interest = 1_000_000;
+    engine.accounts[adl_target1 as usize].pnl = 20_000; // Realized profit
+    // Note: For conservation, we need a counterparty with negative pnl
+    // This is handled by winner_liq below (it will have negative realized pnl after liquidation)
 
-    // ADL target 2: Also profitable
+    // ADL target 2: Also has realized profit
     let adl_target2 = engine.add_user(0).unwrap();
     engine.deposit(adl_target2, 50_000).unwrap();
-    engine.accounts[adl_target2 as usize].position_size = 1_000_000;
-    engine.accounts[adl_target2 as usize].entry_price = 800_000;
-    engine.total_open_interest += 1_000_000;
+    engine.accounts[adl_target2 as usize].pnl = 20_000; // Realized profit
 
-    // Create the account to be liquidated: also long from 0.8, so has PROFIT at 0.9
+    // Create a counterparty with negative pnl to balance the ADL targets (for conservation)
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(counterparty, 100_000).unwrap();
+    engine.accounts[counterparty as usize].pnl = -40_000; // Negative pnl balances targets
+
+    // Create the account to be liquidated: long from 0.8, so has PROFIT at 0.81
     // But with very low capital, maintenance margin will fail.
     // This creates a "winner liquidation" - account with positive mark_pnl gets liquidated.
     let winner_liq = engine.add_user(0).unwrap();
     engine.deposit(winner_liq, 1_000).unwrap(); // Only 1000 capital
     engine.accounts[winner_liq as usize].position_size = 1_000_000; // Long 1 unit
     engine.accounts[winner_liq as usize].entry_price = 800_000;     // Entered at 0.8
-    engine.total_open_interest += 1_000_000;
-    // At oracle 0.9: mark_pnl = (0.9 - 0.8) * 1 = 100_000
-    // equity = 1000 + 100_000 = 101_000
-    // maintenance = 5% * 0.9 * 1 = 45_000
-    // 101_000 > 45_000, so this account is ABOVE maintenance...
-    // Need to make it underwater. Let's use a lower oracle price.
+    // Counterparty short position for zero-sum
+    engine.accounts[counterparty as usize].position_size = -1_000_000;
+    engine.accounts[counterparty as usize].entry_price = 800_000;
+    engine.total_open_interest = 2_000_000; // Both positions counted
 
-    // Actually, let's use oracle price 0.81:
+    // At oracle 0.81:
     // mark_pnl = (0.81 - 0.8) * 1 = 10_000
     // equity = 1000 + 10_000 = 11_000
     // position notional = 0.81 * 1 = 810_000 (in fixed point 810_000)
@@ -5405,4 +5406,320 @@ fn test_batched_adl_conservation_basic() {
     // No liquidations should occur at same price
     assert_eq!(outcome.num_liquidations, 0);
     assert_eq!(outcome.num_liq_errors, 0);
+}
+
+#[test]
+fn test_two_phase_liquidation_priority_and_sweep() {
+    // Test the two-phase liquidation design:
+    // Phase A: Global priority liquidation of worst accounts (top-128)
+    // Phase B: Deterministic 256-window sweep
+    // Full sweep completes in 16 steps (16 * 256 = 4096)
+
+    use percolator::{NUM_STEPS, WINDOW};
+
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;  // 5%
+    params.initial_margin_bps = 1000;     // 10%
+    params.liquidation_buffer_bps = 0;
+    params.liquidation_fee_bps = 0;
+    params.max_crank_staleness_slots = u64::MAX;
+    params.warmup_period_slots = 0;
+
+    let mut engine = RiskEngine::new(params);
+    set_insurance(&mut engine, 1_000_000);
+
+    // Create several accounts with varying underwater amounts
+    // Priority liquidation should find the worst ones first
+
+    // Healthy counterparty to take other side of positions
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(counterparty, 10_000_000).unwrap();
+
+    // Create underwater accounts with different severities
+    // At oracle 1.0: maintenance = 5% of notional
+    // Account with position 1M needs 50k margin. Capital < 50k => underwater
+
+    // Mildly underwater (capital = 45k, needs 50k)
+    let mild = engine.add_user(0).unwrap();
+    engine.deposit(mild, 45_000).unwrap();
+    engine.accounts[mild as usize].position_size = 1_000_000;
+    engine.accounts[mild as usize].entry_price = 1_000_000;
+    engine.accounts[counterparty as usize].position_size -= 1_000_000;
+    engine.accounts[counterparty as usize].entry_price = 1_000_000;
+    engine.total_open_interest += 2_000_000;
+
+    // Severely underwater (capital = 10k, needs 50k)
+    let severe = engine.add_user(0).unwrap();
+    engine.deposit(severe, 10_000).unwrap();
+    engine.accounts[severe as usize].position_size = 1_000_000;
+    engine.accounts[severe as usize].entry_price = 1_000_000;
+    engine.accounts[counterparty as usize].position_size -= 1_000_000;
+    engine.total_open_interest += 2_000_000;
+
+    // Very severely underwater (capital = 1k, needs 50k)
+    let very_severe = engine.add_user(0).unwrap();
+    engine.deposit(very_severe, 1_000).unwrap();
+    engine.accounts[very_severe as usize].position_size = 1_000_000;
+    engine.accounts[very_severe as usize].entry_price = 1_000_000;
+    engine.accounts[counterparty as usize].position_size -= 1_000_000;
+    engine.total_open_interest += 2_000_000;
+
+    // Verify conservation before
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold before crank"
+    );
+
+    // Single crank should liquidate all underwater accounts via priority phase
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Verify conservation after
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after priority liquidation"
+    );
+
+    // All 3 underwater accounts should be liquidated (partially or fully)
+    assert!(
+        outcome.num_liquidations >= 3,
+        "Priority liquidation should find all underwater accounts: got {}",
+        outcome.num_liquidations
+    );
+
+    // Positions should be reduced (liquidation brings accounts back to margin)
+    // very_severe had 1k capital => can support ~20k notional at 5% margin
+    // severe had 10k capital => can support ~200k notional at 5% margin
+    // mild had 45k capital => can support ~900k notional at 5% margin
+    assert!(
+        engine.accounts[very_severe as usize].position_size < 100_000,
+        "very_severe position should be significantly reduced"
+    );
+    assert!(
+        engine.accounts[severe as usize].position_size < 500_000,
+        "severe position should be significantly reduced"
+    );
+    assert!(
+        engine.accounts[mild as usize].position_size < 1_000_000,
+        "mild position should be reduced"
+    );
+
+    // Test that full sweep completes in NUM_STEPS
+    assert_eq!(NUM_STEPS, 16, "NUM_STEPS should be 16");
+    assert_eq!(WINDOW, 256, "WINDOW should be 256");
+
+    // Initial crank_step should be 1 after first crank
+    assert_eq!(engine.crank_step, 1);
+
+    // Run remaining steps to complete sweep
+    for step in 2..=16 {
+        engine.keeper_crank(u16::MAX, step as u64, 1_000_000, 0, false).unwrap();
+    }
+
+    // After 16 cranks, should be back to step 0
+    assert_eq!(engine.crank_step, 0, "Crank step should wrap to 0 after 16 steps");
+
+    // last_full_sweep_completed_slot should be updated
+    assert_eq!(engine.last_full_sweep_completed_slot, 16);
+}
+
+#[test]
+fn test_force_realize_losses_conservation_with_profit_and_loss() {
+    // Test: force_realize_losses maintains conservation when there are:
+    // - An account with profit (from mark_pnl)
+    // - An account with loss (from mark_pnl)
+    // - The zero-sum property ensures profits are funded by losses
+
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Gate threshold
+
+    let mut engine = RiskEngine::new(params);
+
+    // Create two accounts with opposing positions
+    let winner = engine.add_user(0).unwrap();
+    engine.deposit(winner, 50_000).unwrap();
+    engine.accounts[winner as usize].position_size = 1_000_000; // Long
+    engine.accounts[winner as usize].entry_price = 900_000; // Entered at 0.9
+
+    let loser = engine.add_user(0).unwrap();
+    engine.deposit(loser, 50_000).unwrap();
+    engine.accounts[loser as usize].position_size = -1_000_000; // Short (counterparty)
+    engine.accounts[loser as usize].entry_price = 900_000;
+
+    engine.total_open_interest = 2_000_000;
+
+    // Set insurance at threshold (allows force_realize)
+    set_insurance(&mut engine, 1000);
+
+    // Verify conservation before
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold before force_realize"
+    );
+
+    // Record positions
+    let winner_pos_before = engine.accounts[winner as usize].position_size;
+    let loser_pos_before = engine.accounts[loser as usize].position_size;
+    assert_ne!(winner_pos_before, 0);
+    assert_ne!(loser_pos_before, 0);
+
+    // Oracle moves to 1.0 (up from 0.9)
+    // Winner (long): mark_pnl = (1.0 - 0.9) * 1 = +100_000
+    // Loser (short): mark_pnl = (0.9 - 1.0) * 1 = -100_000 (zero-sum!)
+    engine.force_realize_losses(1_000_000).unwrap();
+
+    // Both positions should be closed
+    assert_eq!(
+        engine.accounts[winner as usize].position_size, 0,
+        "Winner position should be closed"
+    );
+    assert_eq!(
+        engine.accounts[loser as usize].position_size, 0,
+        "Loser position should be closed"
+    );
+
+    // OI should be zero
+    assert_eq!(engine.total_open_interest, 0, "OI should be zero");
+
+    // Winner should have positive PnL (young, subject to ADL)
+    assert!(
+        engine.accounts[winner as usize].pnl > 0,
+        "Winner should have positive PnL: {}",
+        engine.accounts[winner as usize].pnl
+    );
+
+    // Conservation must hold - profits backed by losses (zero-sum)
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after force_realize - profits backed by losses"
+    );
+
+    // System should be in risk-reduction mode
+    assert!(engine.risk_reduction_only, "Should be in risk-reduction mode");
+}
+
+#[test]
+fn test_topk_selection_many_accounts_few_liquidatable() {
+    // Bench scenario: Many accounts with positions, but few actually liquidatable.
+    // Tests that the cheap O(N log K) selection doesn't blow compute.
+    // (In test mode MAX_ACCOUNTS=64, so we use proportional scaling)
+
+    use percolator::{MAX_ACCOUNTS, TOP_LIQ_K};
+
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500; // 5%
+    params.max_crank_staleness_slots = u64::MAX;
+
+    let mut engine = RiskEngine::new(params);
+    set_insurance(&mut engine, 1_000_000);
+
+    // Create accounts with positions - most are healthy, few are underwater
+    let num_accounts = MAX_ACCOUNTS.min(60); // Leave some slots for counterparty
+    let num_underwater = 5; // Only 5 are actually liquidatable
+
+    // Counterparty for opposing positions
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(counterparty, 100_000_000).unwrap();
+
+    let mut underwater_indices = Vec::new();
+
+    for i in 0..num_accounts {
+        let user = engine.add_user(0).unwrap();
+
+        if i < num_underwater {
+            // Underwater: low capital, will fail maintenance
+            engine.deposit(user, 1_000).unwrap();
+            underwater_indices.push(user);
+        } else {
+            // Healthy: plenty of capital
+            engine.deposit(user, 200_000).unwrap();
+        }
+
+        // All have positions
+        engine.accounts[user as usize].position_size = 1_000_000;
+        engine.accounts[user as usize].entry_price = 1_000_000;
+        engine.accounts[counterparty as usize].position_size -= 1_000_000;
+        engine.total_open_interest += 2_000_000;
+    }
+    engine.accounts[counterparty as usize].entry_price = 1_000_000;
+
+    // Verify conservation
+    assert!(engine.check_conservation(), "Conservation before crank");
+
+    // Run crank - should select top-K efficiently
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Verify conservation after
+    assert!(engine.check_conservation(), "Conservation after crank");
+
+    // Should have liquidated the underwater accounts
+    assert!(
+        outcome.num_liquidations >= num_underwater as u32,
+        "Should liquidate at least {} accounts, got {}",
+        num_underwater,
+        outcome.num_liquidations
+    );
+
+    // Verify underwater accounts got liquidated (positions reduced)
+    for &idx in &underwater_indices {
+        assert!(
+            engine.accounts[idx as usize].position_size < 1_000_000,
+            "Underwater account {} should have reduced position",
+            idx
+        );
+    }
+
+    // TOP_LIQ_K should be reasonable
+    assert_eq!(TOP_LIQ_K, 128, "TOP_LIQ_K should be 128");
+}
+
+#[test]
+fn test_topk_selection_many_liquidatable() {
+    // Bench scenario: Multiple liquidatable accounts with varying severity.
+    // Tests that the two-phase design (top-K + window) handles multiple liquidations.
+
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500; // 5%
+    params.max_crank_staleness_slots = u64::MAX;
+    params.warmup_period_slots = 0; // Instant warmup
+
+    let mut engine = RiskEngine::new(params);
+    set_insurance(&mut engine, 10_000_000);
+
+    // Create 10 underwater accounts with varying severities
+    let num_underwater = 10;
+
+    // Counterparty with lots of capital
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(counterparty, 100_000_000).unwrap();
+
+    // Create underwater accounts
+    for i in 0..num_underwater {
+        let user = engine.add_user(0).unwrap();
+        // Vary capital: 10_000 to 40_000 (underwater for 5% margin on 1M position = 50k needed)
+        let capital = 10_000 + (i as u128 * 3_000);
+        engine.deposit(user, capital).unwrap();
+        engine.accounts[user as usize].position_size = 1_000_000;
+        engine.accounts[user as usize].entry_price = 1_000_000;
+        engine.accounts[counterparty as usize].position_size -= 1_000_000;
+        engine.total_open_interest += 2_000_000;
+    }
+    engine.accounts[counterparty as usize].entry_price = 1_000_000;
+
+    // Verify conservation
+    assert!(engine.check_conservation(), "Conservation before crank");
+
+    // Run crank
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Verify conservation after
+    assert!(engine.check_conservation(), "Conservation after crank");
+
+    // Should have liquidated accounts (partial or full)
+    assert!(
+        outcome.num_liquidations > 0,
+        "Should liquidate some accounts"
+    );
+
+    // Liquidation may trigger errors if ADL waterfall exhausts resources,
+    // but the system should remain consistent
 }
