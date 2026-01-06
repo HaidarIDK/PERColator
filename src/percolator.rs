@@ -39,6 +39,8 @@ pub const MAX_ACCOUNTS: usize = 4096; // Production
 // Derived constants - all use size_of, no hardcoded values
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+/// Mask for wrapping indices (MAX_ACCOUNTS must be power of 2)
+const ACCOUNT_IDX_MASK: usize = MAX_ACCOUNTS - 1;
 
 /// Maximum number of dust accounts to close per crank call.
 /// Limits compute usage while still making progress on cleanup.
@@ -323,10 +325,6 @@ pub struct RiskEngine {
     /// Stored in slab to avoid stack allocation in production.
     /// Only meaningful for used accounts; others must be zeroed when not used.
     pub adl_remainder_scratch: [u128; MAX_ACCOUNTS],
-
-    /// Scratch: per-account "eligible" bit for ADL remainder distribution.
-    /// 0 = not eligible / already consumed; 1 = eligible.
-    pub adl_eligible_scratch: [u8; MAX_ACCOUNTS],
 
     /// Scratch: sorted index list for ADL remainder distribution.
     /// Used to avoid O(n²) largest-remainder selection.
@@ -614,7 +612,6 @@ impl RiskEngine {
             warmed_neg_total: 0,
             warmup_insurance_reserved: 0,
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
-            adl_eligible_scratch: [0; MAX_ACCOUNTS],
             adl_idx_scratch: [0; MAX_ACCOUNTS],
             liq_cursor: 0,
             gc_cursor: 0,
@@ -1071,63 +1068,67 @@ impl RiskEngine {
         let mut num_neg = 0usize;
         let mut total_unpaid: u128 = 0;
 
-        // Pass 1: Collect dust candidates (up to budget)
+        // Pass 1: Collect dust candidates using windowed scan from gc_cursor
         let total_budget = GC_CLOSE_BUDGET as usize;
-        'outer: for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
+        let max_scan = 256usize; // Bounded scan per crank
+        let start = self.gc_cursor as usize;
 
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
+        for offset in 0..max_scan {
+            // Budget check
+            if num_zero + num_neg >= total_budget {
+                break;
+            }
 
-                // Budget check (combined count)
-                if num_zero + num_neg >= total_budget {
-                    break 'outer;
-                }
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
-                let account = &self.accounts[idx];
+            // Check if slot is used via bitmap
+            let block = idx / 64;
+            let bit = idx % 64;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
 
-                // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
-                if account.position_size != 0 {
-                    continue;
-                }
-                if account.capital != 0 {
-                    continue;
-                }
-                if account.reserved_pnl != 0 {
-                    continue;
-                }
-                if account.pnl > 0 {
-                    continue;
-                }
-                // Funding must be settled to avoid unsettled-value footgun
-                if account.funding_index != self.funding_index_qpb_e6 {
-                    continue;
-                }
+            let account = &self.accounts[idx];
 
-                if account.pnl < 0 {
-                    // Track negative pnl for batched ADL
-                    let loss = neg_i128_to_u128(account.pnl);
-                    let new_total = total_unpaid.saturating_add(loss);
-                    // Saturation guard: stop collecting negative-pnl if saturated
-                    if new_total == total_unpaid && loss > 0 {
-                        break 'outer;
-                    }
-                    total_unpaid = new_total;
-                    neg_loss[num_neg] = loss;
-                    to_free_neg[num_neg] = idx as u16;
-                    num_neg += 1;
-                } else {
-                    // pnl == 0: always freeable
-                    to_free_zero[num_zero] = idx as u16;
-                    num_zero += 1;
+            // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
+            if account.position_size != 0 {
+                continue;
+            }
+            if account.capital != 0 {
+                continue;
+            }
+            if account.reserved_pnl != 0 {
+                continue;
+            }
+            if account.pnl > 0 {
+                continue;
+            }
+            // Funding must be settled to avoid unsettled-value footgun
+            if account.funding_index != self.funding_index_qpb_e6 {
+                continue;
+            }
+
+            if account.pnl < 0 {
+                // Track negative pnl for batched ADL
+                let loss = neg_i128_to_u128(account.pnl);
+                let new_total = total_unpaid.saturating_add(loss);
+                // Saturation guard: stop collecting negative-pnl if saturated
+                if new_total == total_unpaid && loss > 0 {
+                    break;
                 }
+                total_unpaid = new_total;
+                neg_loss[num_neg] = loss;
+                to_free_neg[num_neg] = idx as u16;
+                num_neg += 1;
+            } else {
+                // pnl == 0: always freeable
+                to_free_zero[num_zero] = idx as u16;
+                num_zero += 1;
             }
         }
+
+        // Update cursor for next call
+        self.gc_cursor = ((start + max_scan) & ACCOUNT_IDX_MASK) as u16;
 
         // Pass 2: Try batched ADL for negative-pnl accounts
         // IMPORTANT: Zero neg pnl BEFORE ADL to avoid double-counting loss in conservation.
@@ -1715,7 +1716,7 @@ impl RiskEngine {
                 break;
             }
 
-            let idx = (start + offset) % MAX_ACCOUNTS;
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
             // Check if slot is used
             let block = idx / 64;
@@ -1738,7 +1739,7 @@ impl RiskEngine {
         }
 
         // Update cursor for next call
-        self.liq_cursor = ((start + max_checks as usize) % MAX_ACCOUNTS) as u16;
+        self.liq_cursor = ((start + max_checks as usize) & ACCOUNT_IDX_MASK) as u16;
 
         (checked, liquidated)
     }
@@ -2734,7 +2735,9 @@ impl RiskEngine {
                         continue;
                     }
 
-                    let numer = loss_to_socialize.saturating_mul(unwrapped);
+                    let numer = loss_to_socialize
+                        .checked_mul(unwrapped)
+                        .ok_or(RiskError::Overflow)?;
                     let haircut = numer / total_unwrapped;
                     let rem = numer % total_unwrapped;
 
@@ -2742,9 +2745,9 @@ impl RiskEngine {
                         self.accounts[idx].pnl.saturating_sub(haircut as i128);
                     applied_from_pnl += haircut;
 
-                    // Store remainder; if non-zero, add to idx list for heap selection
-                    self.adl_remainder_scratch[idx] = rem;
+                    // Store remainder and add to idx list only if non-zero
                     if rem != 0 {
+                        self.adl_remainder_scratch[idx] = rem;
                         self.adl_idx_scratch[m] = idx as u16;
                         m += 1;
                     }
