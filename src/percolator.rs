@@ -429,6 +429,21 @@ pub struct RiskEngine {
     pub crank_step: u8,
 
     // ========================================
+    // LP Aggregates (O(1) maintained for funding/threshold)
+    // ========================================
+    /// Net LP position: sum of position_size across all LP accounts
+    /// Updated incrementally in execute_trade and close paths
+    pub net_lp_pos: i128,
+
+    /// Sum of abs(position_size) across all LP accounts
+    /// Updated incrementally in execute_trade and close paths
+    pub lp_sum_abs: u128,
+
+    /// Max abs(position_size) across all LP accounts (monotone upper bound)
+    /// Only increases; reset via bounded sweep at sweep completion
+    pub lp_max_abs: u128,
+
+    // ========================================
     // Slab Management
     // ========================================
     /// Occupancy bitmap (4096 bits = 64 u64 words)
@@ -719,6 +734,9 @@ impl RiskEngine {
             last_full_sweep_start_slot: 0,
             last_full_sweep_completed_slot: 0,
             crank_step: 0,
+            net_lp_pos: 0,
+            lp_sum_abs: 0,
+            lp_max_abs: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1729,6 +1747,13 @@ impl RiskEngine {
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx as usize].kind == AccountKind::LP {
+            self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
+            // lp_max_abs: can't decrease without full scan, leave as conservative upper bound
+        }
+
         // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
         let mut deferred = DeferredAdl::ZERO;
         if mark_pnl > 0 {
@@ -1828,14 +1853,25 @@ impl RiskEngine {
 
         // Update position: reduce by close_abs (maintain sign)
         let new_abs_pos = current_abs_pos.saturating_sub(close_abs);
-        self.accounts[idx as usize].position_size = if pos > 0 {
+        let new_pos = if pos > 0 {
             new_abs_pos as i128
         } else {
             -(new_abs_pos as i128)
         };
+        self.accounts[idx as usize].position_size = new_pos;
 
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
+
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx as usize].kind == AccountKind::LP {
+            // Partial close: delta = new_pos - old_pos
+            self.net_lp_pos = self.net_lp_pos
+                .saturating_sub(pos)
+                .saturating_add(new_pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(close_abs);
+            // lp_max_abs: can't decrease without full scan, leave as conservative upper bound
+        }
 
         // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
         let mut deferred = DeferredAdl::ZERO;
@@ -3170,6 +3206,22 @@ impl RiskEngine {
             self.total_open_interest = self.total_open_interest.saturating_sub(old_oi - new_oi);
         }
 
+        // Update LP aggregates for funding/threshold (O(1))
+        let old_lp_abs = saturating_abs_i128(old_lp_pos) as u128;
+        let new_lp_abs = saturating_abs_i128(new_lp_position) as u128;
+        // net_lp_pos: delta = new - old
+        self.net_lp_pos = self.net_lp_pos
+            .saturating_sub(old_lp_pos)
+            .saturating_add(new_lp_position);
+        // lp_sum_abs: delta of abs values
+        if new_lp_abs > old_lp_abs {
+            self.lp_sum_abs = self.lp_sum_abs.saturating_add(new_lp_abs - old_lp_abs);
+        } else {
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(old_lp_abs - new_lp_abs);
+        }
+        // lp_max_abs: monotone increase only (conservative upper bound)
+        self.lp_max_abs = self.lp_max_abs.max(new_lp_abs);
+
         // Update warmup slopes after PNL changes
         self.update_warmup_slope(user_idx)?;
         self.update_warmup_slope(lp_idx)?;
@@ -3304,6 +3356,38 @@ impl RiskEngine {
         } else {
             0
         }
+    }
+
+    // ========================================
+    // LP Aggregates (O(1) access for funding/threshold)
+    // ========================================
+
+    /// Net LP position: sum of position_size across all LP accounts.
+    /// Used for inventory-based funding rate calculation.
+    #[inline]
+    pub fn get_net_lp_pos(&self) -> i128 {
+        self.net_lp_pos
+    }
+
+    /// Sum of abs(position_size) across all LP accounts.
+    /// Used for risk threshold calculation.
+    #[inline]
+    pub fn get_lp_sum_abs(&self) -> u128 {
+        self.lp_sum_abs
+    }
+
+    /// Max abs(position_size) across all LP accounts (monotone upper bound).
+    /// May be conservative; only increases, reset via bounded sweep.
+    #[inline]
+    pub fn get_lp_max_abs(&self) -> u128 {
+        self.lp_max_abs
+    }
+
+    /// Compute LP risk units for threshold: max_abs + sum_abs/8.
+    /// This is O(1) using maintained aggregates.
+    #[inline]
+    pub fn compute_lp_risk_units(&self) -> u128 {
+        self.lp_max_abs.saturating_add(self.lp_sum_abs / 8)
     }
 
     /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
@@ -3827,6 +3911,11 @@ impl RiskEngine {
         self.pending_profit_to_fund = 0;
         self.pending_unpaid_loss = 0;
 
+        // Reset LP aggregates - all positions will be closed
+        self.net_lp_pos = 0;
+        self.lp_sum_abs = 0;
+        self.lp_max_abs = 0;
+
         // Accumulate total system loss from negative PNL after settlement
         let mut total_loss = 0u128;
         // Track sum of mark PNL to compensate for integer division rounding
@@ -3961,6 +4050,11 @@ impl RiskEngine {
 
         // Enter risk-reduction-only mode (freezes warmups)
         self.enter_risk_reduction_only_mode();
+
+        // Reset LP aggregates - all positions will be closed
+        self.net_lp_pos = 0;
+        self.lp_sum_abs = 0;
+        self.lp_max_abs = 0;
 
         // Track unpaid losses (capital exhausted) and rounding
         let mut unpaid_total: u128 = 0;
