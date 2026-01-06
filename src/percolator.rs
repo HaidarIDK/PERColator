@@ -524,10 +524,10 @@ pub struct CrankOutcome {
     pub slots_forgiven: u64,
     /// Whether caller's maintenance fee settle succeeded (false if undercollateralized)
     pub caller_settle_ok: bool,
-    /// Whether force_realize_losses was triggered
-    pub did_force_realize: bool,
-    /// Whether panic_settle_all was triggered
-    pub did_panic_settle: bool,
+    /// Whether force_realize_losses should be called (insurance depleted)
+    pub force_realize_needed: bool,
+    /// Whether panic_settle_all should be called (system in stress)
+    pub panic_needed: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
     /// Number of liquidation errors (triggers risk_reduction_only)
@@ -1378,25 +1378,22 @@ impl RiskEngine {
         let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
         let num_liq_errors = top_liq_errors.saturating_add(sweep_errors);
 
-        // Heavy actions run independent of caller settle success
-        let mut did_force_realize = false;
-        let mut did_panic_settle = false;
+        // Detect conditions that require heavy (O(N)) operations.
+        // The crank itself doesn't run them - caller should invoke separate instructions.
+        let mut force_realize_needed = false;
+        let mut panic_needed = false;
 
-        // Only run heavy actions when we actually advanced the crank
+        // Only flag heavy actions when we actually advanced the crank
         if advanced {
             if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-                // Insurance at or below floor - force realize losses
-                if self.force_realize_losses(oracle_price).is_ok() {
-                    did_force_realize = true;
-                }
+                // Insurance at or below floor - force realize losses needed
+                force_realize_needed = true;
             } else if (self.loss_accum > 0 || self.risk_reduction_only)
                 && allow_panic
                 && self.total_open_interest > 0
             {
-                // System in stress with open positions - panic settle
-                if self.panic_settle_all(oracle_price).is_ok() {
-                    did_panic_settle = true;
-                }
+                // System in stress with open positions - panic settle needed
+                panic_needed = true;
             }
         }
 
@@ -1417,8 +1414,8 @@ impl RiskEngine {
             advanced,
             slots_forgiven,
             caller_settle_ok,
-            did_force_realize,
-            did_panic_settle,
+            force_realize_needed,
+            panic_needed,
             num_liquidations,
             num_liq_errors,
             num_gc_closed,
