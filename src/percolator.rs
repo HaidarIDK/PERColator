@@ -342,6 +342,9 @@ pub struct RiskEngine {
     /// Slot when the current full sweep started (step 0 was executed)
     pub last_full_sweep_start_slot: u64,
 
+    /// Slot when the last full sweep completed (step 7 finished)
+    pub last_full_sweep_completed_slot: u64,
+
     /// Crank step within current sweep (0..7)
     pub crank_step: u8,
 
@@ -432,6 +435,8 @@ pub struct CrankOutcome {
     pub did_panic_settle: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
+    /// Number of liquidation errors (triggers risk_reduction_only)
+    pub num_liq_errors: u16,
     /// Number of dust accounts garbage collected during this crank
     pub num_gc_closed: u32,
 }
@@ -622,6 +627,7 @@ impl RiskEngine {
             liq_cursor: 0,
             gc_cursor: 0,
             last_full_sweep_start_slot: 0,
+            last_full_sweep_completed_slot: 0,
             crank_step: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
@@ -1078,7 +1084,8 @@ impl RiskEngine {
 
         // Pass 1: Collect dust candidates using windowed scan from gc_cursor
         let total_budget = GC_CLOSE_BUDGET as usize;
-        let max_scan = 512usize; // Fixed 512 window per crank step
+        // Fixed 512 window per crank step, capped to MAX_ACCOUNTS to avoid wrap-around
+        let max_scan = if 512 < MAX_ACCOUNTS { 512 } else { MAX_ACCOUNTS };
         let start = self.gc_cursor as usize;
 
         for offset in 0..max_scan {
@@ -1189,11 +1196,11 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Check if a recent full sweep has started.
-    /// For risk-increasing ops, we require a full 4096-index sweep started recently.
-    /// This prevents risk-increasing ops when only partial scans have occurred.
+    /// Check if a full sweep completed recently.
+    /// For risk-increasing ops, we require a complete 4096-index sweep finished recently.
+    /// This guarantees all accounts have been examined before allowing new risk.
     pub fn require_recent_full_sweep(&self, now_slot: u64) -> Result<()> {
-        if now_slot.saturating_sub(self.last_full_sweep_start_slot)
+        if now_slot.saturating_sub(self.last_full_sweep_completed_slot)
             > self.max_crank_staleness_slots
         {
             return Err(RiskError::Unauthorized); // SweepStale
@@ -1267,9 +1274,10 @@ impl RiskEngine {
         };
 
         // Liquidation scan with fixed 512 window (one step = 512 accounts)
-        let (_liq_checked, liq_count) =
-            self.scan_and_liquidate_window(now_slot, oracle_price, 512, 32);
+        let (_liq_checked, liq_count, liq_errors) =
+            self.scan_and_liquidate_window(now_slot, oracle_price, 512, 512);
         let num_liquidations = liq_count as u32;
+        let num_liq_errors = liq_errors;
 
         // Heavy actions run independent of caller settle success
         let mut did_force_realize = false;
@@ -1296,8 +1304,12 @@ impl RiskEngine {
         // Garbage collect dust accounts with fixed 512 window
         let num_gc_closed = self.garbage_collect_dust();
 
-        // Advance crank step (wraps after 8 steps = full 4096 sweep)
-        self.crank_step = (self.crank_step + 1) & 7;
+        // Advance crank step; when completing step 7, record completion and wrap
+        self.crank_step += 1;
+        if self.crank_step == 8 {
+            self.crank_step = 0;
+            self.last_full_sweep_completed_slot = now_slot;
+        }
 
         Ok(CrankOutcome {
             advanced,
@@ -1306,6 +1318,7 @@ impl RiskEngine {
             did_force_realize,
             did_panic_settle,
             num_liquidations,
+            num_liq_errors,
             num_gc_closed,
         })
     }
@@ -1718,21 +1731,25 @@ impl RiskEngine {
     }
 
     /// Windowed liquidation scan with bounded compute.
-    /// Scans up to `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
+    /// Scans `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
     /// Updates cursor to resume from where we left off.
-    /// Returns (num_checked, num_liquidated).
+    /// Returns (num_checked, num_liquidated, num_errors).
+    /// If any liquidation returns Err, sets risk_reduction_only = true.
     fn scan_and_liquidate_window(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
         max_checks: u16,
         max_liqs: u16,
-    ) -> (u16, u16) {
+    ) -> (u16, u16, u16) {
         let mut checked: u16 = 0;
         let mut liquidated: u16 = 0;
+        let mut errors: u16 = 0;
         let start = self.liq_cursor as usize;
+        // Cap to MAX_ACCOUNTS to avoid wrap-around
+        let actual_checks = (max_checks as usize).min(MAX_ACCOUNTS);
 
-        for offset in 0..(max_checks as usize) {
+        for offset in 0..actual_checks {
             if liquidated >= max_liqs {
                 break;
             }
@@ -1754,15 +1771,21 @@ impl RiskEngine {
             }
 
             // Attempt liquidation
-            if let Ok(true) = self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
-                liquidated += 1;
+            match self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
+                Ok(true) => liquidated += 1,
+                Ok(false) => {} // Not liquidatable, fine
+                Err(_) => {
+                    // Liquidation error - set risk reduction mode
+                    errors += 1;
+                    self.risk_reduction_only = true;
+                }
             }
         }
 
-        // Update cursor for next call
-        self.liq_cursor = ((start + max_checks as usize) & ACCOUNT_IDX_MASK) as u16;
+        // Update cursor for next call (always advance by actual_checks)
+        self.liq_cursor = ((start + actual_checks) & ACCOUNT_IDX_MASK) as u16;
 
-        (checked, liquidated)
+        (checked, liquidated, errors)
     }
 
     // ========================================
