@@ -1723,17 +1723,29 @@ impl RiskEngine {
             // DO NOT call apply_adl_excluding here
         }
 
-        // Settle warmup (realizes negative PnL from capital immediately, budgets positive)
-        self.settle_warmup_to_capital(idx)?;
+        // Handle negative PnL: pay from capital immediately, record unpaid remainder
+        // NOTE: We skip settle_warmup_to_capital for crank perf - do it inline for losses only
+        let pnl = self.accounts[idx as usize].pnl;
+        if pnl < 0 {
+            let need = neg_i128_to_u128(pnl);
+            let capital = self.accounts[idx as usize].capital;
+            let pay = core::cmp::min(need, capital);
 
-        // DEFERRED: Instead of calling apply_adl for unpaid loss, record it
-        let residual_pnl = self.accounts[idx as usize].pnl;
-        if residual_pnl < 0 {
-            deferred.unpaid_loss = neg_i128_to_u128(residual_pnl);
-            // Clamp pnl to 0 (same as original - loss is "extracted")
-            self.accounts[idx as usize].pnl = 0;
-            // DO NOT call apply_adl here
+            // Pay from capital
+            self.accounts[idx as usize].capital = capital.saturating_sub(pay);
+            self.accounts[idx as usize].pnl = pnl.saturating_add(pay as i128);
+
+            // Track paid losses in warmed_neg_total
+            self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
+
+            // Record unpaid portion as deferred loss
+            if need > pay {
+                deferred.unpaid_loss = need - pay;
+                // Clamp remaining negative PnL to zero
+                self.accounts[idx as usize].pnl = 0;
+            }
         }
+        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -1818,15 +1830,29 @@ impl RiskEngine {
             deferred.excluded = true;
         }
 
-        // Settle warmup
-        self.settle_warmup_to_capital(idx)?;
+        // Handle negative PnL: pay from capital immediately, record unpaid remainder
+        // NOTE: We skip settle_warmup_to_capital for crank perf - do it inline for losses only
+        let pnl = self.accounts[idx as usize].pnl;
+        if pnl < 0 {
+            let need = neg_i128_to_u128(pnl);
+            let capital = self.accounts[idx as usize].capital;
+            let pay = core::cmp::min(need, capital);
 
-        // DEFERRED: Handle residual negative PnL
-        let residual_pnl = self.accounts[idx as usize].pnl;
-        if residual_pnl < 0 {
-            deferred.unpaid_loss = neg_i128_to_u128(residual_pnl);
-            self.accounts[idx as usize].pnl = 0;
+            // Pay from capital
+            self.accounts[idx as usize].capital = capital.saturating_sub(pay);
+            self.accounts[idx as usize].pnl = pnl.saturating_add(pay as i128);
+
+            // Track paid losses in warmed_neg_total
+            self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
+
+            // Record unpaid portion as deferred loss
+            if need > pay {
+                deferred.unpaid_loss = need - pay;
+                // Clamp remaining negative PnL to zero
+                self.accounts[idx as usize].pnl = 0;
+            }
         }
+        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -2407,6 +2433,7 @@ impl RiskEngine {
     /// Cost: O(len), bounded by WINDOW.
     fn socialization_step(&mut self, start: usize, len: usize) {
         let epoch = self.pending_epoch;
+        let effective_slot = self.effective_warmup_slot();
 
         for offset in 0..len {
             // Early exit if nothing left to socialize
@@ -2423,8 +2450,8 @@ impl RiskEngine {
                 continue;
             }
 
-            // Compute unwrapped (withdrawable) PnL for this account
-            let unwrapped = self.withdrawable_pnl(&self.accounts[idx]);
+            // Compute unwrapped PnL for this account (subject to ADL haircuts)
+            let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
             if unwrapped == 0 {
                 continue;
             }
@@ -3323,11 +3350,10 @@ impl RiskEngine {
         let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
-        // SAFETY: Block positive conversion while socialization debt is pending
-        // This prevents converting unfunded profit to withdrawable capital
+        // NOTE: Caller (e.g., withdraw) checks require_no_pending_socialization()
+        // We don't block here to allow panic_settle_all and deposits to proceed
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
-            self.require_no_pending_socialization()?;
             let positive_pnl = pnl as u128;
             let reserved = self.accounts[idx as usize].reserved_pnl;
             let avail = positive_pnl.saturating_sub(reserved);

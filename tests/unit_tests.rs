@@ -5221,8 +5221,8 @@ fn test_gc_negative_pnl_socialized() {
     let counterparty = engine.add_user(0).unwrap();
     engine.deposit(counterparty, 1000).unwrap(); // Needs capital to exist
     engine.accounts[counterparty as usize].pnl = 500; // Counterparty gains
-    // Set warmup so PnL is withdrawable (needed for socialization to haircut)
-    engine.accounts[counterparty as usize].warmup_slope_per_step = 1000;
+    // Keep PnL unwrapped (not warmed) so socialization can haircut it
+    engine.accounts[counterparty as usize].warmup_slope_per_step = 0;
     engine.accounts[counterparty as usize].warmup_started_at_slot = 0;
 
     // Now set user's negative PnL (zero-sum with counterparty)
@@ -5304,20 +5304,20 @@ fn test_batched_adl_profit_exclusion() {
     set_insurance(&mut engine, 100_000);
 
     // Create two accounts that will be the socialization targets (they have positive REALIZED PnL)
-    // Socialization can only haircut accounts with positive withdrawable pnl.
+    // Socialization haircuts unwrapped PnL (not yet warmed), so keep slope=0.
     // Target 1: has realized profit of 20,000
     let adl_target1 = engine.add_user(0).unwrap();
     engine.deposit(adl_target1, 50_000).unwrap();
     engine.accounts[adl_target1 as usize].pnl = 20_000; // Realized profit
-    // Set warmup so PnL is withdrawable (needed for socialization to haircut)
-    engine.accounts[adl_target1 as usize].warmup_slope_per_step = 100_000;
+    // Keep PnL unwrapped (not warmed) so socialization can haircut it
+    engine.accounts[adl_target1 as usize].warmup_slope_per_step = 0;
     engine.accounts[adl_target1 as usize].warmup_started_at_slot = 0;
 
     // Target 2: Also has realized profit
     let adl_target2 = engine.add_user(0).unwrap();
     engine.deposit(adl_target2, 50_000).unwrap();
     engine.accounts[adl_target2 as usize].pnl = 20_000; // Realized profit
-    engine.accounts[adl_target2 as usize].warmup_slope_per_step = 100_000;
+    engine.accounts[adl_target2 as usize].warmup_slope_per_step = 0;
     engine.accounts[adl_target2 as usize].warmup_started_at_slot = 0;
 
     // Create a counterparty with negative pnl to balance the targets (for conservation)
