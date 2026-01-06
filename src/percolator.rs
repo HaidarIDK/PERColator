@@ -39,10 +39,22 @@ pub const MAX_ACCOUNTS: usize = 4096; // Production
 // Derived constants - all use size_of, no hardcoded values
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+/// Mask for wrapping indices (MAX_ACCOUNTS must be power of 2)
+const ACCOUNT_IDX_MASK: usize = MAX_ACCOUNTS - 1;
 
 /// Maximum number of dust accounts to close per crank call.
 /// Limits compute usage while still making progress on cleanup.
 pub const GC_CLOSE_BUDGET: u32 = 32;
+
+/// Number of crank steps to complete a full sweep (16 steps × 256 = 4096)
+pub const NUM_STEPS: u8 = 16;
+
+/// Accounts scanned per crank step in the deterministic sweep
+pub const WINDOW: usize = 256;
+
+/// Number of priority liquidations per crank (global top-K worst)
+/// Selection is O(N log K) using min-heap
+pub const TOP_LIQ_K: usize = 128;
 
 // ============================================================================
 // Core Data Structures
@@ -190,6 +202,27 @@ pub struct ClosedOutcome {
     pub position_was_closed: bool,
 }
 
+/// Deferred ADL result from liquidation (internal, for batched ADL).
+/// Instead of calling ADL immediately during liquidation, we collect
+/// these totals and run 0-2 batched ADL passes after the window scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeferredAdl {
+    /// Sum of mark_pnl > 0 that needs funding via ADL (excluding this account)
+    profit_to_fund: u128,
+    /// Residual negative PnL after capital settlement (needs socialization)
+    unpaid_loss: u128,
+    /// True if this account had profit_to_fund > 0 (should be excluded from profit ADL)
+    excluded: bool,
+}
+
+impl DeferredAdl {
+    const ZERO: Self = Self {
+        profit_to_fund: 0,
+        unpaid_loss: 0,
+        excluded: false,
+    };
+}
+
 /// Risk engine parameters
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,9 +357,67 @@ pub struct RiskEngine {
     /// Only meaningful for used accounts; others must be zeroed when not used.
     pub adl_remainder_scratch: [u128; MAX_ACCOUNTS],
 
-    /// Scratch: per-account "eligible" bit for ADL remainder distribution.
-    /// 0 = not eligible / already consumed; 1 = eligible.
-    pub adl_eligible_scratch: [u8; MAX_ACCOUNTS],
+    /// Scratch: sorted index list for ADL remainder distribution.
+    /// Used to avoid O(n²) largest-remainder selection.
+    pub adl_idx_scratch: [u16; MAX_ACCOUNTS],
+
+    /// Scratch: per-account exclusion flags for batched ADL during liquidation.
+    /// Set to 1 for accounts that should be excluded from profit-funding ADL pass.
+    /// Only meaningful for indices visited in current window; cleared per-window.
+    pub adl_exclude_scratch: [u8; MAX_ACCOUNTS],
+
+    // ========================================
+    // Top-K Liquidation Scratch (does NOT alias ADL scratch)
+    // ========================================
+    /// Heap of account indices for top-K liquidation selection
+    pub topk_idx: [u16; TOP_LIQ_K],
+
+    /// Scores for heap entries (parallel to topk_idx)
+    pub topk_score: [u128; TOP_LIQ_K],
+
+    /// Current heap size
+    pub topk_len: u16,
+
+    /// Epoch counter for top-K deduplication (increments each sweep start)
+    pub topk_epoch: u8,
+
+    /// Per-account epoch marker to avoid duplicate inserts within a sweep
+    /// If topk_seen_epoch[idx] == topk_epoch, already considered this sweep
+    pub topk_seen_epoch: [u8; MAX_ACCOUNTS],
+
+    // ========================================
+    // Deferred Socialization Buckets (replaces global ADL)
+    // ========================================
+    /// Accumulated profit-funding needs from liquidations (mark_pnl > 0)
+    pub pending_profit_to_fund: u128,
+
+    /// Accumulated unpaid losses from liquidations (capital exhausted)
+    pub pending_unpaid_loss: u128,
+
+    /// Epoch for exclusion deduplication (increments each sweep start)
+    pub pending_epoch: u8,
+
+    /// Per-account exclusion epoch marker for profit-funding
+    /// If pending_exclude_epoch[idx] == pending_epoch, exclude from paying own profit
+    pub pending_exclude_epoch: [u8; MAX_ACCOUNTS],
+
+    // ========================================
+    // Crank Cursors (bounded scan support)
+    // ========================================
+    /// Cursor for liquidation scan (wraps around MAX_ACCOUNTS)
+    pub liq_cursor: u16,
+
+    /// Cursor for garbage collection scan (wraps around MAX_ACCOUNTS)
+    pub gc_cursor: u16,
+
+    /// Slot when the current full sweep started (step 0 was executed)
+    pub last_full_sweep_start_slot: u64,
+
+    /// Slot when the last full sweep completed (step 7 finished)
+    pub last_full_sweep_completed_slot: u64,
+
+    /// Crank step within current sweep (0..7)
+    pub crank_step: u8,
 
     // ========================================
     // Slab Management
@@ -415,6 +506,8 @@ pub struct CrankOutcome {
     pub did_panic_settle: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
+    /// Number of liquidation errors (triggers risk_reduction_only)
+    pub num_liq_errors: u16,
     /// Number of dust accounts garbage collected during this crank
     pub num_gc_closed: u32,
 }
@@ -601,7 +694,22 @@ impl RiskEngine {
             warmed_neg_total: 0,
             warmup_insurance_reserved: 0,
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
-            adl_eligible_scratch: [0; MAX_ACCOUNTS],
+            adl_idx_scratch: [0; MAX_ACCOUNTS],
+            adl_exclude_scratch: [0; MAX_ACCOUNTS],
+            topk_idx: [0; TOP_LIQ_K],
+            topk_score: [0; TOP_LIQ_K],
+            topk_len: 0,
+            topk_epoch: 0,
+            topk_seen_epoch: [0; MAX_ACCOUNTS],
+            pending_profit_to_fund: 0,
+            pending_unpaid_loss: 0,
+            pending_epoch: 0,
+            pending_exclude_epoch: [0; MAX_ACCOUNTS],
+            liq_cursor: 0,
+            gc_cursor: 0,
+            last_full_sweep_start_slot: 0,
+            last_full_sweep_completed_slot: 0,
+            crank_step: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1047,108 +1155,71 @@ impl RiskEngine {
     ///
     /// Returns the number of accounts closed.
     pub fn garbage_collect_dust(&mut self) -> u32 {
-        // Two separate lists: zero-pnl (always freeable) vs negative-pnl (needs ADL)
-        let mut to_free_zero: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut to_free_neg: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut neg_loss: [u128; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
-        let mut num_zero = 0usize;
-        let mut num_neg = 0usize;
-        let mut total_unpaid: u128 = 0;
+        // Collect dust candidates: accounts with zero position, capital, reserved, and non-positive pnl
+        let mut to_free: [u16; GC_CLOSE_BUDGET as usize] = [0; GC_CLOSE_BUDGET as usize];
+        let mut num_to_free = 0usize;
 
-        // Pass 1: Collect dust candidates (up to budget)
-        let total_budget = GC_CLOSE_BUDGET as usize;
-        'outer: for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
+        // Fixed WINDOW per crank step, capped to MAX_ACCOUNTS to avoid wrap-around
+        let max_scan = if WINDOW < MAX_ACCOUNTS { WINDOW } else { MAX_ACCOUNTS };
+        let start = self.gc_cursor as usize;
 
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
-
-                // Budget check (combined count)
-                if num_zero + num_neg >= total_budget {
-                    break 'outer;
-                }
-
-                let account = &self.accounts[idx];
-
-                // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
-                if account.position_size != 0 {
-                    continue;
-                }
-                if account.capital != 0 {
-                    continue;
-                }
-                if account.reserved_pnl != 0 {
-                    continue;
-                }
-                if account.pnl > 0 {
-                    continue;
-                }
-                // Funding must be settled to avoid unsettled-value footgun
-                if account.funding_index != self.funding_index_qpb_e6 {
-                    continue;
-                }
-
-                if account.pnl < 0 {
-                    // Track negative pnl for batched ADL
-                    let loss = neg_i128_to_u128(account.pnl);
-                    let new_total = total_unpaid.saturating_add(loss);
-                    // Saturation guard: stop collecting negative-pnl if saturated
-                    if new_total == total_unpaid && loss > 0 {
-                        break 'outer;
-                    }
-                    total_unpaid = new_total;
-                    neg_loss[num_neg] = loss;
-                    to_free_neg[num_neg] = idx as u16;
-                    num_neg += 1;
-                } else {
-                    // pnl == 0: always freeable
-                    to_free_zero[num_zero] = idx as u16;
-                    num_zero += 1;
-                }
-            }
-        }
-
-        // Pass 2: Try batched ADL for negative-pnl accounts
-        // IMPORTANT: Zero neg pnl BEFORE ADL to avoid double-counting loss in conservation.
-        // The loss is "extracted" from per-account ledger, then routed through ADL waterfall.
-        let mut adl_ok = true;
-        if total_unpaid > 0 {
-            // Zero the negative pnls first
-            for i in 0..num_neg {
-                self.accounts[to_free_neg[i] as usize].pnl = 0;
+        for offset in 0..max_scan {
+            // Budget check
+            if num_to_free >= GC_CLOSE_BUDGET as usize {
+                break;
             }
 
-            if self.apply_adl(total_unpaid).is_err() {
-                // Restore negative pnls on failure for transactional consistency
-                for i in 0..num_neg {
-                    self.accounts[to_free_neg[i] as usize].pnl = -(neg_loss[i] as i128);
-                }
-                adl_ok = false;
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used via bitmap
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
             }
-        }
 
-        let mut freed = 0u32;
+            let account = &self.accounts[idx];
 
-        // Pass 3a: Always free zero-pnl accounts
-        for i in 0..num_zero {
-            self.free_slot(to_free_zero[i]);
-            freed += 1;
-        }
-
-        // Pass 3b: Only free negative-pnl accounts if ADL succeeded
-        if adl_ok && num_neg > 0 {
-            for i in 0..num_neg {
-                self.free_slot(to_free_neg[i]);
-                freed += 1;
+            // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
+            if account.position_size != 0 {
+                continue;
             }
+            if account.capital != 0 {
+                continue;
+            }
+            if account.reserved_pnl != 0 {
+                continue;
+            }
+            if account.pnl > 0 {
+                continue;
+            }
+            // Funding must be settled to avoid unsettled-value footgun
+            if account.funding_index != self.funding_index_qpb_e6 {
+                continue;
+            }
+
+            // Handle negative pnl by adding to pending bucket (no global ADL)
+            if account.pnl < 0 {
+                let loss = neg_i128_to_u128(account.pnl);
+                self.pending_unpaid_loss = self.pending_unpaid_loss.saturating_add(loss);
+                // Zero the pnl so account becomes true dust
+                self.accounts[idx].pnl = 0;
+            }
+
+            // Queue for freeing
+            to_free[num_to_free] = idx as u16;
+            num_to_free += 1;
         }
 
-        freed
+        // Update cursor for next call
+        self.gc_cursor = ((start + max_scan) & ACCOUNT_IDX_MASK) as u16;
+
+        // Free all collected dust accounts
+        for i in 0..num_to_free {
+            self.free_slot(to_free[i]);
+        }
+
+        num_to_free as u32
     }
 
     // ========================================
@@ -1160,6 +1231,29 @@ impl RiskEngine {
     pub fn require_fresh_crank(&self, now_slot: u64) -> Result<()> {
         if now_slot.saturating_sub(self.last_crank_slot) > self.max_crank_staleness_slots {
             return Err(RiskError::Unauthorized); // NeedsCrank
+        }
+        Ok(())
+    }
+
+    /// Check if a full sweep started recently.
+    /// For risk-increasing ops, we require a sweep to have STARTED recently.
+    /// The priority-liquidation phase runs every crank, so once a sweep starts,
+    /// the worst accounts are immediately addressed.
+    pub fn require_recent_full_sweep(&self, now_slot: u64) -> Result<()> {
+        if now_slot.saturating_sub(self.last_full_sweep_start_slot)
+            > self.max_crank_staleness_slots
+        {
+            return Err(RiskError::Unauthorized); // SweepStale
+        }
+        Ok(())
+    }
+
+    /// Check that no socialization debt is pending.
+    /// Blocks value extraction (withdraw, positive pnl warmup) while pending buckets non-zero.
+    /// This prevents users from withdrawing "unfunded" profit before socialization completes.
+    pub fn require_no_pending_socialization(&self) -> Result<()> {
+        if self.pending_profit_to_fund > 0 || self.pending_unpaid_loss > 0 {
+            return Err(RiskError::Unauthorized); // PendingSocialization
         }
         Ok(())
     }
@@ -1189,6 +1283,16 @@ impl RiskEngine {
     ) -> Result<CrankOutcome> {
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
+
+        // If starting a new sweep (step 0), record the start slot and reset state
+        if self.crank_step == 0 {
+            self.last_full_sweep_start_slot = now_slot;
+            // Reset top-K heap for new sweep
+            self.topk_len = 0;
+            // Increment epochs (wrapping) - avoids O(MAX_ACCOUNTS) clears
+            self.topk_epoch = self.topk_epoch.wrapping_add(1);
+            self.pending_epoch = self.pending_epoch.wrapping_add(1);
+        }
 
         // Accrue funding first (always)
         let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
@@ -1224,9 +1328,23 @@ impl RiskEngine {
             (0, true) // No caller to settle, considered ok
         };
 
-        // Proactive liquidation scan: liquidate any accounts below maintenance margin
-        // This runs on EVERY crank call (not just when advanced) to ensure timely liquidations
-        let num_liquidations = self.scan_and_liquidate_all(now_slot, oracle_price);
+        // Two-phase liquidation:
+        // Compute window parameters (shared by top-K build and deterministic sweep)
+        let window_start = self.liq_cursor as usize;
+        let window_len = WINDOW.min(MAX_ACCOUNTS);
+
+        // Phase A: Incremental top-K build + execution (O(WINDOW log K), then real liquidations)
+        self.topk_build_step(oracle_price, window_start, window_len);
+        let (top_liq_count, top_liq_errors) =
+            self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize);
+
+        // Phase B: Deterministic window sweep (starvation-proof)
+        let (_sweep_checked, sweep_liqs, sweep_errors) =
+            self.scan_and_liquidate_window(now_slot, oracle_price, window_len as u16, window_len as u16);
+
+        // Combine liquidation counts
+        let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
+        let num_liq_errors = top_liq_errors.saturating_add(sweep_errors);
 
         // Heavy actions run independent of caller settle success
         let mut did_force_realize = false;
@@ -1250,8 +1368,18 @@ impl RiskEngine {
             }
         }
 
-        // Garbage collect dust accounts (runs every crank)
+        // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
+        self.socialization_step(window_start, window_len);
+
+        // Garbage collect dust accounts
         let num_gc_closed = self.garbage_collect_dust();
+
+        // Advance crank step; when completing final step, record completion and wrap
+        self.crank_step += 1;
+        if self.crank_step == NUM_STEPS {
+            self.crank_step = 0;
+            self.last_full_sweep_completed_slot = now_slot;
+        }
 
         Ok(CrankOutcome {
             advanced,
@@ -1260,6 +1388,7 @@ impl RiskEngine {
             did_force_realize,
             did_panic_settle,
             num_liquidations,
+            num_liq_errors,
             num_gc_closed,
         })
     }
@@ -1544,6 +1673,277 @@ impl RiskEngine {
         })
     }
 
+    /// Deferred-ADL variant of oracle_close_position_core for batched liquidation.
+    /// Instead of calling ADL immediately, returns DeferredAdl with totals to batch.
+    fn oracle_close_position_core_deferred_adl(
+        &mut self,
+        idx: u16,
+        oracle_price: u64,
+    ) -> Result<(ClosedOutcome, DeferredAdl)> {
+        // NOTE: Caller must have already called touch_account_full()
+
+        // Check if there's a position to close
+        if self.accounts[idx as usize].position_size == 0 {
+            return Ok((
+                ClosedOutcome {
+                    abs_pos: 0,
+                    mark_pnl: 0,
+                    cap_before: self.accounts[idx as usize].capital,
+                    cap_after: self.accounts[idx as usize].capital,
+                    position_was_closed: false,
+                },
+                DeferredAdl::ZERO,
+            ));
+        }
+
+        // Snapshot position details and capital
+        let pos = self.accounts[idx as usize].position_size;
+        let abs_pos = saturating_abs_i128(pos) as u128;
+        let entry = self.accounts[idx as usize].entry_price;
+        let cap_before = self.accounts[idx as usize].capital;
+
+        // Compute mark PnL at oracle price
+        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+
+        // Apply mark PnL to account
+        self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
+
+        // Close position
+        self.accounts[idx as usize].position_size = 0;
+        self.accounts[idx as usize].entry_price = oracle_price; // Determinism
+
+        // Update OI (remove this account's contribution)
+        self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
+
+        // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
+        let mut deferred = DeferredAdl::ZERO;
+        if mark_pnl > 0 {
+            deferred.profit_to_fund = mark_pnl as u128;
+            deferred.excluded = true;
+            // DO NOT call apply_adl_excluding here
+        }
+
+        // Handle negative PnL: pay from capital immediately, record unpaid remainder
+        // NOTE: We skip settle_warmup_to_capital for crank perf - do it inline for losses only
+        let pnl = self.accounts[idx as usize].pnl;
+        if pnl < 0 {
+            let need = neg_i128_to_u128(pnl);
+            let capital = self.accounts[idx as usize].capital;
+            let pay = core::cmp::min(need, capital);
+
+            // Pay from capital
+            self.accounts[idx as usize].capital = capital.saturating_sub(pay);
+            self.accounts[idx as usize].pnl = pnl.saturating_add(pay as i128);
+
+            // Track paid losses in warmed_neg_total
+            self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
+
+            // Record unpaid portion as deferred loss
+            if need > pay {
+                deferred.unpaid_loss = need - pay;
+                // Clamp remaining negative PnL to zero
+                self.accounts[idx as usize].pnl = 0;
+            }
+        }
+        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+
+        let cap_after = self.accounts[idx as usize].capital;
+
+        Ok((
+            ClosedOutcome {
+                abs_pos,
+                mark_pnl,
+                cap_before,
+                cap_after,
+                position_was_closed: true,
+            },
+            deferred,
+        ))
+    }
+
+    /// Deferred-ADL variant of oracle_close_position_slice_core for batched liquidation.
+    fn oracle_close_position_slice_core_deferred_adl(
+        &mut self,
+        idx: u16,
+        oracle_price: u64,
+        close_abs: u128,
+    ) -> Result<(ClosedOutcome, DeferredAdl)> {
+        // NOTE: Caller must have already called touch_account_full()
+
+        let pos = self.accounts[idx as usize].position_size;
+        let current_abs_pos = saturating_abs_i128(pos) as u128;
+
+        // Validate: can't close more than we have
+        if close_abs == 0 || current_abs_pos == 0 {
+            return Ok((
+                ClosedOutcome {
+                    abs_pos: 0,
+                    mark_pnl: 0,
+                    cap_before: self.accounts[idx as usize].capital,
+                    cap_after: self.accounts[idx as usize].capital,
+                    position_was_closed: false,
+                },
+                DeferredAdl::ZERO,
+            ));
+        }
+
+        // If close_abs >= current position, delegate to full close
+        if close_abs >= current_abs_pos {
+            return self.oracle_close_position_core_deferred_adl(idx, oracle_price);
+        }
+
+        // Partial close: close_abs < current_abs_pos
+        let entry = self.accounts[idx as usize].entry_price;
+        let cap_before = self.accounts[idx as usize].capital;
+
+        // Compute proportional mark PnL for the closed slice
+        let diff: i128 = if pos > 0 {
+            (oracle_price as i128).saturating_sub(entry as i128)
+        } else {
+            (entry as i128).saturating_sub(oracle_price as i128)
+        };
+
+        let mark_pnl = diff
+            .checked_mul(close_abs as i128)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)?;
+
+        // Apply mark PnL to account
+        self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
+
+        // Update position: reduce by close_abs (maintain sign)
+        let new_abs_pos = current_abs_pos.saturating_sub(close_abs);
+        self.accounts[idx as usize].position_size = if pos > 0 {
+            new_abs_pos as i128
+        } else {
+            -(new_abs_pos as i128)
+        };
+
+        // Update OI
+        self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
+
+        // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
+        let mut deferred = DeferredAdl::ZERO;
+        if mark_pnl > 0 {
+            deferred.profit_to_fund = mark_pnl as u128;
+            deferred.excluded = true;
+        }
+
+        // Handle negative PnL: pay from capital immediately, record unpaid remainder
+        // NOTE: We skip settle_warmup_to_capital for crank perf - do it inline for losses only
+        let pnl = self.accounts[idx as usize].pnl;
+        if pnl < 0 {
+            let need = neg_i128_to_u128(pnl);
+            let capital = self.accounts[idx as usize].capital;
+            let pay = core::cmp::min(need, capital);
+
+            // Pay from capital
+            self.accounts[idx as usize].capital = capital.saturating_sub(pay);
+            self.accounts[idx as usize].pnl = pnl.saturating_add(pay as i128);
+
+            // Track paid losses in warmed_neg_total
+            self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
+
+            // Record unpaid portion as deferred loss
+            if need > pay {
+                deferred.unpaid_loss = need - pay;
+                // Clamp remaining negative PnL to zero
+                self.accounts[idx as usize].pnl = 0;
+            }
+        }
+        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+
+        let cap_after = self.accounts[idx as usize].capital;
+
+        Ok((
+            ClosedOutcome {
+                abs_pos: close_abs,
+                mark_pnl,
+                cap_before,
+                cap_after,
+                position_was_closed: true,
+            },
+            deferred,
+        ))
+    }
+
+    /// Force-close position for force_realize_losses with deferred ADL.
+    ///
+    /// Key differences from liquidation deferred helpers:
+    /// - Does NOT settle warmup for profits (they stay "young")
+    /// - Only pays losses from capital immediately (tracks in warmed_neg_total)
+    /// - Updates warmup_started_at_slot (freeze semantics)
+    ///
+    /// Caller must have already settled funding for this account.
+    /// Returns (mark_pnl, DeferredAdl) where mark_pnl is needed for rounding compensation.
+    fn force_close_position_deferred(
+        &mut self,
+        idx: usize,
+        oracle_price: u64,
+    ) -> Result<(i128, DeferredAdl)> {
+        let account = &self.accounts[idx];
+
+        // No position = nothing to close
+        if account.position_size == 0 {
+            return Ok((0, DeferredAdl::ZERO));
+        }
+
+        // Snapshot position details
+        let pos = account.position_size;
+        let abs_pos = saturating_abs_i128(pos) as u128;
+        let entry = account.entry_price;
+
+        // Compute mark PnL at oracle price
+        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+
+        // Apply mark PnL to account
+        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_add(mark_pnl);
+
+        // Close position
+        self.accounts[idx].position_size = 0;
+        self.accounts[idx].entry_price = oracle_price; // Determinism
+
+        // Update OI
+        self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
+
+        // Build deferred ADL result
+        let mut deferred = DeferredAdl::ZERO;
+
+        // If profit: record for deferred ADL funding, mark for exclusion
+        // DO NOT settle warmup - profit stays "young"
+        if mark_pnl > 0 {
+            deferred.profit_to_fund = mark_pnl as u128;
+            deferred.excluded = true;
+        }
+
+        // Handle negative PnL: pay from capital immediately
+        if self.accounts[idx].pnl < 0 {
+            let need = neg_i128_to_u128(self.accounts[idx].pnl);
+            let pay = core::cmp::min(need, self.accounts[idx].capital);
+
+            // Pay from capital
+            self.accounts[idx].capital = sub_u128(self.accounts[idx].capital, pay);
+            self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_add(pay as i128);
+
+            // Track in warmed_neg_total (losses realized)
+            self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
+
+            // Accumulate unpaid portion
+            if need > pay {
+                deferred.unpaid_loss = need - pay;
+                // Clamp remaining negative PnL to zero
+                self.accounts[idx].pnl = 0;
+            }
+        }
+
+        // Update warmup start marker (freeze semantics)
+        let effective_slot = core::cmp::min(self.current_slot, self.warmup_pause_slot);
+        self.accounts[idx].warmup_started_at_slot = effective_slot;
+
+        Ok((mark_pnl, deferred))
+    }
+
     /// Liquidate a single account at oracle price if below maintenance margin.
     ///
     /// Returns Ok(true) if liquidation occurred, Ok(false) if not needed/possible.
@@ -1567,13 +1967,15 @@ impl RiskEngine {
             return Ok(false);
         }
 
+        // Early gate: no position = nothing to liquidate (avoids expensive touch)
+        if self.accounts[idx as usize].position_size == 0 {
+            return Ok(false);
+        }
+
         // Settle and check maintenance margin
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         let account = &self.accounts[idx as usize];
-        if account.position_size == 0 {
-            return Ok(false);
-        }
         if self.is_above_maintenance_margin(account, oracle_price) {
             return Ok(false);
         }
@@ -1642,6 +2044,99 @@ impl RiskEngine {
         Ok(true)
     }
 
+    /// Deferred-ADL variant of liquidate_at_oracle for batched liquidation during crank.
+    /// Returns (did_liquidate, deferred_adl) instead of calling ADL immediately.
+    /// Fee payment is still immediate (fee is not ADL).
+    fn liquidate_at_oracle_deferred_adl(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<(bool, DeferredAdl)> {
+        // Validate index
+        if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Ok((false, DeferredAdl::ZERO));
+        }
+
+        // Early gate: no position = nothing to liquidate
+        if self.accounts[idx as usize].position_size == 0 {
+            return Ok((false, DeferredAdl::ZERO));
+        }
+
+        // Settle and check maintenance margin
+        self.touch_account_full(idx, now_slot, oracle_price)?;
+
+        let account = &self.accounts[idx as usize];
+        if self.is_above_maintenance_margin(account, oracle_price) {
+            return Ok((false, DeferredAdl::ZERO));
+        }
+
+        // Compute how much to close
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+
+        if close_abs == 0 {
+            return Ok((false, DeferredAdl::ZERO));
+        }
+
+        // Close position via deferred helpers
+        let (mut outcome, mut deferred) = if is_full_close {
+            self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
+        } else {
+            match self.oracle_close_position_slice_core_deferred_adl(idx, oracle_price, close_abs) {
+                Ok(r) => r,
+                Err(RiskError::Overflow) => {
+                    // Overflow in partial close → force full close
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
+        if !outcome.position_was_closed {
+            return Ok((false, DeferredAdl::ZERO));
+        }
+
+        // Post-liquidation safety check: if position remains and still below target,
+        // fall back to full close
+        let remaining_pos = self.accounts[idx as usize].position_size;
+        if remaining_pos != 0 {
+            let target_bps = self.params.maintenance_margin_bps
+                .saturating_add(self.params.liquidation_buffer_bps);
+            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+                // Fallback: close remaining position entirely
+                let (fallback_outcome, fallback_deferred) =
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
+                if fallback_outcome.position_was_closed {
+                    outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
+                    // Accumulate deferred ADL amounts
+                    deferred.profit_to_fund = deferred.profit_to_fund
+                        .saturating_add(fallback_deferred.profit_to_fund);
+                    deferred.unpaid_loss = deferred.unpaid_loss
+                        .saturating_add(fallback_deferred.unpaid_loss);
+                    deferred.excluded = deferred.excluded || fallback_deferred.excluded;
+                }
+            }
+        }
+
+        // Compute and apply liquidation fee (IMMEDIATE, not deferred)
+        let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
+        let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
+        let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
+
+        // Pay fee from account capital
+        let account_capital = self.accounts[idx as usize].capital;
+        let pay = core::cmp::min(fee, account_capital);
+
+        self.accounts[idx as usize].capital = account_capital.saturating_sub(pay);
+        self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(pay);
+        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(pay);
+
+        // Recompute warmup reserved after insurance changes
+        self.recompute_warmup_insurance_reserved();
+
+        Ok((true, deferred))
+    }
+
     /// Scan all used accounts and liquidate any that are below maintenance margin.
     /// Returns the number of accounts liquidated.
     /// Best-effort: errors on individual accounts are ignored (only operational errors
@@ -1667,6 +2162,325 @@ impl RiskEngine {
         }
 
         count
+    }
+
+    /// Windowed liquidation scan with deferred socialization.
+    /// Scans `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
+    /// Accumulates profit/loss into pending buckets for bounded socialization.
+    /// Updates cursor to resume from where we left off.
+    /// Returns (num_checked, num_liquidated, num_errors).
+    /// If any liquidation returns Err, sets risk_reduction_only = true.
+    fn scan_and_liquidate_window(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        max_checks: u16,
+        max_liqs: u16,
+    ) -> (u16, u16, u16) {
+        let mut checked: u16 = 0;
+        let mut liquidated: u16 = 0;
+        let mut errors: u16 = 0;
+        let start = self.liq_cursor as usize;
+        // Cap to MAX_ACCOUNTS to avoid wrap-around
+        let actual_checks = (max_checks as usize).min(MAX_ACCOUNTS);
+        let epoch = self.pending_epoch;
+
+        for offset in 0..actual_checks {
+            if liquidated >= max_liqs {
+                break;
+            }
+
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue; // Not used, skip
+            }
+
+            checked += 1;
+
+            // Early gate: skip accounts with no position
+            if self.accounts[idx].position_size == 0 {
+                continue;
+            }
+
+            // Attempt deferred liquidation
+            match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
+                Ok((true, deferred)) => {
+                    liquidated += 1;
+                    // Accumulate into pending buckets (no ADL call)
+                    self.pending_profit_to_fund = self
+                        .pending_profit_to_fund
+                        .saturating_add(deferred.profit_to_fund);
+                    self.pending_unpaid_loss = self
+                        .pending_unpaid_loss
+                        .saturating_add(deferred.unpaid_loss);
+                    // Mark for exclusion from profit-funding
+                    if deferred.excluded {
+                        self.pending_exclude_epoch[idx] = epoch;
+                    }
+                }
+                Ok((false, _)) => {} // Not liquidatable, fine
+                Err(_) => {
+                    // Liquidation error - set risk reduction mode
+                    errors += 1;
+                    self.risk_reduction_only = true;
+                }
+            }
+        }
+
+        // Update cursor for next call (always advance by actual_checks)
+        self.liq_cursor = ((start + actual_checks) & ACCOUNT_IDX_MASK) as u16;
+
+        (checked, liquidated, errors)
+    }
+
+    // ========================================
+    // Top-K Priority Liquidation (global selection + execution)
+    // ========================================
+
+    /// Min-heap comparison: returns true if heap position a < heap position b.
+    /// Uses topk_score for comparison with topk_idx as tie-breaker for determinism.
+    #[inline]
+    fn topk_heap_less(&self, a: usize, b: usize) -> bool {
+        let score_a = self.topk_score[a];
+        let score_b = self.topk_score[b];
+        if score_a != score_b {
+            score_a < score_b
+        } else {
+            // Tie-breaker: lower index wins (determinism)
+            self.topk_idx[a] < self.topk_idx[b]
+        }
+    }
+
+    /// Swap heap entries at positions i and j.
+    #[inline]
+    fn topk_swap(&mut self, i: usize, j: usize) {
+        self.topk_idx.swap(i, j);
+        self.topk_score.swap(i, j);
+    }
+
+    /// Sift up in min-heap (for insertion).
+    #[inline]
+    fn topk_sift_up(&mut self, mut i: usize) {
+        while i > 0 {
+            let parent = (i - 1) / 2;
+            if self.topk_heap_less(i, parent) {
+                self.topk_swap(i, parent);
+                i = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Sift down in min-heap (for replacement).
+    #[inline]
+    fn topk_sift_down(&mut self, mut i: usize, heap_len: usize) {
+        loop {
+            let left = 2 * i + 1;
+            let right = 2 * i + 2;
+            let mut smallest = i;
+
+            if left < heap_len && self.topk_heap_less(left, smallest) {
+                smallest = left;
+            }
+            if right < heap_len && self.topk_heap_less(right, smallest) {
+                smallest = right;
+            }
+
+            if smallest != i {
+                self.topk_swap(i, smallest);
+                i = smallest;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Incremental top-K candidate discovery for a window of accounts.
+    ///
+    /// Scans [start..start+len) (wrapping), inserting candidates into topk_* heap.
+    /// Uses topk_epoch/topk_seen_epoch to avoid duplicate inserts within a sweep.
+    ///
+    /// Cost: O(len log K), bounded by WINDOW.
+    ///
+    /// This function does NOT reset the heap - caller must reset at sweep boundary.
+    /// A "wrong" top-K pick is harmless: real liquidation still checks margin.
+    fn topk_build_step(&mut self, oracle_price: u64, start: usize, len: usize) {
+        let epoch = self.topk_epoch;
+
+        for offset in 0..len {
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used via bitmap
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+
+            // Super cheap early gate
+            if self.accounts[idx].position_size == 0 {
+                continue;
+            }
+
+            // Skip if already considered this sweep (epoch deduplication)
+            if self.topk_seen_epoch[idx] == epoch {
+                continue;
+            }
+
+            // Compute cheap priority score
+            let score = self.liq_priority_score(&self.accounts[idx], oracle_price);
+            if score == 0 {
+                continue;
+            }
+
+            // Mark as seen this epoch
+            self.topk_seen_epoch[idx] = epoch;
+
+            // Insert into heap
+            let heap_len = self.topk_len as usize;
+
+            if heap_len < TOP_LIQ_K {
+                // Heap not full: add directly
+                self.topk_idx[heap_len] = idx as u16;
+                self.topk_score[heap_len] = score;
+                self.topk_len += 1;
+                self.topk_sift_up(heap_len);
+            } else {
+                // Heap full: check if new score beats minimum (root)
+                let root_score = self.topk_score[0];
+
+                if score > root_score {
+                    // Replace root with new candidate
+                    self.topk_idx[0] = idx as u16;
+                    self.topk_score[0] = score;
+                    self.topk_sift_down(0, heap_len);
+                }
+            }
+        }
+    }
+
+    /// Execute liquidations for selected top-K candidates.
+    /// Returns (num_liquidated, num_errors).
+    ///
+    /// Accumulates profit/loss into pending buckets for deferred socialization.
+    /// No global ADL scans - bounded by heap_len.
+    fn run_top_liquidations(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        heap_len: usize,
+    ) -> (u16, u16) {
+        if heap_len == 0 {
+            return (0, 0);
+        }
+
+        let mut liquidated: u16 = 0;
+        let mut errors: u16 = 0;
+        let epoch = self.pending_epoch;
+
+        // Process each candidate (order doesn't matter)
+        for i in 0..heap_len {
+            let idx = self.topk_idx[i] as usize;
+
+            // Skip stale entries: account no longer used or position already closed
+            // (heap entries can become stale across multiple cranks within a sweep)
+            if !self.is_used(idx) || self.accounts[idx].position_size == 0 {
+                continue;
+            }
+
+            // Attempt deferred liquidation (does full settlement + margin check)
+            match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
+                Ok((true, deferred)) => {
+                    liquidated += 1;
+                    // Accumulate into pending buckets (no ADL call)
+                    self.pending_profit_to_fund = self
+                        .pending_profit_to_fund
+                        .saturating_add(deferred.profit_to_fund);
+                    self.pending_unpaid_loss = self
+                        .pending_unpaid_loss
+                        .saturating_add(deferred.unpaid_loss);
+                    // Mark for exclusion from profit-funding
+                    if deferred.excluded {
+                        self.pending_exclude_epoch[idx] = epoch;
+                    }
+                }
+                Ok((false, _)) => {} // Not liquidatable (score was heuristic)
+                Err(_) => {
+                    errors += 1;
+                    self.risk_reduction_only = true;
+                }
+            }
+        }
+
+        (liquidated, errors)
+    }
+
+    // ========================================
+    // Bounded Socialization (replaces global ADL in crank)
+    // ========================================
+
+    /// Bounded socialization step: haircuts profits from WINDOW accounts.
+    ///
+    /// Applies pending profit-funding and loss socialization to accounts in
+    /// [start..start+len) window. Starvation-free because deterministic sweep
+    /// guarantees all accounts are eventually visited.
+    ///
+    /// Cost: O(len), bounded by WINDOW.
+    fn socialization_step(&mut self, start: usize, len: usize) {
+        let epoch = self.pending_epoch;
+        let effective_slot = self.effective_warmup_slot();
+
+        for offset in 0..len {
+            // Early exit if nothing left to socialize
+            if self.pending_profit_to_fund == 0 && self.pending_unpaid_loss == 0 {
+                break;
+            }
+
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+
+            // Compute unwrapped PnL for this account (subject to ADL haircuts)
+            let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
+            if unwrapped == 0 {
+                continue;
+            }
+
+            let mut remaining = unwrapped;
+
+            // Pass 1: Profit funding (if not excluded)
+            if self.pending_profit_to_fund > 0 && self.pending_exclude_epoch[idx] != epoch {
+                let take = core::cmp::min(remaining, self.pending_profit_to_fund);
+                if take > 0 {
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_profit_to_fund =
+                        self.pending_profit_to_fund.saturating_sub(take);
+                    remaining = remaining.saturating_sub(take);
+                }
+            }
+
+            // Pass 2: Loss socialization (no exclusions)
+            if self.pending_unpaid_loss > 0 && remaining > 0 {
+                let take = core::cmp::min(remaining, self.pending_unpaid_loss);
+                if take > 0 {
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_unpaid_loss =
+                        self.pending_unpaid_loss.saturating_sub(take);
+                }
+            }
+        }
     }
 
     // ========================================
@@ -1945,8 +2759,15 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<()> {
-        // Require fresh crank before state-changing operations
+        // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
+
+        // Require recent full sweep started
+        self.require_recent_full_sweep(now_slot)?;
+
+        // Block withdrawals while socialization debt is pending
+        // This prevents extracting unfunded value
+        self.require_no_pending_socialization()?;
 
         // Withdrawals are neutral in risk mode (allowed)
         self.enforce_op(OpClass::RiskNeutral)?;
@@ -1959,25 +2780,30 @@ impl RiskEngine {
         // Full settlement: funding + maintenance fees + warmup
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
-        let account = &self.accounts[idx as usize];
+        // Read account state (scope the borrow)
+        let (old_capital, pnl, position_size) = {
+            let account = &self.accounts[idx as usize];
+            (account.capital, account.pnl, account.position_size)
+        };
 
         // Check we have enough capital
-        if account.capital < amount {
+        if old_capital < amount {
             return Err(RiskError::InsufficientBalance);
         }
 
         // Calculate new state after withdrawal
         // FIX B: Use equity (includes negative PnL) for margin checks
-        let new_capital = sub_u128(account.capital, amount);
+        let new_capital = sub_u128(old_capital, amount);
         let cap_i = u128_to_i128_clamped(new_capital);
-        let new_eq_i = cap_i.saturating_add(account.pnl);
+        let new_eq_i = cap_i.saturating_add(pnl);
         let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
-        // If account has position, must maintain initial margin
-        if account.position_size != 0 {
+        // If account has position, must maintain initial margin at ORACLE price (not entry price)
+        // This prevents withdrawing to a state that's immediately liquidatable
+        if position_size != 0 {
             let position_notional = mul_u128(
-                saturating_abs_i128(account.position_size) as u128,
-                account.entry_price as u128,
+                saturating_abs_i128(position_size) as u128,
+                oracle_price as u128,
             ) / 1_000_000;
 
             let initial_margin_required =
@@ -1991,6 +2817,17 @@ impl RiskEngine {
         // Commit the withdrawal
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
+
+        // Post-withdrawal maintenance margin check at oracle price
+        // This is a safety belt to ensure we never leave an account in liquidatable state
+        if self.accounts[idx as usize].position_size != 0 {
+            if !self.is_above_maintenance_margin(&self.accounts[idx as usize], oracle_price) {
+                // Revert the withdrawal
+                self.accounts[idx as usize].capital = old_capital;
+                self.vault = add_u128(self.vault, amount);
+                return Err(RiskError::Undercollateralized);
+            }
+        }
 
         // Regression assert: after settle + withdraw, negative PnL should have been settled
         #[cfg(any(test, kani))]
@@ -2027,6 +2864,35 @@ impl RiskEngine {
         self.is_above_margin_bps(account, oracle_price, self.params.maintenance_margin_bps)
     }
 
+    /// Cheap priority score for ranking liquidation candidates.
+    /// Score = max(maint_required - equity, 0).
+    /// Higher score = more urgent to liquidate.
+    ///
+    /// This is a ranking heuristic only - NOT authoritative.
+    /// Real liquidation still calls touch_account_full() and checks margin properly.
+    /// A "wrong" top-K pick is harmless: it just won't liquidate.
+    #[inline]
+    fn liq_priority_score(&self, a: &Account, oracle_price: u64) -> u128 {
+        if a.position_size == 0 {
+            return 0;
+        }
+
+        let equity = self.account_equity(a);
+
+        let pos_value = mul_u128(
+            saturating_abs_i128(a.position_size) as u128,
+            oracle_price as u128,
+        ) / 1_000_000;
+
+        let maint = mul_u128(pos_value, self.params.maintenance_margin_bps as u128) / 10_000;
+
+        if equity >= maint {
+            0
+        } else {
+            maint - equity
+        }
+    }
+
     /// Check if account is above a given margin threshold (in basis points).
     /// Used for both maintenance margin check and post-liquidation target margin check.
     pub fn is_above_margin_bps(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
@@ -2056,7 +2922,7 @@ impl RiskEngine {
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
-        // Require fresh crank before state-changing operations
+        // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
 
         // Validate indices
@@ -2082,6 +2948,8 @@ impl RiskEngine {
         let lp_inc = saturating_abs_i128(new_lp_pos) > saturating_abs_i128(old_lp_pos);
 
         if user_inc || lp_inc {
+            // Risk-increasing: require recent full sweep
+            self.require_recent_full_sweep(now_slot)?;
             self.enforce_op(OpClass::RiskIncrease)?;
         } else {
             self.enforce_op(OpClass::RiskReduce)?;
@@ -2281,29 +3149,48 @@ impl RiskEngine {
     // ADL (Auto-Deleveraging) - Scan-Based
     // ========================================
 
+    /// Compute effective slot for warmup (hoisted for efficiency)
+    #[inline]
+    fn effective_warmup_slot(&self) -> u64 {
+        if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        }
+    }
+
+    /// Calculate withdrawable PNL with pre-computed effective_slot
+    #[inline]
+    fn compute_withdrawable_pnl_at(&self, account: &Account, effective_slot: u64) -> u128 {
+        if account.pnl <= 0 {
+            return 0;
+        }
+        let positive_pnl = account.pnl as u128;
+        let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
+        let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
+        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
+        core::cmp::min(available_pnl, warmed_up_cap)
+    }
+
     /// Calculate withdrawable PnL for an account (inline helper)
     /// withdrawable = min(available_pnl, warmed_up_cap)
     #[inline]
     fn compute_withdrawable_pnl(&self, account: &Account) -> u128 {
+        self.compute_withdrawable_pnl_at(account, self.effective_warmup_slot())
+    }
+
+    /// Calculate unwrapped PNL with pre-computed effective_slot
+    #[inline]
+    fn compute_unwrapped_pnl_at(&self, account: &Account, effective_slot: u64) -> u128 {
         if account.pnl <= 0 {
             return 0;
         }
-
         let positive_pnl = account.pnl as u128;
-        let available_pnl = positive_pnl.saturating_sub(account.reserved_pnl);
-
-        // Apply warmup pause - when paused, warmup cannot progress beyond pause_slot
-        let effective_slot = if self.warmup_paused {
-            core::cmp::min(self.current_slot, self.warmup_pause_slot)
-        } else {
-            self.current_slot
-        };
-
-        // Calculate warmed capacity
-        let elapsed_slots = effective_slot.saturating_sub(account.warmup_started_at_slot);
-        let warmed_up_cap = mul_u128(account.warmup_slope_per_step, elapsed_slots as u128);
-
-        core::cmp::min(available_pnl, warmed_up_cap)
+        let reserved = account.reserved_pnl;
+        let withdrawable = self.compute_withdrawable_pnl_at(account, effective_slot);
+        positive_pnl
+            .saturating_sub(reserved)
+            .saturating_sub(withdrawable)
     }
 
     /// Calculate unwrapped PNL for an account (inline helper for ADL)
@@ -2311,18 +3198,65 @@ impl RiskEngine {
     /// This is PnL that hasn't yet warmed and isn't reserved - subject to ADL haircuts
     #[inline]
     fn compute_unwrapped_pnl(&self, account: &Account) -> u128 {
-        if account.pnl <= 0 {
-            return 0;
+        self.compute_unwrapped_pnl_at(account, self.effective_warmup_slot())
+    }
+
+    /// ADL heap comparator: a "wins" (is larger) if rem_a > rem_b, or tie-break by lower idx
+    #[inline]
+    fn adl_heap_better(&self, a: u16, b: u16) -> bool {
+        let ra = self.adl_remainder_scratch[a as usize];
+        let rb = self.adl_remainder_scratch[b as usize];
+        ra > rb || (ra == rb && a < b)
+    }
+
+    /// Sift down for ADL max-heap
+    fn adl_sift_down(&mut self, heap_size: usize, mut pos: usize) {
+        loop {
+            let left = 2 * pos + 1;
+            if left >= heap_size {
+                break;
+            }
+            let right = left + 1;
+
+            let mut best = left;
+            if right < heap_size
+                && self.adl_heap_better(self.adl_idx_scratch[right], self.adl_idx_scratch[left])
+            {
+                best = right;
+            }
+            if self.adl_heap_better(self.adl_idx_scratch[pos], self.adl_idx_scratch[best]) {
+                break;
+            }
+            self.adl_idx_scratch.swap(pos, best);
+            pos = best;
         }
+    }
 
-        let positive_pnl = account.pnl as u128;
-        let reserved = account.reserved_pnl;
-        let withdrawable = self.compute_withdrawable_pnl(account);
+    /// Build max-heap for ADL remainder distribution
+    fn adl_build_heap(&mut self, heap_size: usize) {
+        if heap_size < 2 {
+            return;
+        }
+        let mut i = (heap_size - 2) / 2;
+        loop {
+            self.adl_sift_down(heap_size, i);
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
 
-        // unwrapped = positive_pnl - reserved - withdrawable (all saturating)
-        positive_pnl
-            .saturating_sub(reserved)
-            .saturating_sub(withdrawable)
+    /// Pop max from ADL heap, returns the index
+    fn adl_pop_max(&mut self, heap_size: &mut usize) -> u16 {
+        debug_assert!(*heap_size > 0);
+        let best = self.adl_idx_scratch[0];
+        *heap_size -= 1;
+        if *heap_size > 0 {
+            self.adl_idx_scratch[0] = self.adl_idx_scratch[*heap_size];
+            self.adl_sift_down(*heap_size, 0);
+        }
+        best
     }
 
     /// Returns insurance balance above the floor (raw spendable, before reservations)
@@ -2416,6 +3350,8 @@ impl RiskEngine {
         let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
+        // NOTE: Caller (e.g., withdraw) checks require_no_pending_socialization()
+        // We don't block here to allow panic_settle_all and deposits to proceed
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
             let positive_pnl = pnl as u128;
@@ -2500,6 +3436,8 @@ impl RiskEngine {
     ///
     /// When `exclude` is Some(idx), that account is skipped during haircutting.
     /// This prevents liquidated winners from funding their own profit.
+    ///
+    /// Optimized: 2 bitmap scans (down from 4), O(m + take*log(m)) heap selection.
     fn apply_adl_impl(&mut self, total_loss: u128, exclude: Option<usize>) -> Result<()> {
         // ADL reduces risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
@@ -2517,6 +3455,9 @@ impl RiskEngine {
             }
         }
 
+        // Hoist effective_slot once (saves repeated warmup pause checks)
+        let effective_slot = self.effective_warmup_slot();
+
         // Pass 1: Compute total unwrapped PNL (excluding specified account if any)
         let mut total_unwrapped = 0u128;
 
@@ -2527,13 +3468,13 @@ impl RiskEngine {
                 let idx = block * 64 + bit;
                 w &= w - 1;
                 if idx >= MAX_ACCOUNTS {
-                    continue; // Guard against stray high bits in bitmap
+                    continue;
                 }
                 if is_excluded(exclude, idx) {
                     continue;
                 }
 
-                let unwrapped = self.compute_unwrapped_pnl(&self.accounts[idx]);
+                let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
                 total_unwrapped = total_unwrapped.saturating_add(unwrapped);
             }
         }
@@ -2544,27 +3485,12 @@ impl RiskEngine {
         // Track total applied for conservation
         let mut applied_from_pnl: u128 = 0;
 
+        // Index list count for heap (built inline during Pass 2)
+        let mut m: usize = 0;
+
         if loss_to_socialize > 0 && total_unwrapped > 0 {
-            // Step 1: Zero scratch arrays for used accounts only (via bitmap)
-            for block in 0..BITMAP_WORDS {
-                let mut w = self.used[block];
-                while w != 0 {
-                    let bit = w.trailing_zeros() as usize;
-                    let idx = block * 64 + bit;
-                    w &= w - 1;
-                    if idx >= MAX_ACCOUNTS {
-                        continue;
-                    }
-                    if is_excluded(exclude, idx) {
-                        continue;
-                    }
-
-                    self.adl_remainder_scratch[idx] = 0;
-                    self.adl_eligible_scratch[idx] = 0;
-                }
-            }
-
-            // Step 2: Compute floor haircuts, store remainders, mark eligible
+            // Pass 2: Compute floor haircuts, store remainders, build idx list inline
+            // (Merged: no separate scratch zeroing, no separate idx collection pass)
             for block in 0..BITMAP_WORDS {
                 let mut w = self.used[block];
                 while w != 0 {
@@ -2579,105 +3505,50 @@ impl RiskEngine {
                     }
 
                     let account = &self.accounts[idx];
-                    if account.pnl > 0 {
-                        let unwrapped = self.compute_unwrapped_pnl(account);
+                    if account.pnl <= 0 {
+                        continue;
+                    }
 
-                        if unwrapped > 0 {
-                            let numer = loss_to_socialize.saturating_mul(unwrapped);
-                            let haircut = numer / total_unwrapped;
-                            let rem = numer % total_unwrapped;
+                    let unwrapped = self.compute_unwrapped_pnl_at(account, effective_slot);
+                    if unwrapped == 0 {
+                        continue;
+                    }
 
-                            self.accounts[idx].pnl =
-                                self.accounts[idx].pnl.saturating_sub(haircut as i128);
-                            applied_from_pnl += haircut;
+                    let numer = loss_to_socialize
+                        .checked_mul(unwrapped)
+                        .ok_or(RiskError::Overflow)?;
+                    let haircut = numer / total_unwrapped;
+                    let rem = numer % total_unwrapped;
 
-                            // Store remainder and mark eligible if rem > 0
-                            self.adl_remainder_scratch[idx] = rem;
-                            self.adl_eligible_scratch[idx] = if rem > 0 { 1 } else { 0 };
-                        }
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                    applied_from_pnl += haircut;
+
+                    // Store remainder and add to idx list only if non-zero
+                    if rem != 0 {
+                        self.adl_remainder_scratch[idx] = rem;
+                        self.adl_idx_scratch[m] = idx as u16;
+                        m += 1;
                     }
                 }
             }
 
             // Step 3: Distribute leftover using largest-remainder method
-            // Each account can receive at most +1 leftover (correct for largest-remainder)
-            // Tighter bound: min(leftover, MAX_ACCOUNTS) reduces Kani unwind work
-            let mut leftover = loss_to_socialize - applied_from_pnl;
-            let max_iters = core::cmp::min(leftover as usize, MAX_ACCOUNTS);
+            // Use heap pop top-K: O(m) build + O(take * log m) pops
+            let leftover = loss_to_socialize - applied_from_pnl;
 
-            for _ in 0..max_iters {
-                if leftover == 0 {
-                    break;
+            if leftover > 0 && m > 0 {
+                // Build max-heap
+                self.adl_build_heap(m);
+                let mut heap_size = m;
+
+                // Pop top `take` elements and apply +1 haircut to each
+                let take = core::cmp::min(leftover as usize, m);
+                for _ in 0..take {
+                    let idx = self.adl_pop_max(&mut heap_size) as usize;
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
                 }
-
-                // Find account with max remainder; ties: lowest idx wins
-                let mut best_idx: Option<usize> = None;
-                let mut best_rem: u128 = 0;
-
-                for block in 0..BITMAP_WORDS {
-                    let mut w = self.used[block];
-                    while w != 0 {
-                        let bit = w.trailing_zeros() as usize;
-                        let idx = block * 64 + bit;
-                        w &= w - 1;
-                        if idx >= MAX_ACCOUNTS {
-                            continue;
-                        }
-                        if is_excluded(exclude, idx) {
-                            continue;
-                        }
-
-                        // Only consider eligible accounts (don't gate on pnl > 0)
-                        if self.adl_eligible_scratch[idx] == 1 {
-                            let rem = self.adl_remainder_scratch[idx];
-                            // Skip zero remainders for robust selection
-                            if rem == 0 {
-                                continue;
-                            }
-                            // Prefer larger remainder; if equal, prefer smaller idx (ties)
-                            if rem > best_rem || (rem == best_rem && best_idx.map_or(true, |b| idx < b)) {
-                                best_rem = rem;
-                                best_idx = Some(idx);
-                            }
-                        }
-                    }
-                }
-
-                match best_idx {
-                    Some(idx) => {
-                        self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
-                        applied_from_pnl += 1;
-                        self.adl_eligible_scratch[idx] = 0;
-                        leftover -= 1;
-                    }
-                    None => {
-                        break;
-                    }
-                }
-            }
-
-            // Hygiene: verify all eligible bits consumed after distribution
-            #[cfg(any(test, kani))]
-            {
-                for block in 0..BITMAP_WORDS {
-                    let mut w = self.used[block];
-                    while w != 0 {
-                        let bit = w.trailing_zeros() as usize;
-                        let idx = block * 64 + bit;
-                        w &= w - 1;
-                        if idx >= MAX_ACCOUNTS {
-                            continue;
-                        }
-                        if is_excluded(exclude, idx) {
-                            continue;
-                        }
-                        debug_assert!(
-                            self.adl_eligible_scratch[idx] == 0,
-                            "Eligible bit not consumed for account {}",
-                            idx
-                        );
-                    }
-                }
+                applied_from_pnl += take as u128;
             }
         }
 
@@ -2726,6 +3597,168 @@ impl RiskEngine {
             debug_assert!(
                 self.warmup_insurance_reserved == expect_reserved,
                 "Reserved invariant violated in apply_adl"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// ADL variant that excludes accounts marked in adl_exclude_scratch.
+    /// Used for batched liquidation to exclude all winners from funding their own profit.
+    pub fn apply_adl_excluding_set(&mut self, total_loss: u128) -> Result<()> {
+        // ADL reduces risk (allowed in risk mode)
+        self.enforce_op(OpClass::RiskReduce)?;
+
+        if total_loss == 0 {
+            return Ok(());
+        }
+
+        // Inline helper - check adl_exclude_scratch
+        #[inline]
+        fn is_excluded_by_scratch(scratch: &[u8; MAX_ACCOUNTS], idx: usize) -> bool {
+            scratch[idx] != 0
+        }
+
+        // Hoist effective_slot once
+        let effective_slot = self.effective_warmup_slot();
+
+        // Pass 1: Compute total unwrapped PNL (excluding accounts marked in scratch)
+        let mut total_unwrapped = 0u128;
+
+        for block in 0..BITMAP_WORDS {
+            let mut w = self.used[block];
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                let idx = block * 64 + bit;
+                w &= w - 1;
+                if idx >= MAX_ACCOUNTS {
+                    continue;
+                }
+                if is_excluded_by_scratch(&self.adl_exclude_scratch, idx) {
+                    continue;
+                }
+
+                let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
+                total_unwrapped = total_unwrapped.saturating_add(unwrapped);
+            }
+        }
+
+        // Determine how much loss can be socialized via unwrapped PNL
+        let loss_to_socialize = core::cmp::min(total_loss, total_unwrapped);
+
+        // Track total applied for conservation
+        let mut applied_from_pnl: u128 = 0;
+
+        // Index list count for heap
+        let mut m: usize = 0;
+
+        if loss_to_socialize > 0 && total_unwrapped > 0 {
+            // Pass 2: Compute floor haircuts, store remainders, build idx list inline
+            for block in 0..BITMAP_WORDS {
+                let mut w = self.used[block];
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    let idx = block * 64 + bit;
+                    w &= w - 1;
+                    if idx >= MAX_ACCOUNTS {
+                        continue;
+                    }
+                    if is_excluded_by_scratch(&self.adl_exclude_scratch, idx) {
+                        continue;
+                    }
+
+                    let account = &self.accounts[idx];
+                    if account.pnl <= 0 {
+                        continue;
+                    }
+
+                    let unwrapped = self.compute_unwrapped_pnl_at(account, effective_slot);
+                    if unwrapped == 0 {
+                        continue;
+                    }
+
+                    let numer = loss_to_socialize
+                        .checked_mul(unwrapped)
+                        .ok_or(RiskError::Overflow)?;
+                    let haircut = numer / total_unwrapped;
+                    let rem = numer % total_unwrapped;
+
+                    self.accounts[idx].pnl =
+                        self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                    applied_from_pnl += haircut;
+
+                    // Store remainder and add to idx list only if non-zero
+                    if rem != 0 {
+                        self.adl_remainder_scratch[idx] = rem;
+                        self.adl_idx_scratch[m] = idx as u16;
+                        m += 1;
+                    }
+                }
+            }
+
+            // Step 3: Distribute leftover using largest-remainder method
+            let leftover = loss_to_socialize - applied_from_pnl;
+
+            if leftover > 0 && m > 0 {
+                // Build max-heap
+                self.adl_build_heap(m);
+                let mut heap_size = m;
+
+                // Pop top `take` elements and apply +1 haircut to each
+                let take = core::cmp::min(leftover as usize, m);
+                for _ in 0..take {
+                    let idx = self.adl_pop_max(&mut heap_size) as usize;
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(1);
+                }
+                applied_from_pnl += take as u128;
+            }
+        }
+
+        // Verify exact socialization in test/kani builds
+        #[cfg(any(test, kani))]
+        debug_assert!(
+            applied_from_pnl == loss_to_socialize,
+            "ADL rounding bug: applied {} != socialized {}",
+            applied_from_pnl,
+            loss_to_socialize
+        );
+
+        // Handle remaining loss with insurance fund (respecting floor)
+        let remaining_loss = total_loss.saturating_sub(applied_from_pnl);
+
+        if remaining_loss > 0 {
+            // Insurance can only spend unreserved amount above the floor
+            let spendable = self.insurance_spendable_unreserved();
+            let spend = core::cmp::min(remaining_loss, spendable);
+
+            // Deduct from insurance fund
+            self.insurance_fund.balance = sub_u128(self.insurance_fund.balance, spend);
+
+            // Any remaining loss goes to loss_accum
+            let uncovered = remaining_loss.saturating_sub(spend);
+            if uncovered > 0 {
+                self.loss_accum = add_u128(self.loss_accum, uncovered);
+            }
+
+            // Enter risk-reduction-only mode if we've hit the floor or have uncovered losses
+            if uncovered > 0 || self.insurance_fund.balance <= self.params.risk_reduction_threshold
+            {
+                self.enter_risk_reduction_only_mode();
+            }
+        }
+
+        // Recompute reserved since insurance may have changed
+        self.recompute_warmup_insurance_reserved();
+
+        // Assert reserved equality invariant in test/kani
+        #[cfg(any(test, kani))]
+        {
+            let raw = self.insurance_spendable_raw();
+            let needed = self.warmed_pos_total.saturating_sub(self.warmed_neg_total);
+            let expect_reserved = core::cmp::min(needed, raw);
+            debug_assert!(
+                self.warmup_insurance_reserved == expect_reserved,
+                "Reserved invariant violated in apply_adl_excluding_set"
             );
         }
 
@@ -2871,6 +3904,11 @@ impl RiskEngine {
     /// 6. Unpaid losses (capital exhausted) go through apply_adl waterfall
     ///
     /// Like panic_settle_all, uses multi-phase processing so ADL can see full picture.
+    ///
+    /// NOTE: Unlike liquidation, force_realize does NOT need profit funding ADL because:
+    /// - All positions close at once
+    /// - Mark PnLs are zero-sum (profits are funded by losses in the same batch)
+    /// - Only unpaid losses (capital exhausted) need ADL socialization
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
         // Force realize is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
@@ -2883,12 +3921,11 @@ impl RiskEngine {
         // Enter risk-reduction-only mode (freezes warmups)
         self.enter_risk_reduction_only_mode();
 
-        // Accumulate unpaid losses (when capital is exhausted)
-        let mut total_unpaid_loss = 0u128;
-        // Track sum of mark PNL to compensate for integer division rounding
+        // Track unpaid losses (capital exhausted) and rounding
+        let mut unpaid_total: u128 = 0;
         let mut total_mark_pnl: i128 = 0;
 
-        // Phase 1: settle funding, apply mark PnL, close positions, pay losses from capital
+        // Phase 1: settle funding, close positions via deferred helper
         let global_funding_index = self.funding_index_qpb_e6;
         for block in 0..BITMAP_WORDS {
             let mut w = self.used[block];
@@ -2898,76 +3935,41 @@ impl RiskEngine {
                 w &= w - 1;
 
                 if idx >= MAX_ACCOUNTS {
-                    continue; // Guard against stray high bits in bitmap
-                }
-
-                let account = &mut self.accounts[idx];
-
-                // Settle funding first (required for correct PNL accounting)
-                Self::settle_account_funding(account, global_funding_index)?;
-
-                // Skip accounts with no position
-                if account.position_size == 0 {
                     continue;
                 }
 
-                // Compute mark PNL at oracle price
-                let pos = account.position_size;
-                let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl = Self::mark_pnl_for_position(pos, account.entry_price, oracle_price)?;
+                // Settle funding first (required for correct PNL accounting)
+                Self::settle_account_funding(&mut self.accounts[idx], global_funding_index)?;
 
-                // Track total mark PNL for rounding compensation
+                // Skip accounts with no position
+                if self.accounts[idx].position_size == 0 {
+                    continue;
+                }
+
+                // Close position via deferred helper
+                // NOTE: We ignore profit_to_fund because in force_realize_losses,
+                // profits are naturally funded by losses (zero-sum batch close)
+                let (mark_pnl, deferred) = self.force_close_position_deferred(idx, oracle_price)?;
+
+                // Accumulate rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
 
-                // Apply mark PNL to account
-                account.pnl = account.pnl.saturating_add(mark_pnl);
-
-                // Close position
-                account.position_size = 0;
-                account.entry_price = oracle_price;
-
-                // Update OI
-                self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
-
-                // Force settle losses only (not positive PnL)
-                if account.pnl < 0 {
-                    let need = neg_i128_to_u128(account.pnl);
-                    let pay = core::cmp::min(need, account.capital);
-
-                    // Pay from capital
-                    account.capital = sub_u128(account.capital, pay);
-                    account.pnl = account.pnl.saturating_add(pay as i128); // toward 0
-
-                    // Track in warmed_neg_total (losses realized)
-                    self.warmed_neg_total = add_u128(self.warmed_neg_total, pay);
-
-                    // Accumulate unpaid portion (capital exhausted)
-                    if need > pay {
-                        let unpaid = need - pay;
-                        total_unpaid_loss = total_unpaid_loss.saturating_add(unpaid);
-                        // Clamp remaining negative PnL to zero
-                        account.pnl = 0;
-                    }
-                }
-                // Positive PnL is left as-is (young, subject to ADL, warmup frozen)
-
-                // Update warmup start marker
-                let effective_slot = core::cmp::min(self.current_slot, self.warmup_pause_slot);
-                account.warmup_started_at_slot = effective_slot;
+                // Only accumulate unpaid losses (capital exhausted)
+                unpaid_total = unpaid_total.saturating_add(deferred.unpaid_loss);
             }
         }
 
-        // Compensate for non-zero-sum mark PNL from rounding.
+        // Rounding compensation:
         // If positive: treat as additional loss to socialize via ADL
         // If negative: absorbed by bounded conservation slack (don't mint to insurance)
         if total_mark_pnl > 0 {
-            total_unpaid_loss = total_unpaid_loss.saturating_add(total_mark_pnl as u128);
+            unpaid_total = unpaid_total.saturating_add(total_mark_pnl as u128);
         }
 
-        // Phase 2: Socialize any unpaid losses via ADL waterfall
+        // Phase 2: Socialize unpaid losses via ADL waterfall
         // All accounts now have their mark_pnl applied, so ADL can haircut properly
-        if total_unpaid_loss > 0 {
-            self.apply_adl(total_unpaid_loss)?;
+        if unpaid_total > 0 {
+            let _ = self.apply_adl(unpaid_total);
         }
 
         // Recompute reserved after all operations (W- and insurance may have changed)

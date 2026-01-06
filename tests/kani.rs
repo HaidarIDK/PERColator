@@ -6057,3 +6057,93 @@ fn gc_frees_negative_dust_via_adl() {
         "Loss should be in loss_accum"
     );
 }
+
+// ============================================================================
+// WITHDRAWAL MARGIN SAFETY (Bug 5 fix verification)
+// ============================================================================
+
+/// After successful withdrawal with position, account must be above maintenance margin
+/// This verifies Bug 5 fix: withdrawal uses oracle_price (not entry_price) for margin
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn withdrawal_maintains_margin_above_maintenance() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 1_000_000;
+    engine.current_slot = 100;
+
+    // Create account with position
+    let idx = engine.add_user(0).unwrap();
+    let capital: u128 = kani::any();
+    kani::assume(capital > 1000 && capital < 100_000);
+    engine.accounts[idx as usize].capital = capital;
+    engine.accounts[idx as usize].pnl = 0;
+
+    // Give account a position (avoid i128::MIN overflow on abs)
+    let pos: i128 = kani::any();
+    kani::assume(pos != 0 && pos > i128::MIN && pos > -10_000 && pos < 10_000);
+    kani::assume(if pos > 0 { pos > 100 } else { pos < -100 });
+    engine.accounts[idx as usize].position_size = pos;
+
+    // Set entry_price different from oracle_price to test the fix
+    let entry_price: u64 = kani::any();
+    kani::assume(entry_price > 100_000 && entry_price < 10_000_000);
+    engine.accounts[idx as usize].entry_price = entry_price;
+
+    // Oracle price can differ significantly from entry
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price > 100_000 && oracle_price < 10_000_000);
+
+    // Withdrawal amount
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount < capital);
+
+    // Try withdrawal
+    let result = engine.withdraw(idx, amount, 100, oracle_price);
+
+    // If withdrawal succeeded and account has position, must be above maintenance
+    if result.is_ok() && engine.accounts[idx as usize].position_size != 0 {
+        assert!(
+            engine.is_above_maintenance_margin(&engine.accounts[idx as usize], oracle_price),
+            "Post-withdrawal account with position must be above maintenance margin"
+        );
+    }
+}
+
+/// Withdrawal at oracle price that differs from entry_price is safe
+/// This specifically tests the scenario where entry_price-based check would pass
+/// but oracle_price-based check should fail
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn withdrawal_rejects_if_below_maintenance_at_oracle() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 1_000_000;
+    engine.current_slot = 100;
+
+    // Create account
+    let idx = engine.add_user(0).unwrap();
+
+    // Setup: account with small capital and position
+    // Capital that would barely pass margin at entry price
+    engine.accounts[idx as usize].capital = 1000;
+    engine.accounts[idx as usize].pnl = 0;
+    engine.accounts[idx as usize].position_size = 1000;
+    engine.accounts[idx as usize].entry_price = 1_000_000; // entry = 1.0
+
+    // Oracle price is much higher - same position requires more margin
+    let oracle_price: u64 = 2_000_000; // oracle = 2.0, 2x entry
+
+    // Try to withdraw most capital - should fail because margin check at oracle
+    let result = engine.withdraw(idx, 900, 100, oracle_price);
+
+    // Withdrawal should be rejected if it would leave account below maintenance at oracle
+    // If it's allowed, verify post-state is valid
+    if result.is_ok() {
+        assert!(
+            engine.accounts[idx as usize].position_size == 0 ||
+            engine.is_above_maintenance_margin(&engine.accounts[idx as usize], oracle_price),
+            "Allowed withdrawal must leave account above maintenance at oracle price"
+        );
+    }
+}
