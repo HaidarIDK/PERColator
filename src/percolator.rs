@@ -53,11 +53,21 @@ pub const NUM_STEPS: u8 = 16;
 pub const WINDOW: usize = 256;
 
 /// Hard liquidation budget per crank call (caps total work)
-pub const LIQ_BUDGET_PER_CRANK: u16 = 128;
+/// Set to 120 to keep worst-case crank CU under ~50% of Solana limit
+pub const LIQ_BUDGET_PER_CRANK: u16 = 120;
 
 /// Max number of force-realize closes per crank call.
 /// Hard CU bound in force-realize mode. Liquidations are skipped when active.
 pub const FORCE_REALIZE_BUDGET_PER_CRANK: u16 = 32;
+
+/// Maximum oracle price (prevents overflow in mark_pnl calculations)
+/// 10^15 allows prices up to $1B with 6 decimal places
+pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000_000;
+
+/// Maximum absolute position size (prevents overflow in mark_pnl calculations)
+/// 10^20 allows positions up to 100 billion units
+/// Combined with MAX_ORACLE_PRICE, guarantees mark_pnl multiply won't overflow i128
+pub const MAX_POSITION_ABS: u128 = 100_000_000_000_000_000_000;
 
 // ============================================================================
 // Core Data Structures
@@ -1372,6 +1382,11 @@ impl RiskEngine {
         funding_rate_bps_per_slot: i64,
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
 
@@ -2112,6 +2127,11 @@ impl RiskEngine {
         // Validate index
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Ok(false);
+        }
+
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
         }
 
         // Early gate: no position = nothing to liquidate (avoids expensive touch)
@@ -3154,6 +3174,11 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Validate account kinds
         if self.accounts[lp_idx as usize].kind != AccountKind::LP {
             return Err(RiskError::AccountKindMismatch);
@@ -3177,6 +3202,13 @@ impl RiskEngine {
             self.enforce_op(OpClass::RiskIncrease)?;
         } else {
             self.enforce_op(OpClass::RiskReduce)?;
+        }
+
+        // Validate position size bounds (prevents overflow in mark_pnl calculations)
+        if saturating_abs_i128(new_user_pos) as u128 > MAX_POSITION_ABS
+            || saturating_abs_i128(new_lp_pos) as u128 > MAX_POSITION_ABS
+        {
+            return Err(RiskError::Overflow);
         }
 
         // Call matching engine
@@ -3298,12 +3330,17 @@ impl RiskEngine {
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
         // Check user maintenance margin (MTM: includes unrealized mark PnL)
+        // FAIL-SAFE: overflow in mark_pnl => equity=0 => Undercollateralized (not generic Overflow)
         if new_user_position != 0 {
             // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
-            let user_mark = Self::mark_pnl_for_position(new_user_position, new_user_entry, oracle_price)?;
-            let user_cap_i = u128_to_i128_clamped(user.capital);
-            let user_eq_i = user_cap_i.saturating_add(new_user_pnl).saturating_add(user_mark);
-            let user_equity_mtm = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
+            let user_equity_mtm = match Self::mark_pnl_for_position(new_user_position, new_user_entry, oracle_price) {
+                Ok(user_mark) => {
+                    let user_cap_i = u128_to_i128_clamped(user.capital);
+                    let user_eq_i = user_cap_i.saturating_add(new_user_pnl).saturating_add(user_mark);
+                    if user_eq_i > 0 { user_eq_i as u128 } else { 0 }
+                }
+                Err(_) => 0, // Overflow => worst-case equity => will fail margin check
+            };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
@@ -3316,12 +3353,17 @@ impl RiskEngine {
         }
 
         // Check LP maintenance margin (MTM: includes unrealized mark PnL)
+        // FAIL-SAFE: overflow in mark_pnl => equity=0 => Undercollateralized (not generic Overflow)
         if new_lp_position != 0 {
             // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
-            let lp_mark = Self::mark_pnl_for_position(new_lp_position, new_lp_entry, oracle_price)?;
-            let lp_cap_i = u128_to_i128_clamped(lp.capital);
-            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl).saturating_add(lp_mark);
-            let lp_equity_mtm = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
+            let lp_equity_mtm = match Self::mark_pnl_for_position(new_lp_position, new_lp_entry, oracle_price) {
+                Ok(lp_mark) => {
+                    let lp_cap_i = u128_to_i128_clamped(lp.capital);
+                    let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl).saturating_add(lp_mark);
+                    if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 }
+                }
+                Err(_) => 0, // Overflow => worst-case equity => will fail margin check
+            };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
