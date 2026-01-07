@@ -7459,3 +7459,827 @@ fn proof_close_account_structural_integrity() {
         kani::assert(inv_structural(&engine), "close_account must preserve structural invariant");
     }
 }
+
+// ============================================================================
+// LIQUIDATE_AT_ORACLE PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// liquidate_at_oracle: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_liquidate_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_user = snapshot_account(&engine.accounts[user_idx as usize]);
+
+    let now_slot: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    kani::assume(now_slot >= 100 && now_slot < 1000);
+    kani::assume(oracle_price > 0 && oracle_price < 10_000_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, now_slot, oracle_price);
+
+    // liquidate_at_oracle returns Ok(false) for "no liquidation needed", not Err
+    // So Err is a real failure case that should preserve state
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "liquidate Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[user_idx as usize], &snap_user),
+            "liquidate Err: account unchanged"
+        );
+    }
+}
+
+/// liquidate_at_oracle: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_liquidate_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 500; // Small capital to possibly trigger liquidation
+    engine.accounts[user_idx as usize].position_size = 5_000_000; // Position that might be undercollateralized
+    engine.accounts[user_idx as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 5_000_000;
+
+    kani::assume(canonical_inv(&engine));
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, 100, oracle_price);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by liquidate_at_oracle");
+    }
+}
+
+// ============================================================================
+// APPLY_ADL PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// apply_adl: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_apply_adl_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[user_idx as usize].pnl = 5_000; // Some positive PnL to haircut
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_user = snapshot_account(&engine.accounts[user_idx as usize]);
+
+    let loss: u128 = kani::any();
+    kani::assume(loss < 50_000);
+
+    let result = engine.apply_adl(loss);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "apply_adl Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[user_idx as usize], &snap_user),
+            "apply_adl Err: account unchanged"
+        );
+    }
+}
+
+/// apply_adl: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_apply_adl_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 10_000;
+    engine.accounts[user_idx as usize].pnl = 5_000; // Positive PnL available
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 0; // All PnL is unwrapped
+    engine.current_slot = 0;
+
+    kani::assume(canonical_inv(&engine));
+
+    let loss: u128 = kani::any();
+    kani::assume(loss > 0 && loss < 3_000); // Loss less than available unwrapped PnL
+
+    let pnl_before = engine.accounts[user_idx as usize].pnl;
+
+    let result = engine.apply_adl(loss);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by apply_adl");
+
+        // NON-VACUITY: PnL actually reduced (if loss > 0 and unwrapped available)
+        if loss > 0 {
+            let pnl_after = engine.accounts[user_idx as usize].pnl;
+            // Either PnL was haircutted or insurance/loss_accum covered it
+            kani::assert(
+                pnl_after <= pnl_before || engine.loss_accum > 0,
+                "ADL must either haircut PnL or route through loss_accum"
+            );
+        }
+    }
+}
+
+// ============================================================================
+// SETTLE_WARMUP_TO_CAPITAL PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// settle_warmup_to_capital: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+    engine.accounts[user_idx as usize].pnl = 1_000;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_user = snapshot_account(&engine.accounts[user_idx as usize]);
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "settle_warmup Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[user_idx as usize], &snap_user),
+            "settle_warmup Err: account unchanged"
+        );
+    }
+}
+
+/// settle_warmup_to_capital: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 200;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+    engine.accounts[user_idx as usize].pnl = 1_000; // Positive PnL to settle
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
+
+    kani::assume(canonical_inv(&engine));
+
+    let cap_before = engine.accounts[user_idx as usize].capital;
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by settle_warmup_to_capital");
+    }
+}
+
+/// settle_warmup_to_capital: Negative PnL settles immediately
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_negative_pnl_immediate() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+    engine.accounts[user_idx as usize].pnl = -2_000; // Negative PnL
+
+    kani::assume(canonical_inv(&engine));
+
+    let cap_before = engine.accounts[user_idx as usize].capital;
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    if result.is_ok() {
+        let account = &engine.accounts[user_idx as usize];
+
+        // N1 boundary: pnl >= 0 or capital == 0
+        kani::assert(
+            account.pnl >= 0 || account.capital == 0,
+            "N1: after settle, pnl >= 0 OR capital == 0"
+        );
+
+        // NON-VACUITY: capital was reduced (loss settled)
+        kani::assert(
+            account.capital < cap_before,
+            "Negative PnL must reduce capital"
+        );
+    }
+}
+
+// ============================================================================
+// KEEPER_CRANK PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// keeper_crank: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 50; // Allow some time to pass
+
+    let caller = engine.add_user(0).unwrap();
+    engine.accounts[caller as usize].capital = 10_000;
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_caller = snapshot_account(&engine.accounts[caller as usize]);
+
+    let now_slot: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    let funding_rate: i64 = kani::any();
+    kani::assume(now_slot > engine.last_crank_slot && now_slot < 1000);
+    kani::assume(oracle_price > 0 && oracle_price <= 10_000_000);
+    kani::assume(funding_rate > -1000 && funding_rate < 1000);
+
+    let result = engine.keeper_crank(caller, now_slot, oracle_price, funding_rate, false);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "keeper_crank Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[caller as usize], &snap_caller),
+            "keeper_crank Err: caller unchanged"
+        );
+    }
+}
+
+/// keeper_crank: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 50;
+
+    let caller = engine.add_user(0).unwrap();
+    engine.accounts[caller as usize].capital = 10_000;
+
+    kani::assume(canonical_inv(&engine));
+
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot > engine.last_crank_slot && now_slot <= 200);
+
+    let result = engine.keeper_crank(caller, now_slot, 1_000_000, 0, false);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by keeper_crank");
+
+        // NON-VACUITY: crank advanced
+        kani::assert(
+            engine.last_crank_slot == now_slot,
+            "keeper_crank must advance last_crank_slot"
+        );
+    }
+}
+
+// ============================================================================
+// GARBAGE_COLLECT_DUST PROOF FAMILY - INV Preservation
+// ============================================================================
+
+/// garbage_collect_dust: INV preserved (doesn't return Result)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_gc_dust_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+
+    // Create a dust account (zero capital, zero position, non-positive pnl)
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 0;
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].position_size = 0;
+    engine.accounts[user_idx as usize].reserved_pnl = 0;
+
+    kani::assume(canonical_inv(&engine));
+
+    let num_used_before = engine.num_used_accounts;
+
+    let freed = engine.garbage_collect_dust();
+
+    kani::assert(canonical_inv(&engine), "INV preserved by garbage_collect_dust");
+
+    // If any accounts were freed, num_used must decrease
+    if freed > 0 {
+        kani::assert(
+            engine.num_used_accounts < num_used_before,
+            "GC must decrease num_used_accounts when freeing accounts"
+        );
+    }
+}
+
+/// garbage_collect_dust: Structural integrity
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_gc_dust_structural_integrity() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+
+    // Create a dust account
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 0;
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].position_size = 0;
+    engine.accounts[user_idx as usize].reserved_pnl = 0;
+
+    kani::assume(inv_structural(&engine));
+
+    let _ = engine.garbage_collect_dust();
+
+    kani::assert(inv_structural(&engine), "GC must preserve structural invariant");
+}
+
+// ============================================================================
+// FORCE_REALIZE_LOSSES PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// force_realize_losses: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_force_realize_exception_safety() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+    engine.vault = 100_000;
+    // Set insurance at floor to enable force_realize
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+    engine.accounts[user_idx as usize].pnl = -2_000; // Negative PnL
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_user = snapshot_account(&engine.accounts[user_idx as usize]);
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price > 0 && oracle_price <= 10_000_000);
+
+    let result = engine.force_realize_losses(oracle_price);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "force_realize Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[user_idx as usize], &snap_user),
+            "force_realize Err: account unchanged"
+        );
+    }
+}
+
+/// force_realize_losses: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_force_realize_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+    engine.vault = 100_000;
+    // Set insurance at floor to enable force_realize
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 5_000;
+    engine.accounts[user_idx as usize].pnl = -2_000; // Negative PnL to realize
+
+    kani::assume(canonical_inv(&engine));
+
+    let result = engine.force_realize_losses(1_000_000);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by force_realize_losses");
+    }
+}
+
+// ============================================================================
+// CLOSE_ACCOUNT PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// close_account: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_close_account_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 1_000; // Non-zero capital - will fail
+    engine.accounts[user_idx as usize].pnl = 0;
+
+    let snap_globals = snapshot_engine(&engine);
+    let snap_user = snapshot_account(&engine.accounts[user_idx as usize]);
+
+    let now_slot: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    kani::assume(now_slot >= 100 && now_slot < 1000);
+    kani::assume(oracle_price > 0 && oracle_price < 10_000_000);
+
+    let result = engine.close_account(user_idx, now_slot, oracle_price);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "close_account Err: globals unchanged");
+        kani::assert(
+            account_unchanged(&engine.accounts[user_idx as usize], &snap_user),
+            "close_account Err: account unchanged"
+        );
+    }
+}
+
+/// close_account: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_close_account_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = 0; // Must be zero to close
+    engine.accounts[user_idx as usize].pnl = 0;
+    engine.accounts[user_idx as usize].position_size = 0;
+
+    kani::assume(canonical_inv(&engine));
+
+    let num_used_before = engine.num_used_accounts;
+
+    let result = engine.close_account(user_idx, 100, 1_000_000);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by close_account");
+
+        // NON-VACUITY: account was closed
+        kani::assert(
+            !engine.is_used(user_idx as usize),
+            "close_account must mark account as unused"
+        );
+        kani::assert(
+            engine.num_used_accounts == num_used_before - 1,
+            "close_account must decrease num_used_accounts"
+        );
+    }
+}
+
+// ============================================================================
+// TOP_UP_INSURANCE_FUND PROOF FAMILY - Exception Safety + INV Preservation
+// ============================================================================
+
+/// top_up_insurance_fund: Strong exception safety
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_top_up_insurance_exception_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.loss_accum = 5_000; // Some accumulated loss
+
+    let snap_globals = snapshot_engine(&engine);
+
+    let amount: u128 = kani::any();
+    kani::assume(amount < 100_000);
+
+    let result = engine.top_up_insurance_fund(amount);
+
+    if result.is_err() {
+        kani::assert(globals_unchanged(&engine, &snap_globals), "top_up Err: globals unchanged");
+    }
+}
+
+/// top_up_insurance_fund: INV preserved on success
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_top_up_insurance_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.loss_accum = 5_000;
+    engine.insurance_fund.balance = 10_000;
+
+    kani::assume(canonical_inv(&engine));
+
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount < 50_000);
+
+    let loss_before = engine.loss_accum;
+    let insurance_before = engine.insurance_fund.balance;
+    let vault_before = engine.vault;
+
+    let result = engine.top_up_insurance_fund(amount);
+
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by top_up_insurance_fund");
+
+        // NON-VACUITY: vault increased by amount
+        kani::assert(
+            engine.vault == vault_before + amount,
+            "top_up must increase vault by amount"
+        );
+
+        // Either loss_accum reduced or insurance increased (or both)
+        let total_change = (loss_before - engine.loss_accum) + (engine.insurance_fund.balance - insurance_before);
+        kani::assert(
+            total_change == amount,
+            "top_up amount must go to loss_accum reduction + insurance increase"
+        );
+    }
+}
+
+/// top_up_insurance_fund: Loss coverage priority
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_top_up_insurance_covers_loss_first() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.loss_accum = 5_000; // Some accumulated loss
+    engine.insurance_fund.balance = 10_000;
+
+    kani::assume(canonical_inv(&engine));
+
+    // Amount less than loss_accum
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount < engine.loss_accum);
+
+    let loss_before = engine.loss_accum;
+    let insurance_before = engine.insurance_fund.balance;
+
+    let result = engine.top_up_insurance_fund(amount);
+
+    if result.is_ok() {
+        // Loss should be reduced by exactly the amount (since amount < loss_accum)
+        kani::assert(
+            engine.loss_accum == loss_before - amount,
+            "top_up must reduce loss_accum by amount when amount < loss_accum"
+        );
+
+        // Insurance should be unchanged (all went to loss coverage)
+        kani::assert(
+            engine.insurance_fund.balance == insurance_before,
+            "insurance unchanged when all top_up goes to loss coverage"
+        );
+    }
+}
+
+// ============================================================================
+// SEQUENCE-LEVEL PROOFS - Multi-Operation INV Preservation
+// ============================================================================
+
+/// Sequence: deposit -> trade -> liquidate preserves INV
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_sequence_deposit_trade_liquidate() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+
+    kani::assume(canonical_inv(&engine));
+
+    // Step 1: Deposits
+    let user_deposit: u128 = kani::any();
+    let lp_deposit: u128 = kani::any();
+    kani::assume(user_deposit > 100 && user_deposit < 10_000);
+    kani::assume(lp_deposit > 1000 && lp_deposit < 100_000);
+
+    let _ = engine.deposit(user, user_deposit);
+    let _ = engine.deposit(lp, lp_deposit);
+
+    kani::assert(canonical_inv(&engine), "INV after deposits");
+
+    // Step 2: Trade (small position)
+    let delta: i128 = kani::any();
+    kani::assume(delta >= -50 && delta <= 50 && delta != 0);
+
+    let _ = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta);
+
+    kani::assert(canonical_inv(&engine), "INV after trade");
+
+    // Step 3: Liquidation attempt
+    let _ = engine.liquidate_at_oracle(user, 100, 1_000_000);
+
+    kani::assert(canonical_inv(&engine), "INV after liquidate attempt");
+}
+
+/// Sequence: deposit -> crank -> withdraw preserves INV
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_sequence_deposit_crank_withdraw() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 50;
+    engine.last_full_sweep_start_slot = 50;
+
+    let user = engine.add_user(0).unwrap();
+
+    kani::assume(canonical_inv(&engine));
+
+    // Step 1: Deposit
+    let deposit: u128 = kani::any();
+    kani::assume(deposit > 1000 && deposit < 50_000);
+
+    let _ = engine.deposit(user, deposit);
+
+    kani::assert(canonical_inv(&engine), "INV after deposit");
+
+    // Step 2: Crank
+    let _ = engine.keeper_crank(user, 100, 1_000_000, 0, false);
+
+    kani::assert(canonical_inv(&engine), "INV after crank");
+
+    // Step 3: Withdraw
+    let withdraw: u128 = kani::any();
+    kani::assume(withdraw > 0 && withdraw < deposit / 2);
+
+    let _ = engine.withdraw(user, withdraw, 100, 1_000_000);
+
+    kani::assert(canonical_inv(&engine), "INV after withdraw");
+}
+
+/// Sequence: add_user -> deposit -> top_up -> close_account preserves INV
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_sequence_lifecycle() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.loss_accum = 1_000; // Some loss to cover
+
+    kani::assume(canonical_inv(&engine));
+
+    // Step 1: Add user
+    let user = engine.add_user(0).unwrap();
+
+    kani::assert(canonical_inv(&engine), "INV after add_user");
+
+    // Step 2: Deposit
+    let deposit: u128 = kani::any();
+    kani::assume(deposit > 100 && deposit < 10_000);
+
+    let _ = engine.deposit(user, deposit);
+
+    kani::assert(canonical_inv(&engine), "INV after deposit");
+
+    // Step 3: Top up insurance
+    let topup: u128 = kani::any();
+    kani::assume(topup > 0 && topup < 5_000);
+
+    let _ = engine.top_up_insurance_fund(topup);
+
+    kani::assert(canonical_inv(&engine), "INV after top_up");
+
+    // Step 4: Withdraw all and close
+    let _ = engine.withdraw(user, engine.accounts[user as usize].capital, 100, 1_000_000);
+    let _ = engine.close_account(user, 100, 1_000_000);
+
+    kani::assert(canonical_inv(&engine), "INV after close_account");
+}
+
+// ============================================================================
+// FUNDING/POSITION CONSERVATION PROOFS
+// ============================================================================
+
+/// Trade creates proper funding-settled positions
+/// This proof verifies that after execute_trade:
+/// - Both accounts have positions (non-vacuous)
+/// - Both accounts are funding-settled (funding_index matches global)
+/// - INV is preserved
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_trade_creates_funding_settled_positions() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+
+    // Deposits
+    let _ = engine.deposit(user, 10_000);
+    let _ = engine.deposit(lp, 50_000);
+
+    kani::assume(canonical_inv(&engine));
+
+    // Execute trade to create positions
+    let delta: i128 = kani::any();
+    kani::assume(delta >= 50 && delta <= 200); // Positive delta to ensure non-zero positions
+
+    let result = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta);
+
+    if result.is_ok() {
+        // NON-VACUITY: Both accounts should have positions now
+        kani::assert(
+            engine.accounts[user as usize].position_size != 0,
+            "User must have position after trade"
+        );
+        kani::assert(
+            engine.accounts[lp as usize].position_size != 0,
+            "LP must have position after trade"
+        );
+
+        // Funding should be settled (both at same funding index)
+        kani::assert(
+            engine.accounts[user as usize].funding_index == engine.funding_index_qpb_e6,
+            "User funding must be settled"
+        );
+        kani::assert(
+            engine.accounts[lp as usize].funding_index == engine.funding_index_qpb_e6,
+            "LP funding must be settled"
+        );
+
+        // INV must be preserved
+        kani::assert(canonical_inv(&engine), "INV must hold after trade");
+    }
+}
+
+/// Keeper crank with funding rate preserves INV
+/// This proves that non-zero funding rates don't violate structural invariants
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_crank_with_funding_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 50;
+    engine.last_full_sweep_start_slot = 50;
+
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+
+    // Deposits
+    let _ = engine.deposit(user, 10_000);
+    let _ = engine.deposit(lp, 50_000);
+
+    // Execute trade to create positions (creates OI for funding to act on)
+    let _ = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, 50);
+
+    kani::assume(canonical_inv(&engine));
+
+    // Crank with symbolic funding rate
+    let funding_rate: i64 = kani::any();
+    kani::assume(funding_rate > -100 && funding_rate < 100);
+
+    let result = engine.keeper_crank(user, 100, 1_000_000, funding_rate, false);
+
+    if result.is_ok() {
+        // INV must be preserved after crank (regardless of funding rate value)
+        kani::assert(canonical_inv(&engine), "INV must hold after crank with funding");
+
+        // NON-VACUITY: crank advanced
+        kani::assert(
+            engine.last_crank_slot == 100,
+            "Crank must advance last_crank_slot"
+        );
+    }
+}
