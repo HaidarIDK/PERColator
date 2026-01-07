@@ -1383,7 +1383,7 @@ impl RiskEngine {
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -2050,7 +2050,12 @@ impl RiskEngine {
         let entry = account.entry_price;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // This ensures we can always close positions without wedging
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -(self.accounts[idx].capital as i128), // Worst-case: lose all capital
+        };
 
         // Apply mark PnL to account
         self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_add(mark_pnl);
@@ -2130,7 +2135,7 @@ impl RiskEngine {
         }
 
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -2948,7 +2953,7 @@ impl RiskEngine {
         oracle_price: u64,
     ) -> Result<()> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -2986,11 +2991,16 @@ impl RiskEngine {
 
         // Calculate MTM equity after withdrawal
         // equity_mtm = max(0, new_capital + pnl + mark_pnl)
+        // Fail-safe: if mark_pnl overflows (corrupted entry_price/position_size), treat as 0 equity
         let new_capital = sub_u128(old_capital, amount);
-        let mark_pnl = Self::mark_pnl_for_position(position_size, entry_price, oracle_price)?;
-        let cap_i = u128_to_i128_clamped(new_capital);
-        let new_eq_i = cap_i.saturating_add(pnl).saturating_add(mark_pnl);
-        let new_equity_mtm = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
+        let new_equity_mtm = match Self::mark_pnl_for_position(position_size, entry_price, oracle_price) {
+            Ok(mark_pnl) => {
+                let cap_i = u128_to_i128_clamped(new_capital);
+                let new_eq_i = cap_i.saturating_add(pnl).saturating_add(mark_pnl);
+                if new_eq_i > 0 { new_eq_i as u128 } else { 0 }
+            }
+            Err(_) => 0, // Overflow => worst-case equity => will fail margin check below
+        };
 
         // If account has position, must maintain initial margin at ORACLE price (MTM check)
         // This prevents withdrawing to a state that's immediately liquidatable
@@ -3180,7 +3190,7 @@ impl RiskEngine {
         }
 
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -3231,7 +3241,7 @@ impl RiskEngine {
 
         // Validate execution bounds (prevents overflow in mark_pnl calculations)
         // These are the ACTUAL values that will be used, not the requested values
-        if exec_price > MAX_ORACLE_PRICE {
+        if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
         if saturating_abs_i128(exec_size) as u128 > MAX_POSITION_ABS {
@@ -4112,7 +4122,7 @@ impl RiskEngine {
     /// processing so ADL can see the full picture of positive PnL before haircutting.
     pub fn panic_settle_all(&mut self, oracle_price: u64) -> Result<()> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -4160,9 +4170,14 @@ impl RiskEngine {
                 }
 
                 // Compute mark PNL at oracle price
+                // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+                // This ensures panic settle can always complete without wedging
                 let pos = account.position_size;
                 let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl = Self::mark_pnl_for_position(pos, account.entry_price, oracle_price)?;
+                let mark_pnl = match Self::mark_pnl_for_position(pos, account.entry_price, oracle_price) {
+                    Ok(pnl) => pnl,
+                    Err(_) => -(account.capital as i128), // Worst-case: lose all capital
+                };
 
                 // Track total mark PNL for rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
@@ -4256,7 +4271,7 @@ impl RiskEngine {
     /// - Only unpaid losses (capital exhausted) need ADL socialization
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
-        if oracle_price > MAX_ORACLE_PRICE {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 

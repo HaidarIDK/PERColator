@@ -6560,9 +6560,10 @@ fn withdrawal_maintains_margin_above_maintenance() {
     let result = engine.withdraw(idx, amount, 100, oracle_price);
 
     // If withdrawal succeeded and account has position, must be above maintenance
+    // NOTE: Must use MTM version since withdraw() checks MTM maintenance margin
     if result.is_ok() && engine.accounts[idx as usize].position_size != 0 {
         assert!(
-            engine.is_above_maintenance_margin(&engine.accounts[idx as usize], oracle_price),
+            engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price),
             "Post-withdrawal account with position must be above maintenance margin"
         );
     }
@@ -6597,10 +6598,11 @@ fn withdrawal_rejects_if_below_maintenance_at_oracle() {
 
     // Withdrawal should be rejected if it would leave account below maintenance at oracle
     // If it's allowed, verify post-state is valid
+    // NOTE: Must use MTM version since withdraw() checks MTM maintenance margin
     if result.is_ok() {
         assert!(
             engine.accounts[idx as usize].position_size == 0 ||
-            engine.is_above_maintenance_margin(&engine.accounts[idx as usize], oracle_price),
+            engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price),
             "Allowed withdrawal must leave account above maintenance at oracle price"
         );
     }
