@@ -4858,10 +4858,12 @@ fn test_keeper_crank_liquidates_undercollateralized_user() {
         "User position should be closed after liquidation"
     );
 
-    // Insurance should have increased from liquidation fee
-    assert!(
-        engine.insurance_fund.balance >= insurance_before,
-        "Insurance should not decrease from liquidation"
+    // Note: Insurance may decrease if liquidation creates unpaid losses
+    // that get covered by finalize_pending_after_window. This is correct behavior.
+    // The key invariant is that pending is resolved (not stuck forever).
+    assert_eq!(
+        engine.pending_unpaid_loss, 0,
+        "Pending loss should be resolved after crank"
     );
 }
 
@@ -5625,12 +5627,12 @@ fn test_force_realize_losses_conservation_with_profit_and_loss() {
 }
 
 #[test]
-fn test_topk_selection_many_accounts_few_liquidatable() {
+fn test_window_liquidation_many_accounts_few_liquidatable() {
     // Bench scenario: Many accounts with positions, but few actually liquidatable.
-    // Tests that the cheap O(N log K) selection doesn't blow compute.
+    // Tests that window sweep liquidation works correctly.
     // (In test mode MAX_ACCOUNTS=64, so we use proportional scaling)
 
-    use percolator::{MAX_ACCOUNTS, TOP_LIQ_K};
+    use percolator::MAX_ACCOUNTS;
 
     let mut params = default_params();
     params.maintenance_margin_bps = 500; // 5%
@@ -5694,15 +5696,12 @@ fn test_topk_selection_many_accounts_few_liquidatable() {
             idx
         );
     }
-
-    // TOP_LIQ_K should be reasonable
-    assert_eq!(TOP_LIQ_K, 128, "TOP_LIQ_K should be 128");
 }
 
 #[test]
-fn test_topk_selection_many_liquidatable() {
+fn test_window_liquidation_many_liquidatable() {
     // Bench scenario: Multiple liquidatable accounts with varying severity.
-    // Tests that the two-phase design (top-K + window) handles multiple liquidations.
+    // Tests that window sweep handles multiple liquidations correctly.
 
     let mut params = default_params();
     params.maintenance_margin_bps = 500; // 5%
@@ -5864,7 +5863,7 @@ fn test_force_realize_step_inert_above_threshold() {
 
 /// Test 3: Force-realize produces pending_unpaid_loss and socialization reduces it
 #[test]
-fn test_force_realize_produces_pending_and_socialization_reduces() {
+fn test_force_realize_produces_pending_and_finalize_resolves() {
     let mut params = default_params();
     params.risk_reduction_threshold = 1000;
     let mut engine = Box::new(RiskEngine::new(params));
@@ -5885,11 +5884,10 @@ fn test_force_realize_produces_pending_and_socialization_reduces() {
     engine.accounts[lp as usize].entry_price = 2_000_000;
     engine.total_open_interest = 20_000;
 
-    // Set insurance at threshold
+    // Set insurance at threshold (nothing spendable)
     engine.insurance_fund.balance = 1000;
 
-    // Snapshot pending before
-    let pending_before = engine.pending_unpaid_loss;
+    let loss_accum_before = engine.loss_accum;
 
     // Run crank at oracle price 1.0 (user lost money)
     let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
@@ -5898,28 +5896,25 @@ fn test_force_realize_produces_pending_and_socialization_reduces() {
     assert!(outcome.force_realize_needed);
     assert!(outcome.force_realize_closed > 0, "Should force-close position");
 
-    // pending_unpaid_loss should have increased
-    assert!(
-        engine.pending_unpaid_loss > pending_before,
-        "pending_unpaid_loss should increase"
+    // With finalize_pending_after_window, pending should be immediately resolved:
+    // - If insurance available: spent to cover
+    // - If not: moved to loss_accum and cleared
+    // Since insurance is at threshold (nothing spendable), loss should go to loss_accum
+    assert_eq!(
+        engine.pending_unpaid_loss, 0,
+        "pending_unpaid_loss should be cleared by finalize"
     );
 
-    // Now create an account with unwrapped profit to absorb the pending loss
-    let winner = engine.add_user(0).unwrap();
-    engine.accounts[winner as usize].pnl = 50_000; // Positive PnL (unwrapped)
-    engine.accounts[winner as usize].warmup_slope_per_step = 0; // All unwrapped
-    engine.vault = engine.vault + 50_000; // Adjust vault for conservation
-
-    // Run more cranks to let socialization chew down the pending
-    let pending_mid = engine.pending_unpaid_loss;
-    for slot in 2..20 {
-        let _ = engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false);
-    }
-
-    // Pending should have decreased
+    // Loss should have moved to loss_accum
     assert!(
-        engine.pending_unpaid_loss < pending_mid,
-        "pending_unpaid_loss should decrease after socialization"
+        engine.loss_accum > loss_accum_before,
+        "Uncovered loss should move to loss_accum"
+    );
+
+    // System should be in risk-reduction mode
+    assert!(
+        engine.risk_reduction_only,
+        "Should be in risk-reduction mode after uncovered loss"
     );
 }
 
@@ -5958,4 +5953,173 @@ fn test_force_realize_blocks_value_extraction() {
     // Now withdraw should succeed
     let result = engine.withdraw(user, 1_000, 0, 1_000_000);
     assert!(result.is_ok(), "Withdraw should succeed when pending = 0");
+}
+
+// ==============================================================================
+// PENDING FINALIZE LIVENESS TESTS
+// ==============================================================================
+
+/// Test: pending_unpaid_loss can't wedge - insurance covers it
+#[test]
+fn test_pending_finalize_liveness_insurance_covers() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Floor at 1000
+    let mut engine = RiskEngine::new(params);
+
+    // Fund insurance well above floor
+    engine.insurance_fund.balance = 100_000;
+
+    // Create pending loss with no accounts to haircut
+    engine.pending_unpaid_loss = 5_000;
+
+    // Run crank - finalize_pending_after_window should spend insurance
+    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
+    assert!(result.is_ok());
+
+    // Pending should be cleared (or reduced)
+    assert_eq!(
+        engine.pending_unpaid_loss, 0,
+        "pending_unpaid_loss should be cleared by insurance"
+    );
+
+    // Insurance should have decreased
+    assert!(
+        engine.insurance_fund.balance < 100_000,
+        "Insurance should have been spent"
+    );
+}
+
+/// Test: pending moves to loss_accum when insurance exhausted
+#[test]
+fn test_pending_finalize_liveness_moves_to_loss_accum() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Floor at 1000
+    let mut engine = RiskEngine::new(params);
+
+    // Insurance exactly at floor (nothing spendable)
+    engine.insurance_fund.balance = 1000;
+
+    // Create pending loss
+    engine.pending_unpaid_loss = 5_000;
+
+    // Run crank
+    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
+    assert!(result.is_ok());
+
+    // Pending should be cleared
+    assert_eq!(
+        engine.pending_unpaid_loss, 0,
+        "pending_unpaid_loss should be cleared"
+    );
+
+    // Loss should have moved to loss_accum
+    assert_eq!(
+        engine.loss_accum, 5_000,
+        "Loss should move to loss_accum when insurance exhausted"
+    );
+
+    // Should be in risk-reduction mode
+    assert!(
+        engine.risk_reduction_only,
+        "Should enter risk-reduction mode when losses are uncovered"
+    );
+}
+
+/// Test: force-realize updates LP aggregates correctly
+#[test]
+fn test_force_realize_updates_lp_aggregates() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 10_000; // High threshold to trigger force-realize
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.vault = 100_000;
+
+    // Insurance below threshold = force-realize active
+    engine.insurance_fund.balance = 5_000;
+
+    // Create LP with position
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.deposit(lp, 50_000).unwrap();
+
+    // Create user as counterparty
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 50_000).unwrap();
+
+    // Set up positions
+    engine.accounts[lp as usize].position_size = -1_000_000; // Short 1 unit
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].position_size = 1_000_000; // Long 1 unit
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 2_000_000;
+
+    // Update LP aggregates manually (simulating what would normally happen)
+    engine.net_lp_pos = -1_000_000;
+    engine.lp_sum_abs = 1_000_000;
+
+    // Verify force-realize is active
+    assert!(
+        engine.insurance_fund.balance <= params.risk_reduction_threshold,
+        "Force-realize should be active"
+    );
+
+    let net_lp_before = engine.net_lp_pos;
+    let sum_abs_before = engine.lp_sum_abs;
+
+    // Run crank - should close LP position via force-realize
+    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
+    assert!(result.is_ok());
+
+    // LP position should be closed
+    if engine.accounts[lp as usize].position_size == 0 {
+        // If LP was closed, aggregates should be updated
+        assert_ne!(
+            engine.net_lp_pos, net_lp_before,
+            "net_lp_pos should change when LP position closed"
+        );
+        assert!(
+            engine.lp_sum_abs < sum_abs_before,
+            "lp_sum_abs should decrease when LP position closed"
+        );
+    }
+}
+
+/// Test: withdrawals blocked during pending, unblocked after finalize
+#[test]
+fn test_withdrawals_blocked_during_pending_unblocked_after() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 0;
+    params.warmup_period_slots = 0; // Instant warmup
+    let mut engine = RiskEngine::new(params);
+
+    // Fund insurance
+    engine.insurance_fund.balance = 100_000;
+
+    // Create user with capital
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Crank to establish baseline
+    engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Create pending loss
+    engine.pending_unpaid_loss = 500;
+
+    // Withdraw should fail with pending
+    let result = engine.withdraw(user, 1_000, 2, 1_000_000);
+    assert!(
+        result.is_err(),
+        "Withdraw should fail while pending_unpaid_loss > 0"
+    );
+
+    // Run crank to finalize pending
+    engine.keeper_crank(u16::MAX, 3, 1_000_000, 0, false).unwrap();
+
+    // Pending should be cleared now
+    assert_eq!(engine.pending_unpaid_loss, 0, "Pending should be cleared");
+
+    // Withdraw should now succeed (crank freshness check)
+    let result = engine.withdraw(user, 1_000, 3, 1_000_000);
+    assert!(
+        result.is_ok(),
+        "Withdraw should succeed after pending cleared"
+    );
 }

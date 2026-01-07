@@ -52,18 +52,8 @@ pub const NUM_STEPS: u8 = 16;
 /// Accounts scanned per crank step in the deterministic sweep
 pub const WINDOW: usize = 256;
 
-/// Number of priority liquidations per crank (global top-K worst)
-/// Selection is O(N log K) using min-heap
-pub const TOP_LIQ_K: usize = 128;
-
 /// Hard liquidation budget per crank call (caps total work)
 pub const LIQ_BUDGET_PER_CRANK: u16 = 128;
-
-/// Budget for top-K priority liquidations (must be <= LIQ_BUDGET_PER_CRANK)
-pub const TOPK_RUN_BUDGET: u16 = 64;
-
-/// Budget for sweep liquidations (remaining after top-K)
-pub const SWEEP_RUN_BUDGET: u16 = LIQ_BUDGET_PER_CRANK - TOPK_RUN_BUDGET;
 
 /// Max number of force-realize closes per crank call.
 /// Hard CU bound in force-realize mode. Liquidations are skipped when active.
@@ -378,25 +368,6 @@ pub struct RiskEngine {
     /// Set to 1 for accounts that should be excluded from profit-funding ADL pass.
     /// Only meaningful for indices visited in current window; cleared per-window.
     pub adl_exclude_scratch: [u8; MAX_ACCOUNTS],
-
-    // ========================================
-    // Top-K Liquidation Scratch (does NOT alias ADL scratch)
-    // ========================================
-    /// Heap of account indices for top-K liquidation selection
-    pub topk_idx: [u16; TOP_LIQ_K],
-
-    /// Scores for heap entries (parallel to topk_idx)
-    pub topk_score: [u128; TOP_LIQ_K],
-
-    /// Current heap size
-    pub topk_len: u16,
-
-    /// Epoch counter for top-K deduplication (increments each sweep start)
-    pub topk_epoch: u8,
-
-    /// Per-account epoch marker to avoid duplicate inserts within a sweep
-    /// If topk_seen_epoch[idx] == topk_epoch, already considered this sweep
-    pub topk_seen_epoch: [u8; MAX_ACCOUNTS],
 
     // ========================================
     // Deferred Socialization Buckets (replaces global ADL)
@@ -740,11 +711,6 @@ impl RiskEngine {
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
             adl_idx_scratch: [0; MAX_ACCOUNTS],
             adl_exclude_scratch: [0; MAX_ACCOUNTS],
-            topk_idx: [0; TOP_LIQ_K],
-            topk_score: [0; TOP_LIQ_K],
-            topk_len: 0,
-            topk_epoch: 0,
-            topk_seen_epoch: [0; MAX_ACCOUNTS],
             pending_profit_to_fund: 0,
             pending_unpaid_loss: 0,
             pending_epoch: 0,
@@ -1139,6 +1105,16 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Touch account for liquidation paths: settles funding and fees but
+    /// uses best-effort fee settle since we're about to liquidate anyway.
+    fn touch_account_for_liquidation(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+        // Funding settle is required for correct pnl
+        self.touch_account(idx)?;
+        // Best-effort fees; margin check would just block the liquidation we need to do
+        let _ = self.settle_maintenance_fee_best_effort_for_crank(idx, now_slot)?;
+        Ok(())
+    }
+
     /// Set owner pubkey for an account
     pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -1402,17 +1378,14 @@ impl RiskEngine {
         // If starting a new sweep (step 0), record the start slot and reset state
         if self.crank_step == 0 {
             self.last_full_sweep_start_slot = now_slot;
-            // Reset top-K heap for new sweep
-            self.topk_len = 0;
             // Increment epochs (wrapping) - avoids O(MAX_ACCOUNTS) clears
-            self.topk_epoch = self.topk_epoch.wrapping_add(1);
             self.pending_epoch = self.pending_epoch.wrapping_add(1);
             // Reset in-progress lp_max_abs for fresh sweep
             self.lp_max_abs_sweep = 0;
         }
 
-        // Accrue funding first (always)
-        let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
+        // Accrue funding first (always) - propagate errors, don't continue with corrupt state
+        self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot)?;
 
         // Check if we're advancing the global crank slot
         let advanced = now_slot > self.last_crank_slot;
@@ -1450,25 +1423,15 @@ impl RiskEngine {
         let window_start = (self.crank_step as usize * WINDOW) & ACCOUNT_IDX_MASK;
         let window_len = WINDOW.min(MAX_ACCOUNTS);
 
-        // Skip liquidation phases when force-realize is active (insurance at/below threshold).
+        // Skip liquidation when force-realize is active (insurance at/below threshold).
         // Force-realize closes ALL positions; liquidation just adds unnecessary CU.
         let (num_liquidations, num_liq_errors) = if self.force_realize_active() {
             (0, 0)
         } else {
-            // Phase A: Incremental top-K build + execution (bounded by TOPK_RUN_BUDGET)
-            self.topk_build_step(oracle_price, window_start, window_len);
-            let (top_liq_count, top_liq_errors) =
-                self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize, TOPK_RUN_BUDGET);
-
-            // Phase B: Deterministic window sweep (bounded by remaining budget)
-            let remaining_budget = LIQ_BUDGET_PER_CRANK.saturating_sub(top_liq_count);
+            // Single-pass window sweep with hard budget
             let (_sweep_checked, sweep_liqs, sweep_errors) =
-                self.scan_and_liquidate_window(now_slot, oracle_price, window_start, window_len as u16, remaining_budget);
-
-            // Combine liquidation counts
-            let liq_count = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
-            let liq_errors = top_liq_errors.saturating_add(sweep_errors);
-            (liq_count, liq_errors)
+                self.scan_and_liquidate_window(now_slot, oracle_price, window_start, window_len as u16, LIQ_BUDGET_PER_CRANK);
+            (sweep_liqs as u32, sweep_errors)
         };
 
         // Windowed force-realize step: when insurance is at/below threshold,
@@ -1485,6 +1448,10 @@ impl RiskEngine {
 
         // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
         self.socialization_step(window_start, window_len);
+
+        // Finalize pending: spend insurance, move remainder to loss_accum
+        // Guarantees pending buckets can't remain non-zero forever (liveness)
+        self.finalize_pending_after_window();
 
         // Garbage collect dust accounts
         let num_gc_closed = self.garbage_collect_dust();
@@ -2059,6 +2026,13 @@ impl RiskEngine {
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx].kind == AccountKind::LP {
+            self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
+            // lp_max_abs: handled by bounded sweep reset, no action needed here
+        }
+
         // Build deferred ADL result
         let mut deferred = DeferredAdl::ZERO;
 
@@ -2215,8 +2189,8 @@ impl RiskEngine {
             return Ok((false, DeferredAdl::ZERO));
         }
 
-        // Minimal settle for crank: funding + maintenance only (no warmup)
-        self.touch_account_for_crank(idx, now_slot, oracle_price)?;
+        // Settle funding + best-effort fees (can't block on margin - we're liquidating)
+        self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
         if self.is_above_maintenance_margin(account, oracle_price) {
@@ -2484,196 +2458,6 @@ impl RiskEngine {
     }
 
     // ========================================
-    // Top-K Priority Liquidation (global selection + execution)
-    // ========================================
-
-    /// Min-heap comparison: returns true if heap position a < heap position b.
-    /// Uses topk_score for comparison with topk_idx as tie-breaker for determinism.
-    #[inline]
-    fn topk_heap_less(&self, a: usize, b: usize) -> bool {
-        let score_a = self.topk_score[a];
-        let score_b = self.topk_score[b];
-        if score_a != score_b {
-            score_a < score_b
-        } else {
-            // Tie-breaker: lower index wins (determinism)
-            self.topk_idx[a] < self.topk_idx[b]
-        }
-    }
-
-    /// Swap heap entries at positions i and j.
-    #[inline]
-    fn topk_swap(&mut self, i: usize, j: usize) {
-        self.topk_idx.swap(i, j);
-        self.topk_score.swap(i, j);
-    }
-
-    /// Sift up in min-heap (for insertion).
-    #[inline]
-    fn topk_sift_up(&mut self, mut i: usize) {
-        while i > 0 {
-            let parent = (i - 1) / 2;
-            if self.topk_heap_less(i, parent) {
-                self.topk_swap(i, parent);
-                i = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Sift down in min-heap (for replacement).
-    #[inline]
-    fn topk_sift_down(&mut self, mut i: usize, heap_len: usize) {
-        loop {
-            let left = 2 * i + 1;
-            let right = 2 * i + 2;
-            let mut smallest = i;
-
-            if left < heap_len && self.topk_heap_less(left, smallest) {
-                smallest = left;
-            }
-            if right < heap_len && self.topk_heap_less(right, smallest) {
-                smallest = right;
-            }
-
-            if smallest != i {
-                self.topk_swap(i, smallest);
-                i = smallest;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Incremental top-K candidate discovery for a window of accounts.
-    ///
-    /// Scans [start..start+len) (wrapping), inserting candidates into topk_* heap.
-    /// Uses topk_epoch/topk_seen_epoch to avoid duplicate inserts within a sweep.
-    ///
-    /// Cost: O(len log K), bounded by WINDOW.
-    ///
-    /// This function does NOT reset the heap - caller must reset at sweep boundary.
-    /// A "wrong" top-K pick is harmless: real liquidation still checks margin.
-    fn topk_build_step(&mut self, oracle_price: u64, start: usize, len: usize) {
-        let epoch = self.topk_epoch;
-
-        for offset in 0..len {
-            let idx = (start + offset) & ACCOUNT_IDX_MASK;
-
-            // Check if slot is used via bitmap
-            let block = idx >> 6;
-            let bit = idx & 63;
-            if (self.used[block] & (1u64 << bit)) == 0 {
-                continue;
-            }
-
-            // Super cheap early gate
-            if self.accounts[idx].position_size == 0 {
-                continue;
-            }
-
-            // Skip if already considered this sweep (epoch deduplication)
-            if self.topk_seen_epoch[idx] == epoch {
-                continue;
-            }
-
-            // Compute cheap priority score
-            let score = self.liq_priority_score(&self.accounts[idx], oracle_price);
-            if score == 0 {
-                continue;
-            }
-
-            // Mark as seen this epoch
-            self.topk_seen_epoch[idx] = epoch;
-
-            // Insert into heap
-            let heap_len = self.topk_len as usize;
-
-            if heap_len < TOP_LIQ_K {
-                // Heap not full: add directly
-                self.topk_idx[heap_len] = idx as u16;
-                self.topk_score[heap_len] = score;
-                self.topk_len += 1;
-                self.topk_sift_up(heap_len);
-            } else {
-                // Heap full: check if new score beats minimum (root)
-                let root_score = self.topk_score[0];
-
-                if score > root_score {
-                    // Replace root with new candidate
-                    self.topk_idx[0] = idx as u16;
-                    self.topk_score[0] = score;
-                    self.topk_sift_down(0, heap_len);
-                }
-            }
-        }
-    }
-
-    /// Execute liquidations for selected top-K candidates.
-    /// Returns (num_liquidated, num_errors).
-    ///
-    /// Accumulates profit/loss into pending buckets for deferred socialization.
-    /// Bounded by both heap_len and top_budget (whichever is smaller).
-    fn run_top_liquidations(
-        &mut self,
-        now_slot: u64,
-        oracle_price: u64,
-        heap_len: usize,
-        top_budget: u16,
-    ) -> (u16, u16) {
-        if heap_len == 0 || top_budget == 0 {
-            return (0, 0);
-        }
-
-        let mut liquidated: u16 = 0;
-        let mut errors: u16 = 0;
-        let epoch = self.pending_epoch;
-
-        // Process each candidate (order doesn't matter)
-        for i in 0..heap_len {
-            // Stop when budget is exhausted
-            if liquidated >= top_budget {
-                break;
-            }
-
-            let idx = self.topk_idx[i] as usize;
-
-            // Skip stale entries: account no longer used or position already closed
-            // (heap entries can become stale across multiple cranks within a sweep)
-            if !self.is_used(idx) || self.accounts[idx].position_size == 0 {
-                continue;
-            }
-
-            // Attempt deferred liquidation (does minimal settlement + margin check)
-            match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
-                Ok((true, deferred)) => {
-                    liquidated += 1;
-                    self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
-                    // Accumulate into pending buckets (no ADL call)
-                    self.pending_profit_to_fund = self
-                        .pending_profit_to_fund
-                        .saturating_add(deferred.profit_to_fund);
-                    self.pending_unpaid_loss = self
-                        .pending_unpaid_loss
-                        .saturating_add(deferred.unpaid_loss);
-                    // Mark for exclusion from profit-funding
-                    if deferred.excluded {
-                        self.pending_exclude_epoch[idx] = epoch;
-                    }
-                }
-                Ok((false, _)) => {} // Not liquidatable (score was heuristic)
-                Err(_) => {
-                    errors += 1;
-                    self.risk_reduction_only = true;
-                }
-            }
-        }
-
-        (liquidated, errors)
-    }
-
-    // ========================================
     // Bounded Socialization (replaces global ADL in crank)
     // ========================================
 
@@ -2733,6 +2517,77 @@ impl RiskEngine {
                         self.pending_unpaid_loss.saturating_sub(take);
                 }
             }
+        }
+    }
+
+    /// Finalize pending buckets after window socialization.
+    ///
+    /// This ensures pending_profit_to_fund and pending_unpaid_loss cannot
+    /// remain non-zero forever (which would block withdrawals permanently).
+    ///
+    /// After haircuts from socialization_step:
+    /// 1. Spend insurance (above floor, respecting reserved) to cover remaining
+    /// 2. Move any uncovered remainder to loss_accum and clear pending buckets
+    ///
+    /// This guarantees liveness: pending progress every sweep.
+    fn finalize_pending_after_window(&mut self) {
+        // If nothing pending, early exit
+        if self.pending_profit_to_fund == 0 && self.pending_unpaid_loss == 0 {
+            return;
+        }
+
+        // Spend insurance to cover pending (spendable = above floor, minus reserved)
+        let spendable = self.insurance_spendable_unreserved();
+
+        if spendable > 0 {
+            // First: cover profit funding (profit needs to come from somewhere)
+            if self.pending_profit_to_fund > 0 {
+                let spend_profit = core::cmp::min(spendable, self.pending_profit_to_fund);
+                self.insurance_fund.balance = self
+                    .insurance_fund
+                    .balance
+                    .saturating_sub(spend_profit);
+                self.pending_profit_to_fund = self
+                    .pending_profit_to_fund
+                    .saturating_sub(spend_profit);
+            }
+
+            // Recompute spendable after profit funding
+            let spendable_after = self.insurance_spendable_unreserved();
+
+            // Second: cover unpaid losses
+            if self.pending_unpaid_loss > 0 && spendable_after > 0 {
+                let spend_loss = core::cmp::min(spendable_after, self.pending_unpaid_loss);
+                self.insurance_fund.balance = self
+                    .insurance_fund
+                    .balance
+                    .saturating_sub(spend_loss);
+                self.pending_unpaid_loss = self
+                    .pending_unpaid_loss
+                    .saturating_sub(spend_loss);
+            }
+
+            // Recompute warmup reserved after insurance changes
+            self.recompute_warmup_insurance_reserved();
+        }
+
+        // If still non-zero after insurance spend, move to loss_accum and clear
+        // This prevents permanent wedge state
+        if self.pending_profit_to_fund > 0 || self.pending_unpaid_loss > 0 {
+            // Remaining pending represents uncovered losses
+            let remaining = self
+                .pending_profit_to_fund
+                .saturating_add(self.pending_unpaid_loss);
+
+            // Move to loss_accum
+            self.loss_accum = self.loss_accum.saturating_add(remaining);
+
+            // Clear pending buckets
+            self.pending_profit_to_fund = 0;
+            self.pending_unpaid_loss = 0;
+
+            // Enter risk-reduction mode (uncovered losses exist)
+            self.enter_risk_reduction_only_mode();
         }
     }
 

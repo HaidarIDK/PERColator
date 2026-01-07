@@ -206,9 +206,6 @@ fn valid_state(engine: &RiskEngine) -> bool {
     if engine.num_used_accounts > MAX_ACCOUNTS as u16 {
         return false;
     }
-    if engine.topk_len > TOP_LIQ_K as u16 {
-        return false;
-    }
     if engine.crank_step >= NUM_STEPS {
         return false;
     }
