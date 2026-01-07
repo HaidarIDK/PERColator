@@ -4858,12 +4858,18 @@ fn test_keeper_crank_liquidates_undercollateralized_user() {
         "User position should be closed after liquidation"
     );
 
+    // Pending loss from liquidation is resolved after a full sweep
+    // Run enough cranks to complete a full sweep (NUM_STEPS = 16)
+    for slot in 2..=17 {
+        engine.keeper_crank(user, slot, 500_000, 0, false).unwrap();
+    }
+
     // Note: Insurance may decrease if liquidation creates unpaid losses
     // that get covered by finalize_pending_after_window. This is correct behavior.
     // The key invariant is that pending is resolved (not stuck forever).
     assert_eq!(
         engine.pending_unpaid_loss, 0,
-        "Pending loss should be resolved after crank"
+        "Pending loss should be resolved after full sweep"
     );
 }
 
@@ -5896,13 +5902,17 @@ fn test_force_realize_produces_pending_and_finalize_resolves() {
     assert!(outcome.force_realize_needed);
     assert!(outcome.force_realize_closed > 0, "Should force-close position");
 
-    // With finalize_pending_after_window, pending should be immediately resolved:
-    // - If insurance available: spent to cover
-    // - If not: moved to loss_accum and cleared
+    // Pending is added by force-realize; finalize runs only after a full sweep
+    // Run enough cranks to complete a full sweep (NUM_STEPS = 16)
+    for slot in 2..=17 {
+        engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false).unwrap();
+    }
+
+    // After full sweep, pending should be resolved:
     // Since insurance is at threshold (nothing spendable), loss should go to loss_accum
     assert_eq!(
         engine.pending_unpaid_loss, 0,
-        "pending_unpaid_loss should be cleared by finalize"
+        "pending_unpaid_loss should be cleared by finalize after full sweep"
     );
 
     // Loss should have moved to loss_accum
@@ -5972,14 +5982,17 @@ fn test_pending_finalize_liveness_insurance_covers() {
     // Create pending loss with no accounts to haircut
     engine.pending_unpaid_loss = 5_000;
 
-    // Run crank - finalize_pending_after_window should spend insurance
-    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
-    assert!(result.is_ok());
+    // finalize_pending_after_window runs only after a full sweep (NUM_STEPS = 16)
+    // Run enough cranks to complete a full sweep
+    for slot in 1..=16 {
+        let result = engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false);
+        assert!(result.is_ok());
+    }
 
     // Pending should be cleared (or reduced)
     assert_eq!(
         engine.pending_unpaid_loss, 0,
-        "pending_unpaid_loss should be cleared by insurance"
+        "pending_unpaid_loss should be cleared by insurance after full sweep"
     );
 
     // Insurance should have decreased
@@ -6002,14 +6015,17 @@ fn test_pending_finalize_liveness_moves_to_loss_accum() {
     // Create pending loss
     engine.pending_unpaid_loss = 5_000;
 
-    // Run crank
-    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
-    assert!(result.is_ok());
+    // finalize_pending_after_window runs only after a full sweep (NUM_STEPS = 16)
+    // Run enough cranks to complete a full sweep
+    for slot in 1..=16 {
+        let result = engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false);
+        assert!(result.is_ok());
+    }
 
     // Pending should be cleared
     assert_eq!(
         engine.pending_unpaid_loss, 0,
-        "pending_unpaid_loss should be cleared"
+        "pending_unpaid_loss should be cleared after full sweep"
     );
 
     // Loss should have moved to loss_accum
@@ -6110,14 +6126,17 @@ fn test_withdrawals_blocked_during_pending_unblocked_after() {
         "Withdraw should fail while pending_unpaid_loss > 0"
     );
 
-    // Run crank to finalize pending
-    engine.keeper_crank(u16::MAX, 3, 1_000_000, 0, false).unwrap();
+    // finalize_pending_after_window runs only after a full sweep (NUM_STEPS = 16)
+    // Run enough cranks to complete a full sweep (slots 3..=18)
+    for slot in 3..=18 {
+        engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false).unwrap();
+    }
 
     // Pending should be cleared now
     assert_eq!(engine.pending_unpaid_loss, 0, "Pending should be cleared");
 
     // Withdraw should now succeed (crank freshness check)
-    let result = engine.withdraw(user, 1_000, 3, 1_000_000);
+    let result = engine.withdraw(user, 1_000, 18, 1_000_000);
     assert!(
         result.is_ok(),
         "Withdraw should succeed after pending cleared"

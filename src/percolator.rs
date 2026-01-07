@@ -1446,15 +1446,13 @@ impl RiskEngine {
             && allow_panic
             && self.total_open_interest > 0;
 
+        // Garbage collect dust accounts BEFORE socialization
+        // This ensures pending_unpaid_loss from GC'd accounts is available for haircuts
+        // in the current window (if victim is in the same window as the GC'd account).
+        let num_gc_closed = self.garbage_collect_dust();
+
         // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
         self.socialization_step(window_start, window_len);
-
-        // Finalize pending: spend insurance, move remainder to loss_accum
-        // Guarantees pending buckets can't remain non-zero forever (liveness)
-        self.finalize_pending_after_window();
-
-        // Garbage collect dust accounts
-        let num_gc_closed = self.garbage_collect_dust();
 
         // Bounded lp_max_abs update: scan LP accounts in window
         for offset in 0..window_len {
@@ -1474,6 +1472,11 @@ impl RiskEngine {
         // Advance crank step; when completing final step, record completion and wrap
         self.crank_step += 1;
         if self.crank_step == NUM_STEPS {
+            // Full sweep complete - finalize pending now that all accounts have been scanned
+            // This ensures socialization has had a chance to haircut all positive PnL before
+            // spending insurance. Guarantees pending buckets can't remain non-zero forever (liveness).
+            self.finalize_pending_after_window();
+
             self.crank_step = 0;
             self.last_full_sweep_completed_slot = now_slot;
             // Commit bounded lp_max_abs from sweep
