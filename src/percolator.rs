@@ -1662,11 +1662,14 @@ impl RiskEngine {
             (entry as i128).saturating_sub(oracle_price as i128)
         };
 
-        let mark_pnl = diff
+        // Fail-safe: on overflow, treat as worst-case loss to avoid wedging liquidation
+        let mark_pnl = match diff
             .checked_mul(close_abs as i128)
-            .ok_or(RiskError::Overflow)?
-            .checked_div(1_000_000)
-            .ok_or(RiskError::Overflow)?;
+            .and_then(|v| v.checked_div(1_000_000))
+        {
+            Some(pnl) => pnl,
+            None => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1751,7 +1754,12 @@ impl RiskEngine {
         let cap_before = self.accounts[idx as usize].capital;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // Liquidation must never wedge on Overflow
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1823,7 +1831,12 @@ impl RiskEngine {
         let cap_before = self.accounts[idx as usize].capital;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // Liquidation must never wedge on Overflow
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1938,11 +1951,14 @@ impl RiskEngine {
             (entry as i128).saturating_sub(oracle_price as i128)
         };
 
-        let mark_pnl = diff
+        // Fail-safe: on overflow, treat as worst-case loss to avoid wedging liquidation
+        let mark_pnl = match diff
             .checked_mul(close_abs as i128)
-            .ok_or(RiskError::Overflow)?
-            .checked_div(1_000_000)
-            .ok_or(RiskError::Overflow)?;
+            .and_then(|v| v.checked_div(1_000_000))
+        {
+            Some(pnl) => pnl,
+            None => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -2054,7 +2070,7 @@ impl RiskEngine {
         // This ensures we can always close positions without wedging
         let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
             Ok(pnl) => pnl,
-            Err(_) => -(self.accounts[idx].capital as i128), // Worst-case: lose all capital
+            Err(_) => -u128_to_i128_clamped(self.accounts[idx].capital), // Worst-case: lose all capital
         };
 
         // Apply mark PnL to account
@@ -2751,7 +2767,7 @@ impl RiskEngine {
         }
 
         // Input validation to prevent overflow
-        if oracle_price == 0 || oracle_price > 1_000_000_000_000 {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -4176,7 +4192,7 @@ impl RiskEngine {
                 let abs_pos = saturating_abs_i128(pos) as u128;
                 let mark_pnl = match Self::mark_pnl_for_position(pos, account.entry_price, oracle_price) {
                     Ok(pnl) => pnl,
-                    Err(_) => -(account.capital as i128), // Worst-case: lose all capital
+                    Err(_) => -u128_to_i128_clamped(account.capital), // Worst-case: lose all capital
                 };
 
                 // Track total mark PNL for rounding compensation
