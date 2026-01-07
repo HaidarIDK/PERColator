@@ -1043,7 +1043,7 @@ impl RiskEngine {
         if account.position_size != 0 {
             // Re-borrow immutably for margin check
             let account_ref = &self.accounts[idx as usize];
-            if !self.is_above_maintenance_margin_mtm(account_ref, oracle_price)? {
+            if !self.is_above_maintenance_margin_mtm(account_ref, oracle_price) {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -1545,14 +1545,14 @@ impl RiskEngine {
         &self,
         account: &Account,
         oracle_price: u64,
-    ) -> Result<(u128, bool)> {
+    ) -> (u128, bool) {
         let abs_pos = saturating_abs_i128(account.position_size) as u128;
         if abs_pos == 0 {
-            return Ok((0, false));
+            return (0, false);
         }
 
-        // MTM equity at oracle price (the only correct equity for margin calculation)
-        let equity = self.account_equity_mtm_at_oracle(account, oracle_price)?;
+        // MTM equity at oracle price (fail-safe: overflow returns 0 = full liquidation)
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
 
         // Target margin = maintenance + buffer (in basis points)
         let target_bps = self.params.maintenance_margin_bps
@@ -1587,10 +1587,10 @@ impl RiskEngine {
         // Dust kill-switch: if remaining position would be below min, do full close
         let remaining = abs_pos.saturating_sub(close_abs);
         if remaining < self.params.min_liquidation_abs {
-            return Ok((abs_pos, true)); // Full close
+            return (abs_pos, true); // Full close
         }
 
-        Ok((close_abs, close_abs == abs_pos))
+        (close_abs, close_abs == abs_pos)
     }
 
     /// Core helper for closing a SLICE of a position at oracle price (partial liquidation).
@@ -2124,12 +2124,12 @@ impl RiskEngine {
 
         let account = &self.accounts[idx as usize];
         // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
-        if self.is_above_maintenance_margin_mtm(account, oracle_price)? {
+        if self.is_above_maintenance_margin_mtm(account, oracle_price) {
             return Ok(false);
         }
 
         // Compute how much to close (closed-form, single-pass, using MTM equity)
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price)?;
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
             return Ok(false);
@@ -2161,7 +2161,7 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)? {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
@@ -2177,21 +2177,17 @@ impl RiskEngine {
             }
         }
 
-        // Accumulate into pending buckets for socialization (same semantics as crank)
-        // This avoids double-counting: mark_pnl is already credited to the liquidated account,
-        // so we don't immediately haircut others. Instead, let socialization handle it fairly.
+        // Permissionless liquidation: settle ADL immediately (no pending buckets).
+        // Writing to pending buckets would require a crank sweep to clear, which could
+        // wedge withdrawals/warmup/close_account if keeper isn't running.
         if deferred.profit_to_fund > 0 {
-            self.pending_profit_to_fund = self.pending_profit_to_fund
-                .saturating_add(deferred.profit_to_fund);
-            // Mark epoch exclusion so this account's profit isn't haircut to fund itself
-            self.pending_exclude_epoch[idx as usize] = self.pending_epoch;
+            self.apply_adl_excluding(deferred.profit_to_fund, idx as usize)?;
         }
         if deferred.unpaid_loss > 0 {
-            self.pending_unpaid_loss = self.pending_unpaid_loss
-                .saturating_add(deferred.unpaid_loss);
+            self.apply_adl(deferred.unpaid_loss)?;
         }
 
-        // FEE ORDERING INVARIANT: Fee is charged AFTER position close and pending accumulation.
+        // FEE ORDERING INVARIANT: Fee is charged AFTER position close and ADL.
         // - Fee comes from remaining capital, after any loss has been paid from capital
         // - Fee can drive capital to 0, but position is already closed so margin doesn't matter
         // - This ordering means "fee has lower priority than loss payment"
@@ -2238,12 +2234,12 @@ impl RiskEngine {
 
         let account = &self.accounts[idx as usize];
         // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
-        if self.is_above_maintenance_margin_mtm(account, oracle_price)? {
+        if self.is_above_maintenance_margin_mtm(account, oracle_price) {
             return Ok((false, DeferredAdl::ZERO));
         }
 
         // Compute how much to close (using MTM equity)
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price)?;
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
             return Ok((false, DeferredAdl::ZERO));
@@ -2273,7 +2269,7 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)? {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
@@ -2994,7 +2990,7 @@ impl RiskEngine {
         // Post-withdrawal MTM maintenance margin check at oracle price
         // This is a safety belt to ensure we never leave an account in liquidatable state
         if self.accounts[idx as usize].position_size != 0 {
-            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price)? {
+            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price) {
                 // Revert the withdrawal
                 self.accounts[idx as usize].capital = old_capital;
                 self.vault = add_u128(self.vault, amount);
@@ -3036,26 +3032,34 @@ impl RiskEngine {
 
     /// Mark-to-market equity at oracle price (the ONLY correct equity for margin checks).
     /// equity_mtm = max(0, capital + realized_pnl + mark_pnl(position, entry, oracle))
-    pub fn account_equity_mtm_at_oracle(&self, account: &Account, oracle_price: u64) -> Result<u128> {
-        let mark = Self::mark_pnl_for_position(
+    ///
+    /// FAIL-SAFE: On overflow, returns 0 (worst-case equity) to ensure liquidation
+    /// can still trigger. This prevents overflow from blocking liquidation.
+    pub fn account_equity_mtm_at_oracle(&self, account: &Account, oracle_price: u64) -> u128 {
+        let mark = match Self::mark_pnl_for_position(
             account.position_size,
             account.entry_price,
             oracle_price,
-        )?;
+        ) {
+            Ok(m) => m,
+            Err(_) => return 0, // Overflow => worst-case equity
+        };
         let cap_i = u128_to_i128_clamped(account.capital);
         let eq_i = cap_i.saturating_add(account.pnl).saturating_add(mark);
-        Ok(if eq_i > 0 { eq_i as u128 } else { 0 })
+        if eq_i > 0 { eq_i as u128 } else { 0 }
     }
 
     /// MTM margin check: is equity_mtm > required margin?
     /// This is the ONLY correct margin predicate for all risk checks.
+    ///
+    /// FAIL-SAFE: Returns false on any error (treat as below margin / liquidatable).
     pub fn is_above_margin_bps_mtm(
         &self,
         account: &Account,
         oracle_price: u64,
         bps: u64,
-    ) -> Result<bool> {
-        let equity = self.account_equity_mtm_at_oracle(account, oracle_price)?;
+    ) -> bool {
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
 
         // Position value at oracle price
         let position_value = mul_u128(
@@ -3066,12 +3070,12 @@ impl RiskEngine {
         // Margin requirement at given bps
         let margin_required = mul_u128(position_value, bps as u128) / 10_000;
 
-        Ok(equity > margin_required)
+        equity > margin_required
     }
 
-    /// MTM maintenance margin check
+    /// MTM maintenance margin check (fail-safe: returns false on overflow)
     #[inline]
-    pub fn is_above_maintenance_margin_mtm(&self, account: &Account, oracle_price: u64) -> Result<bool> {
+    pub fn is_above_maintenance_margin_mtm(&self, account: &Account, oracle_price: u64) -> bool {
         self.is_above_margin_bps_mtm(account, oracle_price, self.params.maintenance_margin_bps)
     }
 
@@ -3094,11 +3098,8 @@ impl RiskEngine {
             return 0;
         }
 
-        // Use MTM equity for consistent prioritization (fallback to 0 on error = not liquidatable)
-        let equity = match self.account_equity_mtm_at_oracle(a, oracle_price) {
-            Ok(e) => e,
-            Err(_) => return 0,
-        };
+        // MTM equity (fail-safe: overflow returns 0, making account appear liquidatable)
+        let equity = self.account_equity_mtm_at_oracle(a, oracle_price);
 
         let pos_value = mul_u128(
             saturating_abs_i128(a.position_size) as u128,

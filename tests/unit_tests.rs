@@ -5065,7 +5065,7 @@ fn test_compute_liquidation_close_amount_basic() {
     engine.accounts[user as usize].pnl = 0;
 
     let account = &engine.accounts[user as usize];
-    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000).unwrap();
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
 
     // Should close some but not all
     assert!(close_abs > 0, "Should close some position");
@@ -5100,7 +5100,7 @@ fn test_compute_liquidation_dust_kill() {
     engine.accounts[user as usize].pnl = 0;
 
     let account = &engine.accounts[user as usize];
-    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000).unwrap();
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 1_000_000);
 
     // Should trigger full close due to dust rule (remaining 8.33M < 9M min)
     assert_eq!(close_abs, 10_000_000, "Should close entire position");
@@ -5123,7 +5123,7 @@ fn test_compute_liquidation_zero_equity() {
     engine.accounts[user as usize].pnl = -1_500_000;
 
     let account = &engine.accounts[user as usize];
-    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 850_000).unwrap();
+    let (close_abs, is_full) = engine.compute_liquidation_close_amount(account, 850_000);
 
     // Zero equity means full close
     assert_eq!(close_abs, 10_000_000, "Should close entire position");
