@@ -1039,11 +1039,11 @@ impl RiskEngine {
             account.fee_credits = account.fee_credits.saturating_add(pay as i128);
         }
 
-        // Check maintenance margin if account has a position
+        // Check maintenance margin if account has a position (MTM check)
         if account.position_size != 0 {
             // Re-borrow immutably for margin check
             let account_ref = &self.accounts[idx as usize];
-            if !self.is_above_maintenance_margin(account_ref, oracle_price) {
+            if !self.is_above_maintenance_margin_mtm(account_ref, oracle_price)? {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -1535,23 +1535,24 @@ impl RiskEngine {
     ///
     /// ## Algorithm:
     /// 1. Compute target_bps = maintenance_margin_bps + liquidation_buffer_bps
-    /// 2. Compute max safe remaining position: abs_pos_safe_max = floor(E * 10_000 * 1_000_000 / (P * target_bps))
+    /// 2. Compute max safe remaining position: abs_pos_safe_max = floor(E_mtm * 10_000 * 1_000_000 / (P * target_bps))
     /// 3. close_abs = abs_pos - abs_pos_safe_max
     /// 4. If remaining position < min_liquidation_abs, do full close (dust kill-switch)
     ///
+    /// Uses MTM equity (capital + realized_pnl + mark_pnl) for correct risk calculation.
     /// This is deterministic, requires no iteration, and guarantees single-pass liquidation.
     pub fn compute_liquidation_close_amount(
         &self,
         account: &Account,
         oracle_price: u64,
-    ) -> (u128, bool) {
+    ) -> Result<(u128, bool)> {
         let abs_pos = saturating_abs_i128(account.position_size) as u128;
         if abs_pos == 0 {
-            return (0, false);
+            return Ok((0, false));
         }
 
-        // Account equity (may be 0 if underwater)
-        let equity = self.account_equity(account);
+        // MTM equity at oracle price (the only correct equity for margin calculation)
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price)?;
 
         // Target margin = maintenance + buffer (in basis points)
         let target_bps = self.params.maintenance_margin_bps
@@ -1586,10 +1587,10 @@ impl RiskEngine {
         // Dust kill-switch: if remaining position would be below min, do full close
         let remaining = abs_pos.saturating_sub(close_abs);
         if remaining < self.params.min_liquidation_abs {
-            return (abs_pos, true); // Full close
+            return Ok((abs_pos, true)); // Full close
         }
 
-        (close_abs, close_abs == abs_pos)
+        Ok((close_abs, close_abs == abs_pos))
     }
 
     /// Core helper for closing a SLICE of a position at oracle price (partial liquidation).
@@ -2122,12 +2123,13 @@ impl RiskEngine {
         self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
-        if self.is_above_maintenance_margin(account, oracle_price) {
+        // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
+        if self.is_above_maintenance_margin_mtm(account, oracle_price)? {
             return Ok(false);
         }
 
-        // Compute how much to close (closed-form, single-pass)
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+        // Compute how much to close (closed-form, single-pass, using MTM equity)
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price)?;
 
         if close_abs == 0 {
             return Ok(false);
@@ -2159,7 +2161,7 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)? {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
@@ -2235,12 +2237,13 @@ impl RiskEngine {
         self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
-        if self.is_above_maintenance_margin(account, oracle_price) {
+        // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
+        if self.is_above_maintenance_margin_mtm(account, oracle_price)? {
             return Ok((false, DeferredAdl::ZERO));
         }
 
-        // Compute how much to close
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+        // Compute how much to close (using MTM equity)
+        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price)?;
 
         if close_abs == 0 {
             return Ok((false, DeferredAdl::ZERO));
@@ -2270,7 +2273,7 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)? {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
@@ -2950,9 +2953,9 @@ impl RiskEngine {
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         // Read account state (scope the borrow)
-        let (old_capital, pnl, position_size) = {
+        let (old_capital, pnl, position_size, entry_price) = {
             let account = &self.accounts[idx as usize];
-            (account.capital, account.pnl, account.position_size)
+            (account.capital, account.pnl, account.position_size, account.entry_price)
         };
 
         // Check we have enough capital
@@ -2960,14 +2963,15 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Calculate new state after withdrawal
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Calculate MTM equity after withdrawal
+        // equity_mtm = max(0, new_capital + pnl + mark_pnl)
         let new_capital = sub_u128(old_capital, amount);
+        let mark_pnl = Self::mark_pnl_for_position(position_size, entry_price, oracle_price)?;
         let cap_i = u128_to_i128_clamped(new_capital);
-        let new_eq_i = cap_i.saturating_add(pnl);
-        let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
+        let new_eq_i = cap_i.saturating_add(pnl).saturating_add(mark_pnl);
+        let new_equity_mtm = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
 
-        // If account has position, must maintain initial margin at ORACLE price (not entry price)
+        // If account has position, must maintain initial margin at ORACLE price (MTM check)
         // This prevents withdrawing to a state that's immediately liquidatable
         if position_size != 0 {
             let position_notional = mul_u128(
@@ -2978,7 +2982,7 @@ impl RiskEngine {
             let initial_margin_required =
                 mul_u128(position_notional, self.params.initial_margin_bps as u128) / 10_000;
 
-            if new_equity < initial_margin_required {
+            if new_equity_mtm < initial_margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -2987,10 +2991,10 @@ impl RiskEngine {
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
 
-        // Post-withdrawal maintenance margin check at oracle price
+        // Post-withdrawal MTM maintenance margin check at oracle price
         // This is a safety belt to ensure we never leave an account in liquidatable state
         if self.accounts[idx as usize].position_size != 0 {
-            if !self.is_above_maintenance_margin(&self.accounts[idx as usize], oracle_price) {
+            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price)? {
                 // Revert the withdrawal
                 self.accounts[idx as usize].capital = old_capital;
                 self.vault = add_u128(self.vault, amount);
@@ -3018,8 +3022,11 @@ impl RiskEngine {
         add_u128(account.capital, clamp_pos_i128(account.pnl))
     }
 
-    /// Calculate account's equity for margin checks: max(0, capital + pnl)
-    /// FIX B: This includes negative PnL in margin calculations.
+    /// Realized-only equity: max(0, capital + realized_pnl).
+    ///
+    /// DEPRECATED for margin checks: Use account_equity_mtm_at_oracle instead.
+    /// This helper is retained for reporting, PnL display, and test assertions that
+    /// specifically need realized-only equity.
     #[inline]
     pub fn account_equity(&self, account: &Account) -> u128 {
         let cap_i = u128_to_i128_clamped(account.capital);
@@ -3027,8 +3034,49 @@ impl RiskEngine {
         if eq_i > 0 { eq_i as u128 } else { 0 }
     }
 
-    /// Check if account is above maintenance margin
-    /// FIX B: Uses equity (includes negative PnL) instead of collateral
+    /// Mark-to-market equity at oracle price (the ONLY correct equity for margin checks).
+    /// equity_mtm = max(0, capital + realized_pnl + mark_pnl(position, entry, oracle))
+    pub fn account_equity_mtm_at_oracle(&self, account: &Account, oracle_price: u64) -> Result<u128> {
+        let mark = Self::mark_pnl_for_position(
+            account.position_size,
+            account.entry_price,
+            oracle_price,
+        )?;
+        let cap_i = u128_to_i128_clamped(account.capital);
+        let eq_i = cap_i.saturating_add(account.pnl).saturating_add(mark);
+        Ok(if eq_i > 0 { eq_i as u128 } else { 0 })
+    }
+
+    /// MTM margin check: is equity_mtm > required margin?
+    /// This is the ONLY correct margin predicate for all risk checks.
+    pub fn is_above_margin_bps_mtm(
+        &self,
+        account: &Account,
+        oracle_price: u64,
+        bps: u64,
+    ) -> Result<bool> {
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price)?;
+
+        // Position value at oracle price
+        let position_value = mul_u128(
+            saturating_abs_i128(account.position_size) as u128,
+            oracle_price as u128,
+        ) / 1_000_000;
+
+        // Margin requirement at given bps
+        let margin_required = mul_u128(position_value, bps as u128) / 10_000;
+
+        Ok(equity > margin_required)
+    }
+
+    /// MTM maintenance margin check
+    #[inline]
+    pub fn is_above_maintenance_margin_mtm(&self, account: &Account, oracle_price: u64) -> Result<bool> {
+        self.is_above_margin_bps_mtm(account, oracle_price, self.params.maintenance_margin_bps)
+    }
+
+    /// Check if account is above maintenance margin (DEPRECATED: uses realized-only equity)
+    /// Use is_above_maintenance_margin_mtm for all margin checks.
     pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
         self.is_above_margin_bps(account, oracle_price, self.params.maintenance_margin_bps)
     }
@@ -3046,7 +3094,11 @@ impl RiskEngine {
             return 0;
         }
 
-        let equity = self.account_equity(a);
+        // Use MTM equity for consistent prioritization (fallback to 0 on error = not liquidatable)
+        let equity = match self.account_equity_mtm_at_oracle(a, oracle_price) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
 
         let pos_value = mul_u128(
             saturating_abs_i128(a.position_size) as u128,
@@ -3062,8 +3114,10 @@ impl RiskEngine {
         }
     }
 
-    /// Check if account is above a given margin threshold (in basis points).
-    /// Used for both maintenance margin check and post-liquidation target margin check.
+    /// Check if account is above a given margin threshold (DEPRECATED: uses realized-only equity).
+    ///
+    /// Use is_above_margin_bps_mtm for all margin checks. This helper is retained for
+    /// tests that specifically need realized-only margin comparison.
     pub fn is_above_margin_bps(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
         let equity = self.account_equity(account);
 
@@ -3242,36 +3296,38 @@ impl RiskEngine {
             .saturating_sub(fee as i128);
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
-        // Check user maintenance margin
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Check user maintenance margin (MTM: includes unrealized mark PnL)
         if new_user_position != 0 {
+            // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
+            let user_mark = Self::mark_pnl_for_position(new_user_position, new_user_entry, oracle_price)?;
             let user_cap_i = u128_to_i128_clamped(user.capital);
-            let user_eq_i = user_cap_i.saturating_add(new_user_pnl);
-            let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
+            let user_eq_i = user_cap_i.saturating_add(new_user_pnl).saturating_add(user_mark);
+            let user_equity_mtm = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if user_equity <= margin_required {
+            if user_equity_mtm <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // Check LP maintenance margin
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Check LP maintenance margin (MTM: includes unrealized mark PnL)
         if new_lp_position != 0 {
+            // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
+            let lp_mark = Self::mark_pnl_for_position(new_lp_position, new_lp_entry, oracle_price)?;
             let lp_cap_i = u128_to_i128_clamped(lp.capital);
-            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl);
-            let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
+            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl).saturating_add(lp_mark);
+            let lp_equity_mtm = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if lp_equity <= margin_required {
+            if lp_equity_mtm <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
