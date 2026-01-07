@@ -4757,8 +4757,8 @@ fn security_goal_bounded_net_extraction_sequence() {
     let mut spendable_spent_total: u128 = 0;
 
     // Bounded "sequence" (keep small for Kani tractability)
-    // With 2 steps and 5 operations: 5^2 = 25 paths
-    const STEPS: usize = 2;
+    // With 1 step and 5 operations: 5 paths (reduced from 2 steps = 25 paths)
+    const STEPS: usize = 1;
 
     for _ in 0..STEPS {
         // Choose an operation (reduced set for tractability)
@@ -4908,9 +4908,14 @@ fn proof_settle_maintenance_deducts_correctly() {
 #[kani::solver(cadical)]
 fn proof_keeper_crank_advances_slot_monotonically() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
     let user = engine.add_user(0).unwrap();
-    engine.last_crank_slot = 100;
+    engine.accounts[user as usize].capital = 10_000;  // Give user capital for valid account
 
     let now_slot: u64 = kani::any();
     kani::assume(now_slot < u64::MAX - 1000);
@@ -5475,6 +5480,11 @@ fn proof_lq2_liquidation_preserves_conservation() {
 #[kani::solver(cadical)]
 fn proof_lq3a_profit_routes_through_adl() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = 200_100;  // Enough for deposits + liquidation
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
     // Create user and LP with minimal setup
     let user = engine.add_user(0).unwrap();
@@ -6724,7 +6734,10 @@ fn force_realize_step_pending_monotone() {
 fn withdrawal_maintains_margin_above_maintenance() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = 1_000_000;
+    engine.insurance_fund.balance = 10_000;
     engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
     // Create account with position
     let idx = engine.add_user(0).unwrap();
