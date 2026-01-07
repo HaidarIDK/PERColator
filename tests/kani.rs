@@ -1075,8 +1075,8 @@ fn withdrawal_requires_sufficient_balance() {
     let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     assert!(
-        result.is_err(),
-        "Withdrawal of more than available must fail"
+        result == Err(RiskError::InsufficientBalance),
+        "Withdrawal of more than available must fail with InsufficientBalance"
     );
 }
 
@@ -1108,7 +1108,7 @@ fn pnl_withdrawal_requires_warmup() {
     if withdraw > 0 {
         let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
         assert!(
-            result.is_err(),
+            result == Err(RiskError::InsufficientBalance),
             "Cannot withdraw when no principal and PNL not warmed up"
         );
     }
@@ -1584,7 +1584,7 @@ fn i10_withdrawal_mode_blocks_position_increase() {
     // Should fail when trying to increase position
     if new_size.abs() > position.abs() {
         assert!(
-            result.is_err(),
+            result == Err(RiskError::RiskReductionOnlyMode),
             "I10: Cannot increase position in withdrawal-only mode"
         );
     }
@@ -2037,7 +2037,7 @@ fn proof_risk_increasing_trades_rejected() {
     // PROOF: If trade increases absolute exposure, it must be rejected in risk mode
     if user_increases {
         assert!(
-            result.is_err(),
+            result == Err(RiskError::RiskReductionOnlyMode),
             "Risk-increasing trades must fail in risk mode"
         );
     }
@@ -5062,8 +5062,11 @@ fn proof_require_fresh_crank_gates_stale() {
     let staleness = now_slot.saturating_sub(engine.last_crank_slot);
 
     if staleness > engine.max_crank_staleness_slots {
-        // Should fail when stale
-        assert!(result.is_err(), "require_fresh_crank should fail when stale");
+        // Should fail with Unauthorized when stale
+        assert!(
+            result == Err(RiskError::Unauthorized),
+            "require_fresh_crank should fail with Unauthorized when stale"
+        );
     } else {
         // Should succeed when fresh
         assert!(result.is_ok(), "require_fresh_crank should succeed when fresh");
@@ -6253,11 +6256,16 @@ fn pending_gate_close_blocked() {
 }
 
 /// PENDING-GATE-C: settle_warmup_to_capital blocks positive conversion when pending > 0
+/// When pending_unpaid_loss > 0, positive PnL must NOT convert to capital
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn pending_gate_warmup_conversion_blocked() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
+    engine.current_slot = 100; // Enough time for warmup
+
     let user_idx = engine.add_user(0).unwrap();
 
     // Setup: user with positive pnl that could warm up
@@ -6267,25 +6275,26 @@ fn pending_gate_warmup_conversion_blocked() {
     engine.accounts[user_idx as usize].capital = 1_000;
     engine.accounts[user_idx as usize].warmup_slope_per_step = 100;
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
-    engine.current_slot = 100; // Enough time for warmup
-    engine.insurance_fund.balance = 10_000; // Budget exists
-    engine.vault = 11_000 + pnl as u128;
 
     // Snapshot before
     let capital_before = engine.accounts[user_idx as usize].capital;
     let pnl_before = engine.accounts[user_idx as usize].pnl;
 
-    // Set pending to non-zero
+    // Set pending to non-zero (blocks positive conversion)
     engine.pending_unpaid_loss = 1;
 
-    // Call settle_warmup_to_capital (now only takes idx)
+    // Call settle_warmup_to_capital
     let _ = engine.settle_warmup_to_capital(user_idx);
 
-    // Capital and pnl should be unchanged (positive conversion blocked)
-    // Note: negative settlement may still occur, but positive is blocked
+    // STRONG ASSERTION: capital and pnl must be EXACTLY unchanged
+    // Positive conversion is completely blocked when pending > 0
     assert!(
-        engine.accounts[user_idx as usize].capital <= capital_before + 1, // Allow minimal rounding
-        "PENDING-GATE-C: Capital should not increase significantly when pending > 0"
+        engine.accounts[user_idx as usize].capital == capital_before,
+        "PENDING-GATE-C: capital must be unchanged when pending > 0"
+    );
+    assert!(
+        engine.accounts[user_idx as usize].pnl == pnl_before,
+        "PENDING-GATE-C: pnl must be unchanged when pending > 0"
     );
 }
 
@@ -6853,11 +6862,10 @@ fn proof_inv_preserved_by_add_user() {
 
     let result = engine.add_user(fee);
 
-    // Postcondition: INV still holds (regardless of Ok/Err)
-    kani::assert(canonical_inv(&engine), "INV must be preserved by add_user");
-
-    // Non-vacuity: prove we actually added a user in the Ok case
+    // Postcondition: INV still holds on Ok path only
+    // (Err state is discarded under Solana tx atomicity)
     if let Ok(idx) = result {
+        kani::assert(canonical_inv(&engine), "INV preserved by add_user on Ok");
         kani::assert(engine.is_used(idx as usize), "add_user must mark account as used");
         kani::assert(engine.num_used_accounts >= 1, "num_used_accounts must increase");
     }
@@ -6878,8 +6886,11 @@ fn proof_inv_preserved_by_add_lp() {
 
     let result = engine.add_lp([0u8; 32], [0u8; 32], fee);
 
-    // Postcondition: INV still holds
-    kani::assert(canonical_inv(&engine), "INV must be preserved by add_lp");
+    // Postcondition: INV still holds on Ok path only
+    // (Err state is discarded under Solana tx atomicity)
+    if result.is_ok() {
+        kani::assert(canonical_inv(&engine), "INV preserved by add_lp on Ok");
+    }
 }
 
 // ============================================================================
@@ -7631,6 +7642,7 @@ fn proof_top_up_insurance_covers_loss_first() {
 // ============================================================================
 
 /// Sequence: deposit -> trade -> liquidate preserves INV
+/// Each step is gated on previous success (models Solana tx atomicity)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7647,44 +7659,38 @@ fn proof_sequence_deposit_trade_liquidate() {
 
     kani::assume(canonical_inv(&engine));
 
-    // Step 1: Deposits
+    // Step 1: Deposits (force success for non-vacuity)
     let user_deposit: u128 = kani::any();
     let lp_deposit: u128 = kani::any();
     kani::assume(user_deposit > 100 && user_deposit < 10_000);
     kani::assume(lp_deposit > 1000 && lp_deposit < 100_000);
 
-    let r1 = engine.deposit(user, user_deposit);
-    let r2 = engine.deposit(lp, lp_deposit);
+    let _ = assert_ok!(engine.deposit(user, user_deposit), "user deposit must succeed");
+    let _ = assert_ok!(engine.deposit(lp, lp_deposit), "lp deposit must succeed");
+    kani::assert(canonical_inv(&engine), "INV after deposits");
 
-    if r1.is_ok() && r2.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after deposits");
-    }
-
-    // Step 2: Trade (small position)
+    // Step 2: Trade (force success)
     let delta: i128 = kani::any();
     kani::assume(delta >= -50 && delta <= 50 && delta != 0);
 
-    let r3 = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta);
+    let _ = assert_ok!(engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta), "trade must succeed");
+    kani::assert(canonical_inv(&engine), "INV after trade");
 
-    if r3.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after trade");
-    }
-
-    // Step 3: Liquidation attempt
-    let r4 = engine.liquidate_at_oracle(user, 100, 1_000_000);
-
-    if r4.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after liquidate attempt");
-    }
+    // Step 3: Liquidation attempt (may return Ok(false) legitimately)
+    let result = engine.liquidate_at_oracle(user, 100, 1_000_000);
+    kani::assert(result.is_ok(), "liquidation must not error");
+    kani::assert(canonical_inv(&engine), "INV after liquidate attempt");
 }
 
 /// Sequence: deposit -> crank -> withdraw preserves INV
+/// Each step is gated on previous success (models Solana tx atomicity)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_sequence_deposit_crank_withdraw() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
     engine.current_slot = 100;
     engine.last_crank_slot = 50;
     engine.last_full_sweep_start_slot = 50;
@@ -7693,41 +7699,34 @@ fn proof_sequence_deposit_crank_withdraw() {
 
     kani::assume(canonical_inv(&engine));
 
-    // Step 1: Deposit
+    // Step 1: Deposit (force success)
     let deposit: u128 = kani::any();
     kani::assume(deposit > 1000 && deposit < 50_000);
 
-    let r1 = engine.deposit(user, deposit);
+    let _ = assert_ok!(engine.deposit(user, deposit), "deposit must succeed");
+    kani::assert(canonical_inv(&engine), "INV after deposit");
 
-    if r1.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after deposit");
-    }
+    // Step 2: Crank (force success)
+    let _ = assert_ok!(engine.keeper_crank(user, 100, 1_000_000, 0, false), "crank must succeed");
+    kani::assert(canonical_inv(&engine), "INV after crank");
 
-    // Step 2: Crank
-    let r2 = engine.keeper_crank(user, 100, 1_000_000, 0, false);
-
-    if r2.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after crank");
-    }
-
-    // Step 3: Withdraw
+    // Step 3: Withdraw (force success)
     let withdraw: u128 = kani::any();
     kani::assume(withdraw > 0 && withdraw < deposit / 2);
 
-    let r3 = engine.withdraw(user, withdraw, 100, 1_000_000);
-
-    if r3.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after withdraw");
-    }
+    let _ = assert_ok!(engine.withdraw(user, withdraw, 100, 1_000_000), "withdraw must succeed");
+    kani::assert(canonical_inv(&engine), "INV after withdraw");
 }
 
 /// Sequence: add_user -> deposit -> top_up -> close_account preserves INV
+/// Each step is gated on previous success (models Solana tx atomicity)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn proof_sequence_lifecycle() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = 100_000;
+    engine.insurance_fund.balance = 10_000;
     engine.current_slot = 100;
     engine.last_crank_slot = 100;
     engine.last_full_sweep_start_slot = 100;
@@ -7735,38 +7734,28 @@ fn proof_sequence_lifecycle() {
 
     kani::assume(canonical_inv(&engine));
 
-    // Step 1: Add user (deterministic - always succeeds)
+    // Step 1: Add user (deterministic setup - force success)
     let user = engine.add_user(0).unwrap();
-
     kani::assert(canonical_inv(&engine), "INV after add_user");
 
-    // Step 2: Deposit
+    // Step 2: Deposit (force success)
     let deposit: u128 = kani::any();
     kani::assume(deposit > 100 && deposit < 10_000);
 
-    let r1 = engine.deposit(user, deposit);
+    let _ = assert_ok!(engine.deposit(user, deposit), "deposit must succeed");
+    kani::assert(canonical_inv(&engine), "INV after deposit");
 
-    if r1.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after deposit");
-    }
-
-    // Step 3: Top up insurance
+    // Step 3: Top up insurance (force success)
     let topup: u128 = kani::any();
     kani::assume(topup > 0 && topup < 5_000);
 
-    let r2 = engine.top_up_insurance_fund(topup);
+    let _ = assert_ok!(engine.top_up_insurance_fund(topup), "top_up must succeed");
+    kani::assert(canonical_inv(&engine), "INV after top_up");
 
-    if r2.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after top_up");
-    }
-
-    // Step 4: Withdraw all and close
-    let _r3 = engine.withdraw(user, engine.accounts[user as usize].capital, 100, 1_000_000);
-    let r4 = engine.close_account(user, 100, 1_000_000);
-
-    if r4.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV after close_account");
-    }
+    // Step 4: Withdraw all and close (must succeed for clean lifecycle)
+    let _ = assert_ok!(engine.withdraw(user, engine.accounts[user as usize].capital, 100, 1_000_000), "withdraw must succeed");
+    let _ = assert_ok!(engine.close_account(user, 100, 1_000_000), "close must succeed");
+    kani::assert(canonical_inv(&engine), "INV after close_account");
 }
 
 // ============================================================================
