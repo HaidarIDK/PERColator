@@ -282,35 +282,43 @@ fn inv_structural(engine: &RiskEngine) -> bool {
         return false;
     }
 
-    // S3: Freelist acyclicity and disjointness from used
-    // Walk the freelist, checking:
-    //   - Each index is in range
-    //   - Each index is NOT in used bitmap
-    //   - No cycles (count nodes, must equal MAX_ACCOUNTS - num_used)
+    // S3: Freelist acyclicity, uniqueness, and disjointness from used
+    // Use visited bitmap to detect duplicates and cycles
     let expected_free = (MAX_ACCOUNTS as u16).saturating_sub(engine.num_used_accounts);
     let mut free_count: u16 = 0;
     let mut current = engine.free_head;
+    let mut visited = [false; MAX_ACCOUNTS];
 
-    // Bounded walk to prevent infinite loop on cycle
-    for _ in 0..MAX_ACCOUNTS {
-        if current == u16::MAX {
-            break; // End of freelist
-        }
+    // Bounded walk with visited check
+    while current != u16::MAX {
+        // Check index in range
         if current >= MAX_ACCOUNTS as u16 {
             return false; // Invalid index in freelist
         }
-        if engine.is_used(current as usize) {
+        let idx = current as usize;
+
+        // Check not already visited (cycle or duplicate detection)
+        if visited[idx] {
+            return false; // Cycle or duplicate detected
+        }
+        visited[idx] = true;
+
+        // Check disjoint from used bitmap
+        if engine.is_used(idx) {
             return false; // Freelist node is marked as used - contradiction
         }
+
         free_count += 1;
-        current = engine.next_free[current as usize];
+
+        // Safety: prevent unbounded iteration (should never trigger if no cycle)
+        if free_count > MAX_ACCOUNTS as u16 {
+            return false; // Too many nodes - impossible if no duplicates
+        }
+
+        current = engine.next_free[idx];
     }
 
-    // If we walked MAX_ACCOUNTS nodes without hitting sentinel, there's a cycle
-    if current != u16::MAX && free_count >= MAX_ACCOUNTS as u16 {
-        return false; // Cycle detected
-    }
-
+    // Freelist length must equal expected
     if free_count != expected_free {
         return false; // Freelist length mismatch
     }
@@ -332,26 +340,57 @@ fn inv_structural(engine: &RiskEngine) -> bool {
 /// Accounting invariant: conservation and insurance bounds
 fn inv_accounting(engine: &RiskEngine) -> bool {
     let raw_spendable = engine.insurance_spendable_raw();
-    let floor = engine.params.risk_reduction_threshold;
 
-    // A1: insurance >= floor always (floor is protected)
-    // Note: raw_spendable = max(insurance - floor, 0), so if insurance < floor, raw = 0
-    // We check the stronger condition directly:
-    if engine.insurance_fund.balance < floor && engine.insurance_fund.balance != 0 {
-        // Special case: balance can be 0 if floor > 0 and nothing deposited yet
-        // But if balance > 0 and balance < floor, that's a violation
-        // Actually floor is a threshold for mode entry, not a minimum balance
-        // Let's just check reserved <= raw
-    }
-
-    // A2: warmup_insurance_reserved <= raw_spendable
-    if engine.warmup_insurance_reserved > raw_spendable {
+    // A1: Reserved identity (exact equality, not just <=)
+    // reserved == min(max(W+ - W-, 0), raw_spendable)
+    let needed = engine.warmed_pos_total.saturating_sub(engine.warmed_neg_total);
+    let expected_reserved = core::cmp::min(needed, raw_spendable);
+    if engine.warmup_insurance_reserved != expected_reserved {
         return false;
     }
 
-    // A3: Conservation check (simplified - assumes no unsettled funding for this check)
-    // For full proofs, use conservation_fast_no_funding() with explicit preconditions
-    // Here we just check the vault >= expected bound holds
+    // A2: Conservation inequality (cheap version, no funding adjustment)
+    // vault + loss_accum >= sum(capital) + insurance + sum_pos_pnl - sum_neg_pnl
+    // This is a necessary condition; full conservation requires funding adjustment.
+    //
+    // Compute sums over used accounts
+    let mut sum_capital: u128 = 0;
+    let mut sum_pos_pnl: u128 = 0;
+    let mut sum_neg_pnl: u128 = 0;
+
+    for block in 0..BITMAP_WORDS {
+        let mut w = engine.used[block];
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            let idx = block * 64 + bit;
+            w &= w - 1;
+
+            let account = &engine.accounts[idx];
+            sum_capital = sum_capital.saturating_add(account.capital);
+
+            if account.pnl > 0 {
+                sum_pos_pnl = sum_pos_pnl.saturating_add(account.pnl as u128);
+            } else if account.pnl < 0 {
+                sum_neg_pnl = sum_neg_pnl.saturating_add(neg_i128_to_u128(account.pnl));
+            }
+        }
+    }
+
+    // expected = sum_capital + insurance + sum_pos_pnl - sum_neg_pnl
+    let base = sum_capital.saturating_add(engine.insurance_fund.balance);
+    let expected = base.saturating_add(sum_pos_pnl).saturating_sub(sum_neg_pnl);
+    let actual = engine.vault.saturating_add(engine.loss_accum);
+
+    // One-sided: actual >= expected (vault has at least what's owed)
+    if actual < expected {
+        return false;
+    }
+
+    // Bounded slack: (actual - expected) <= MAX_ROUNDING_SLACK
+    let slack = actual - expected;
+    if slack > MAX_ROUNDING_SLACK {
+        return false;
+    }
 
     true
 }
@@ -7097,7 +7136,7 @@ fn proof_execute_trade_exception_safety() {
     }
 }
 
-/// execute_trade: INV preserved on success
+/// execute_trade: INV preserved (unconditional) and postconditions on Ok
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7119,6 +7158,10 @@ fn proof_execute_trade_preserves_inv() {
     // Precondition: INV holds before trade
     kani::assume(canonical_inv(&engine));
 
+    // Snapshot position BEFORE trade
+    let user_pos_before = engine.accounts[user_idx as usize].position_size;
+    let lp_pos_before = engine.accounts[lp_idx as usize].position_size;
+
     // Constrained inputs to force Ok path (non-vacuous proof of success case)
     let delta_size: i128 = kani::any();
     let oracle_price: u64 = kani::any();
@@ -7132,15 +7175,24 @@ fn proof_execute_trade_preserves_inv() {
         lp_idx, user_idx, 100, oracle_price, delta_size,
     );
 
-    // Only check postconditions if trade succeeded
-    if result.is_ok() {
-        // INV PRESERVATION: canonical invariant still holds
-        kani::assert(canonical_inv(&engine), "INV must be preserved by successful trade");
+    // INV must hold unconditionally after operation
+    kani::assert(canonical_inv(&engine), "INV must hold after execute_trade");
 
-        // NON-VACUITY: position actually changed
-        let pos_after = engine.accounts[user_idx as usize].position_size;
-        kani::assert(pos_after == delta_size, "User position must reflect trade delta");
-    }
+    // Postconditions and non-vacuity (force Ok path)
+    let _ = assert_ok!(result, "execute_trade must succeed with valid inputs");
+
+    // NON-VACUITY: position = pos_before + delta (user buys, LP sells)
+    let user_pos_after = engine.accounts[user_idx as usize].position_size;
+    let lp_pos_after = engine.accounts[lp_idx as usize].position_size;
+
+    kani::assert(
+        user_pos_after == user_pos_before + delta_size,
+        "User position must be pos_before + delta"
+    );
+    kani::assert(
+        lp_pos_after == lp_pos_before - delta_size,
+        "LP position must be pos_before - delta (opposite side)"
+    );
 }
 
 /// execute_trade: Conservation holds after successful trade (no funding case)
@@ -7277,7 +7329,7 @@ fn proof_deposit_exception_safety() {
     }
 }
 
-/// deposit: INV preserved and non-vacuous
+/// deposit: INV preserved (unconditional) and postconditions on Ok
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7296,14 +7348,13 @@ fn proof_deposit_preserves_inv() {
 
     let result = engine.deposit(user_idx, amount);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by deposit");
+    // INV must hold unconditionally after operation (regardless of Ok/Err)
+    kani::assert(canonical_inv(&engine), "INV must hold after deposit");
 
-        // NON-VACUITY: capital actually increased
-        let cap_after = engine.accounts[user_idx as usize].capital;
-        kani::assert(cap_after > cap_before, "deposit must increase capital");
-        kani::assert(cap_after == cap_before + amount, "deposit amount must match");
-    }
+    // Postconditions and non-vacuity (force Ok path)
+    let _ = assert_ok!(result, "deposit must succeed with valid inputs");
+    let cap_after = engine.accounts[user_idx as usize].capital;
+    kani::assert(cap_after == cap_before + amount, "deposit must add exact amount");
 }
 
 // ============================================================================
@@ -7343,7 +7394,7 @@ fn proof_withdraw_exception_safety() {
     }
 }
 
-/// withdraw: INV preserved on success
+/// withdraw: INV preserved (unconditional) and postconditions on Ok
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7367,14 +7418,14 @@ fn proof_withdraw_preserves_inv() {
 
     let result = engine.withdraw(user_idx, amount, 100, 1_000_000);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by withdraw");
+    // INV must hold unconditionally after operation
+    kani::assert(canonical_inv(&engine), "INV must hold after withdraw");
 
-        // NON-VACUITY
-        let cap_after = engine.accounts[user_idx as usize].capital;
-        kani::assert(cap_after < cap_before, "withdraw must decrease capital");
-        kani::assert(engine.vault < vault_before, "withdraw must decrease vault");
-    }
+    // Postconditions and non-vacuity (force Ok path)
+    let _ = assert_ok!(result, "withdraw must succeed with valid inputs");
+    let cap_after = engine.accounts[user_idx as usize].capital;
+    kani::assert(cap_after < cap_before, "withdraw must decrease capital");
+    kani::assert(engine.vault < vault_before, "withdraw must decrease vault");
 }
 
 // ============================================================================
@@ -7500,7 +7551,7 @@ fn proof_liquidate_exception_safety() {
     }
 }
 
-/// liquidate_at_oracle: INV preserved on success
+/// liquidate_at_oracle: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7523,11 +7574,10 @@ fn proof_liquidate_preserves_inv() {
     let oracle_price: u64 = kani::any();
     kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
 
-    let result = engine.liquidate_at_oracle(user_idx, 100, oracle_price);
+    let _result = engine.liquidate_at_oracle(user_idx, 100, oracle_price);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by liquidate_at_oracle");
-    }
+    // INV must hold unconditionally after operation
+    kani::assert(canonical_inv(&engine), "INV must hold after liquidate_at_oracle");
 }
 
 // ============================================================================
@@ -7564,7 +7614,7 @@ fn proof_apply_adl_exception_safety() {
     }
 }
 
-/// apply_adl: INV preserved on success
+/// apply_adl: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7588,18 +7638,17 @@ fn proof_apply_adl_preserves_inv() {
 
     let result = engine.apply_adl(loss);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by apply_adl");
+    // INV must hold unconditionally after operation
+    kani::assert(canonical_inv(&engine), "INV must hold after apply_adl");
 
-        // NON-VACUITY: PnL actually reduced (if loss > 0 and unwrapped available)
-        if loss > 0 {
-            let pnl_after = engine.accounts[user_idx as usize].pnl;
-            // Either PnL was haircutted or insurance/loss_accum covered it
-            kani::assert(
-                pnl_after <= pnl_before || engine.loss_accum > 0,
-                "ADL must either haircut PnL or route through loss_accum"
-            );
-        }
+    // Postconditions on Ok path
+    if result.is_ok() && loss > 0 {
+        let pnl_after = engine.accounts[user_idx as usize].pnl;
+        // Either PnL was haircutted or insurance/loss_accum covered it
+        kani::assert(
+            pnl_after <= pnl_before || engine.loss_accum > 0,
+            "ADL must either haircut PnL or route through loss_accum"
+        );
     }
 }
 
@@ -7634,7 +7683,7 @@ fn proof_settle_warmup_exception_safety() {
     }
 }
 
-/// settle_warmup_to_capital: INV preserved on success
+/// settle_warmup_to_capital: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7651,13 +7700,10 @@ fn proof_settle_warmup_preserves_inv() {
 
     kani::assume(canonical_inv(&engine));
 
-    let cap_before = engine.accounts[user_idx as usize].capital;
+    let _result = engine.settle_warmup_to_capital(user_idx);
 
-    let result = engine.settle_warmup_to_capital(user_idx);
-
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by settle_warmup_to_capital");
-    }
+    // INV must hold unconditionally after operation
+    kani::assert(canonical_inv(&engine), "INV must hold after settle_warmup_to_capital");
 }
 
 /// settle_warmup_to_capital: Negative PnL settles immediately
@@ -7678,21 +7724,24 @@ fn proof_settle_warmup_negative_pnl_immediate() {
 
     let result = engine.settle_warmup_to_capital(user_idx);
 
-    if result.is_ok() {
-        let account = &engine.accounts[user_idx as usize];
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after settle_warmup");
 
-        // N1 boundary: pnl >= 0 or capital == 0
-        kani::assert(
-            account.pnl >= 0 || account.capital == 0,
-            "N1: after settle, pnl >= 0 OR capital == 0"
-        );
+    // Postconditions (force Ok)
+    let _ = assert_ok!(result, "settle_warmup must succeed");
+    let account = &engine.accounts[user_idx as usize];
 
-        // NON-VACUITY: capital was reduced (loss settled)
-        kani::assert(
-            account.capital < cap_before,
-            "Negative PnL must reduce capital"
-        );
-    }
+    // N1 boundary: pnl >= 0 or capital == 0
+    kani::assert(
+        account.pnl >= 0 || account.capital == 0,
+        "N1: after settle, pnl >= 0 OR capital == 0"
+    );
+
+    // NON-VACUITY: capital was reduced (loss settled)
+    kani::assert(
+        account.capital < cap_before,
+        "Negative PnL must reduce capital"
+    );
 }
 
 // ============================================================================
@@ -7733,7 +7782,7 @@ fn proof_keeper_crank_exception_safety() {
     }
 }
 
-/// keeper_crank: INV preserved on success
+/// keeper_crank: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7753,15 +7802,15 @@ fn proof_keeper_crank_preserves_inv() {
 
     let result = engine.keeper_crank(caller, now_slot, 1_000_000, 0, false);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by keeper_crank");
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after keeper_crank");
 
-        // NON-VACUITY: crank advanced
-        kani::assert(
-            engine.last_crank_slot == now_slot,
-            "keeper_crank must advance last_crank_slot"
-        );
-    }
+    // Postconditions (force Ok)
+    let _ = assert_ok!(result, "keeper_crank must succeed");
+    kani::assert(
+        engine.last_crank_slot == now_slot,
+        "keeper_crank must advance last_crank_slot"
+    );
 }
 
 // ============================================================================
@@ -7857,7 +7906,7 @@ fn proof_force_realize_exception_safety() {
     }
 }
 
-/// force_realize_losses: INV preserved on success
+/// force_realize_losses: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7873,11 +7922,10 @@ fn proof_force_realize_preserves_inv() {
 
     kani::assume(canonical_inv(&engine));
 
-    let result = engine.force_realize_losses(1_000_000);
+    let _result = engine.force_realize_losses(1_000_000);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by force_realize_losses");
-    }
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after force_realize_losses");
 }
 
 // ============================================================================
@@ -7918,7 +7966,7 @@ fn proof_close_account_exception_safety() {
     }
 }
 
-/// close_account: INV preserved on success
+/// close_account: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -7940,19 +7988,19 @@ fn proof_close_account_preserves_inv() {
 
     let result = engine.close_account(user_idx, 100, 1_000_000);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by close_account");
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after close_account");
 
-        // NON-VACUITY: account was closed
-        kani::assert(
-            !engine.is_used(user_idx as usize),
-            "close_account must mark account as unused"
-        );
-        kani::assert(
-            engine.num_used_accounts == num_used_before - 1,
-            "close_account must decrease num_used_accounts"
-        );
-    }
+    // Postconditions (force Ok)
+    let _ = assert_ok!(result, "close_account must succeed");
+    kani::assert(
+        !engine.is_used(user_idx as usize),
+        "close_account must mark account as unused"
+    );
+    kani::assert(
+        engine.num_used_accounts == num_used_before - 1,
+        "close_account must decrease num_used_accounts"
+    );
 }
 
 // ============================================================================
@@ -7980,7 +8028,7 @@ fn proof_top_up_insurance_exception_safety() {
     }
 }
 
-/// top_up_insurance_fund: INV preserved on success
+/// top_up_insurance_fund: INV preserved (unconditional)
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
@@ -8001,22 +8049,22 @@ fn proof_top_up_insurance_preserves_inv() {
 
     let result = engine.top_up_insurance_fund(amount);
 
-    if result.is_ok() {
-        kani::assert(canonical_inv(&engine), "INV preserved by top_up_insurance_fund");
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after top_up_insurance_fund");
 
-        // NON-VACUITY: vault increased by amount
-        kani::assert(
-            engine.vault == vault_before + amount,
-            "top_up must increase vault by amount"
-        );
+    // Postconditions (force Ok)
+    let _ = assert_ok!(result, "top_up_insurance must succeed");
+    kani::assert(
+        engine.vault == vault_before + amount,
+        "top_up must increase vault by amount"
+    );
 
-        // Either loss_accum reduced or insurance increased (or both)
-        let total_change = (loss_before - engine.loss_accum) + (engine.insurance_fund.balance - insurance_before);
-        kani::assert(
-            total_change == amount,
-            "top_up amount must go to loss_accum reduction + insurance increase"
-        );
-    }
+    // Either loss_accum reduced or insurance increased (or both)
+    let total_change = (loss_before - engine.loss_accum) + (engine.insurance_fund.balance - insurance_before);
+    kani::assert(
+        total_change == amount,
+        "top_up amount must go to loss_accum reduction + insurance increase"
+    );
 }
 
 /// top_up_insurance_fund: Loss coverage priority
@@ -8040,19 +8088,23 @@ fn proof_top_up_insurance_covers_loss_first() {
 
     let result = engine.top_up_insurance_fund(amount);
 
-    if result.is_ok() {
-        // Loss should be reduced by exactly the amount (since amount < loss_accum)
-        kani::assert(
-            engine.loss_accum == loss_before - amount,
-            "top_up must reduce loss_accum by amount when amount < loss_accum"
-        );
+    // INV must hold unconditionally
+    kani::assert(canonical_inv(&engine), "INV must hold after top_up");
 
-        // Insurance should be unchanged (all went to loss coverage)
-        kani::assert(
-            engine.insurance_fund.balance == insurance_before,
-            "insurance unchanged when all top_up goes to loss coverage"
-        );
-    }
+    // Postconditions (force Ok)
+    let _ = assert_ok!(result, "top_up must succeed");
+
+    // Loss should be reduced by exactly the amount (since amount < loss_accum)
+    kani::assert(
+        engine.loss_accum == loss_before - amount,
+        "top_up must reduce loss_accum by amount when amount < loss_accum"
+    );
+
+    // Insurance should be unchanged (all went to loss coverage)
+    kani::assert(
+        engine.insurance_fund.balance == insurance_before,
+        "insurance unchanged when all top_up goes to loss coverage"
+    );
 }
 
 // ============================================================================
