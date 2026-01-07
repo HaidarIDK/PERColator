@@ -6406,6 +6406,119 @@ fn progress_socialization_completes() {
     );
 }
 
+// ==============================================================================
+// FORCE-REALIZE STEP PROOFS: Windowed, bounded force-close
+// ==============================================================================
+
+/// FORCE-REALIZE-1: force_realize_step_window is window-bounded
+/// Only accounts in the specified window have their positions changed.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn force_realize_step_window_bounded() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    // Create accounts with positions
+    let idx0 = engine.add_user(0).unwrap();
+    let idx1 = engine.add_user(0).unwrap();
+    let idx2 = engine.add_user(0).unwrap();
+
+    // All have positions
+    engine.accounts[idx0 as usize].position_size = 1000;
+    engine.accounts[idx0 as usize].entry_price = 1_000_000;
+    engine.accounts[idx1 as usize].position_size = 1000;
+    engine.accounts[idx1 as usize].entry_price = 1_000_000;
+    engine.accounts[idx2 as usize].position_size = 1000;
+    engine.accounts[idx2 as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 6000;
+
+    // Set insurance at threshold to activate force-realize
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold;
+
+    // Snapshot position of idx2 (outside small window)
+    let pos2_before = engine.accounts[idx2 as usize].position_size;
+
+    // Run force_realize_step_window on window [0, 2) - only idx0 and idx1
+    let (closed, _errors) = engine.force_realize_step_window(1, 1_000_000, 0, 2);
+
+    // Should have closed positions in window
+    assert!(closed <= 2, "FORCE-REALIZE-1: At most 2 positions closed in window of 2");
+
+    // idx2 (outside window) should be unchanged
+    assert!(
+        engine.accounts[idx2 as usize].position_size == pos2_before,
+        "FORCE-REALIZE-1: Position outside window must be unchanged"
+    );
+}
+
+/// FORCE-REALIZE-2: Step never increases OI
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn force_realize_step_never_increases_oi() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    let idx = engine.add_user(0).unwrap();
+
+    let pos: i128 = kani::any();
+    kani::assume(pos != 0 && pos > -10_000 && pos < 10_000);
+
+    engine.accounts[idx as usize].position_size = pos;
+    engine.accounts[idx as usize].entry_price = 1_000_000;
+    engine.accounts[idx as usize].capital = 10_000;
+
+    let abs_pos = if pos >= 0 { pos as u128 } else { (-pos) as u128 };
+    engine.total_open_interest = abs_pos * 2; // Account for both sides
+
+    // Set insurance at threshold
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold;
+
+    let oi_before = engine.total_open_interest;
+
+    // Run force-realize step
+    let (_closed, _errors) = engine.force_realize_step_window(1, 1_000_000, 0, MAX_ACCOUNTS);
+
+    // OI must not increase
+    assert!(
+        engine.total_open_interest <= oi_before,
+        "FORCE-REALIZE-2: OI must not increase after force-realize step"
+    );
+}
+
+/// FORCE-REALIZE-3: Step only increases pending_unpaid_loss (monotone non-decreasing)
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn force_realize_step_pending_monotone() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    let idx = engine.add_user(0).unwrap();
+
+    let pos: i128 = kani::any();
+    kani::assume(pos != 0 && pos > -10_000 && pos < 10_000);
+
+    engine.accounts[idx as usize].position_size = pos;
+    engine.accounts[idx as usize].entry_price = 1_000_000;
+    engine.accounts[idx as usize].capital = 100; // Small capital, may have unpaid loss
+
+    let abs_pos = if pos >= 0 { pos as u128 } else { (-pos) as u128 };
+    engine.total_open_interest = abs_pos * 2;
+
+    // Set insurance at threshold
+    engine.insurance_fund.balance = engine.params.risk_reduction_threshold;
+
+    let pending_before = engine.pending_unpaid_loss;
+
+    // Run force-realize step
+    let (_closed, _errors) = engine.force_realize_step_window(1, 1_000_000, 0, MAX_ACCOUNTS);
+
+    // pending_unpaid_loss must not decrease
+    assert!(
+        engine.pending_unpaid_loss >= pending_before,
+        "FORCE-REALIZE-3: pending_unpaid_loss must be monotone non-decreasing"
+    );
+}
+
 // ============================================================================
 // WITHDRAWAL MARGIN SAFETY (Bug 5 fix verification)
 // ============================================================================

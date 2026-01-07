@@ -429,6 +429,15 @@ pub struct RiskEngine {
     pub crank_step: u8,
 
     // ========================================
+    // Lifetime Counters (telemetry)
+    // ========================================
+    /// Total number of liquidations performed (lifetime)
+    pub lifetime_liquidations: u64,
+
+    /// Total number of force-realize closes performed (lifetime)
+    pub lifetime_force_realize_closes: u64,
+
+    // ========================================
     // LP Aggregates (O(1) maintained for funding/threshold)
     // ========================================
     /// Net LP position: sum of position_size across all LP accounts
@@ -524,7 +533,7 @@ pub struct CrankOutcome {
     pub slots_forgiven: u64,
     /// Whether caller's maintenance fee settle succeeded (false if undercollateralized)
     pub caller_settle_ok: bool,
-    /// Whether force_realize_losses should be called (insurance depleted)
+    /// Whether force-realize mode is active (insurance at/below threshold)
     pub force_realize_needed: bool,
     /// Whether panic_settle_all should be called (system in stress)
     pub panic_needed: bool,
@@ -534,6 +543,10 @@ pub struct CrankOutcome {
     pub num_liq_errors: u16,
     /// Number of dust accounts garbage collected during this crank
     pub num_gc_closed: u32,
+    /// Number of positions force-closed during this crank (when force_realize_needed)
+    pub force_realize_closed: u16,
+    /// Number of force-realize errors during this crank
+    pub force_realize_errors: u16,
 }
 
 // ============================================================================
@@ -734,6 +747,8 @@ impl RiskEngine {
             last_full_sweep_start_slot: 0,
             last_full_sweep_completed_slot: 0,
             crank_step: 0,
+            lifetime_liquidations: 0,
+            lifetime_force_realize_closes: 0,
             net_lp_pos: 0,
             lp_sum_abs: 0,
             lp_max_abs: 0,
@@ -1289,6 +1304,13 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Check if force-realize mode is active (insurance at or below threshold).
+    /// When active, keeper_crank will run windowed force-realize steps.
+    #[inline]
+    fn force_realize_active(&self) -> bool {
+        self.insurance_fund.balance <= self.params.risk_reduction_threshold
+    }
+
     /// Keeper crank entrypoint - advances global state and performs maintenance.
     ///
     /// Returns CrankOutcome with flags indicating what happened.
@@ -1378,24 +1400,17 @@ impl RiskEngine {
         let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
         let num_liq_errors = top_liq_errors.saturating_add(sweep_errors);
 
-        // Detect conditions that require heavy (O(N)) operations.
-        // The crank itself doesn't run them - caller should invoke separate instructions.
-        let mut force_realize_needed = false;
-        let mut panic_needed = false;
+        // Windowed force-realize step: when insurance is at/below threshold,
+        // force-close positions in the current window. This is bounded to O(WINDOW).
+        let (force_realize_closed, force_realize_errors) =
+            self.force_realize_step_window(now_slot, oracle_price, window_start, window_len);
 
-        // Only flag heavy actions when we actually advanced the crank
-        if advanced {
-            if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-                // Insurance at or below floor - force realize losses needed
-                force_realize_needed = true;
-            } else if (self.loss_accum > 0 || self.risk_reduction_only)
-                && allow_panic
-                && self.total_open_interest > 0
-            {
-                // System in stress with open positions - panic settle needed
-                panic_needed = true;
-            }
-        }
+        // Detect conditions for informational flags
+        let force_realize_needed = self.force_realize_active();
+        let panic_needed = !force_realize_needed
+            && (self.loss_accum > 0 || self.risk_reduction_only)
+            && allow_panic
+            && self.total_open_interest > 0;
 
         // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
         self.socialization_step(window_start, window_len);
@@ -1419,6 +1434,8 @@ impl RiskEngine {
             num_liquidations,
             num_liq_errors,
             num_gc_closed,
+            force_realize_closed,
+            force_realize_errors,
         })
     }
 
@@ -2257,6 +2274,7 @@ impl RiskEngine {
             match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
                 Ok((true, deferred)) => {
                     liquidated += 1;
+                    self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
                     // Accumulate into pending buckets (no ADL call)
                     self.pending_profit_to_fund = self
                         .pending_profit_to_fund
@@ -2279,6 +2297,95 @@ impl RiskEngine {
         }
 
         (checked, liquidated, errors)
+    }
+
+    /// Windowed force-realize step: closes positions in the current window when
+    /// insurance is at/below threshold. Bounded to O(WINDOW) work per crank.
+    ///
+    /// Returns (closed_positions, errors).
+    ///
+    /// This is NOT liquidation - it's a forced unwind of all positions in the window.
+    /// Unpaid losses are accumulated into pending_unpaid_loss for socialization_step
+    /// to handle across subsequent cranks.
+    fn force_realize_step_window(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        start: usize,
+        len: usize,
+    ) -> (u16, u16) {
+        // Gate: only active when insurance at/below threshold
+        if !self.force_realize_active() {
+            return (0, 0);
+        }
+
+        // Enter risk reduction mode (idempotent)
+        self.enter_risk_reduction_only_mode();
+
+        let mut closed: u16 = 0;
+        let mut errors: u16 = 0;
+
+        for offset in 0..len {
+            let idx = (start + offset) & ACCOUNT_IDX_MASK;
+
+            // Check if slot is used
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+
+            // Skip accounts with no position
+            if self.accounts[idx].position_size == 0 {
+                continue;
+            }
+
+            // Minimal per-account settle (funding + maintenance, no warmup)
+            if self
+                .touch_account_for_crank(idx as u16, now_slot, oracle_price)
+                .is_err()
+            {
+                errors += 1;
+                self.risk_reduction_only = true;
+                continue;
+            }
+
+            // Force-close the position (not liquidation)
+            match self.force_close_position_deferred(idx, oracle_price) {
+                Ok((mark_pnl, deferred)) => {
+                    closed += 1;
+                    self.lifetime_force_realize_closes =
+                        self.lifetime_force_realize_closes.saturating_add(1);
+
+                    // Accumulate unpaid loss into pending bucket
+                    self.pending_unpaid_loss = self
+                        .pending_unpaid_loss
+                        .saturating_add(deferred.unpaid_loss);
+
+                    // Rounding compensation: positive mark_pnl represents "profit"
+                    // that must be funded by others. In force-realize, we treat this
+                    // as additional loss to socialize (matches full force_realize_losses behavior).
+                    if mark_pnl > 0 {
+                        self.pending_unpaid_loss = self
+                            .pending_unpaid_loss
+                            .saturating_add(mark_pnl as u128);
+                    }
+
+                    // Note: We ignore deferred.profit_to_fund. Force-realize is batch-close;
+                    // winners are naturally funded by losers, and any mismatch is handled
+                    // via pending_unpaid_loss + socialization_step.
+                }
+                Err(_) => {
+                    errors += 1;
+                    self.risk_reduction_only = true;
+                }
+            }
+        }
+
+        // Recompute warmup insurance reserved (safe, bounded)
+        self.recompute_warmup_insurance_reserved();
+
+        (closed, errors)
     }
 
     // ========================================
@@ -2447,6 +2554,7 @@ impl RiskEngine {
             match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
                 Ok((true, deferred)) => {
                     liquidated += 1;
+                    self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
                     // Accumulate into pending buckets (no ADL call)
                     self.pending_profit_to_fund = self
                         .pending_profit_to_fund

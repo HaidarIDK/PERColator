@@ -5747,3 +5747,212 @@ fn test_topk_selection_many_liquidatable() {
     // Liquidation may trigger errors if ADL waterfall exhausts resources,
     // but the system should remain consistent
 }
+
+// ==============================================================================
+// WINDOWED FORCE-REALIZE STEP TESTS
+// ==============================================================================
+
+/// Test 1: Force-realize step closes positions in-window only
+#[test]
+fn test_force_realize_step_closes_in_window_only() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Threshold at 1000
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.vault = 100_000;
+
+    // Create counterparty LP
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.deposit(lp, 50_000).unwrap();
+
+    // Create users with positions at different indices
+    let user1 = engine.add_user(0).unwrap(); // idx 1, in first window
+    let user2 = engine.add_user(0).unwrap(); // idx 2, in first window
+    let user3 = engine.add_user(0).unwrap(); // idx 3, in first window
+
+    engine.deposit(user1, 5_000).unwrap();
+    engine.deposit(user2, 5_000).unwrap();
+    engine.deposit(user3, 5_000).unwrap();
+
+    // Give them positions
+    engine.accounts[user1 as usize].position_size = 10_000;
+    engine.accounts[user1 as usize].entry_price = 1_000_000;
+    engine.accounts[user2 as usize].position_size = 10_000;
+    engine.accounts[user2 as usize].entry_price = 1_000_000;
+    engine.accounts[user3 as usize].position_size = 10_000;
+    engine.accounts[user3 as usize].entry_price = 1_000_000;
+    engine.accounts[lp as usize].position_size = -30_000;
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 60_000;
+
+    // Set insurance at threshold (force-realize active)
+    engine.insurance_fund.balance = 1000;
+
+    // Run crank at step 0
+    assert_eq!(engine.crank_step, 0);
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Force-realize should have run and closed positions
+    assert!(outcome.force_realize_needed, "Force-realize should be needed");
+    assert!(
+        outcome.force_realize_closed > 0,
+        "Should have closed some positions"
+    );
+
+    // Positions should be closed
+    assert_eq!(
+        engine.accounts[user1 as usize].position_size, 0,
+        "User1 position should be closed"
+    );
+    assert_eq!(
+        engine.accounts[user2 as usize].position_size, 0,
+        "User2 position should be closed"
+    );
+    assert_eq!(
+        engine.accounts[user3 as usize].position_size, 0,
+        "User3 position should be closed"
+    );
+}
+
+/// Test 2: Force-realize step is inert when insurance > threshold
+#[test]
+fn test_force_realize_step_inert_above_threshold() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000; // Threshold at 1000
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.vault = 100_000;
+
+    // Create counterparty LP
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.deposit(lp, 50_000).unwrap();
+
+    // Create user with position
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+    engine.accounts[user as usize].position_size = 10_000;
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[lp as usize].position_size = -10_000;
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+    engine.total_open_interest = 20_000;
+
+    // Set insurance ABOVE threshold (force-realize NOT active)
+    engine.insurance_fund.balance = 1001;
+
+    let pos_before = engine.accounts[user as usize].position_size;
+
+    // Run crank
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Force-realize should not be needed
+    assert!(
+        !outcome.force_realize_needed,
+        "Force-realize should not be needed"
+    );
+    assert_eq!(
+        outcome.force_realize_closed, 0,
+        "No positions should be force-closed"
+    );
+
+    // Position should be unchanged
+    assert_eq!(
+        engine.accounts[user as usize].position_size, pos_before,
+        "Position should be unchanged"
+    );
+}
+
+/// Test 3: Force-realize produces pending_unpaid_loss and socialization reduces it
+#[test]
+fn test_force_realize_produces_pending_and_socialization_reduces() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000;
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.vault = 100_000;
+
+    // Create counterparty LP with large position
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.deposit(lp, 50_000).unwrap();
+
+    // Create losing user with insufficient capital to cover loss
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000).unwrap(); // Only 1000 capital
+
+    // User is long, price dropped significantly
+    engine.accounts[user as usize].position_size = 10_000;
+    engine.accounts[user as usize].entry_price = 2_000_000; // Bought at 2.0
+    engine.accounts[lp as usize].position_size = -10_000;
+    engine.accounts[lp as usize].entry_price = 2_000_000;
+    engine.total_open_interest = 20_000;
+
+    // Set insurance at threshold
+    engine.insurance_fund.balance = 1000;
+
+    // Snapshot pending before
+    let pending_before = engine.pending_unpaid_loss;
+
+    // Run crank at oracle price 1.0 (user lost money)
+    let outcome = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false).unwrap();
+
+    // Force-realize should have run
+    assert!(outcome.force_realize_needed);
+    assert!(outcome.force_realize_closed > 0, "Should force-close position");
+
+    // pending_unpaid_loss should have increased
+    assert!(
+        engine.pending_unpaid_loss > pending_before,
+        "pending_unpaid_loss should increase"
+    );
+
+    // Now create an account with unwrapped profit to absorb the pending loss
+    let winner = engine.add_user(0).unwrap();
+    engine.accounts[winner as usize].pnl = 50_000; // Positive PnL (unwrapped)
+    engine.accounts[winner as usize].warmup_slope_per_step = 0; // All unwrapped
+    engine.vault = engine.vault + 50_000; // Adjust vault for conservation
+
+    // Run more cranks to let socialization chew down the pending
+    let pending_mid = engine.pending_unpaid_loss;
+    for slot in 2..20 {
+        let _ = engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false);
+    }
+
+    // Pending should have decreased
+    assert!(
+        engine.pending_unpaid_loss < pending_mid,
+        "pending_unpaid_loss should decrease after socialization"
+    );
+}
+
+/// Test 4: Withdraw/close blocked while pending is non-zero
+#[test]
+fn test_force_realize_blocks_value_extraction() {
+    let mut params = default_params();
+    params.risk_reduction_threshold = 1000;
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.vault = 100_000;
+
+    // Create user with capital
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000).unwrap();
+
+    // Manually set pending to simulate post-force-realize state
+    engine.pending_unpaid_loss = 100;
+
+    // Try to withdraw - should fail
+    let result = engine.withdraw(user, 1_000, 0, 1_000_000);
+    assert!(
+        result == Err(RiskError::Unauthorized),
+        "Withdraw should be blocked when pending > 0"
+    );
+
+    // Try to close - should fail
+    let result = engine.close_account(user, 0, 1_000_000);
+    assert!(
+        result == Err(RiskError::Unauthorized),
+        "Close should be blocked when pending > 0"
+    );
+
+    // Clear pending
+    engine.pending_unpaid_loss = 0;
+
+    // Now withdraw should succeed
+    let result = engine.withdraw(user, 1_000, 0, 1_000_000);
+    assert!(result.is_ok(), "Withdraw should succeed when pending = 0");
+}
