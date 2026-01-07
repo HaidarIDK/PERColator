@@ -1856,7 +1856,15 @@ impl RiskEngine {
                 self.accounts[idx as usize].pnl = 0;
             }
         }
-        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+        // Update warmup markers after pnl change (matching force-close semantics)
+        // This ensures profits from liquidation obey the same warmup clock rules
+        self.update_warmup_slope(idx)?;
+        let effective_slot = if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        };
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -1974,7 +1982,16 @@ impl RiskEngine {
                 self.accounts[idx as usize].pnl = 0;
             }
         }
-        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+
+        // Update warmup markers after pnl change (matching force-close semantics)
+        // This ensures profits from liquidation obey the same warmup clock rules
+        self.update_warmup_slope(idx)?;
+        let effective_slot = if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        };
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -2158,22 +2175,30 @@ impl RiskEngine {
             }
         }
 
-        // Apply ADL immediately for permissionless liquidation (not batched like crank)
-        // Profit funding: haircut others' unwrapped PnL (exclude liquidated account)
+        // Accumulate into pending buckets for socialization (same semantics as crank)
+        // This avoids double-counting: mark_pnl is already credited to the liquidated account,
+        // so we don't immediately haircut others. Instead, let socialization handle it fairly.
         if deferred.profit_to_fund > 0 {
-            self.apply_adl_excluding(deferred.profit_to_fund, idx as usize)?;
+            self.pending_profit_to_fund = self.pending_profit_to_fund
+                .saturating_add(deferred.profit_to_fund);
+            // Mark epoch exclusion so this account's profit isn't haircut to fund itself
+            self.pending_exclude_epoch[idx as usize] = self.pending_epoch;
         }
-        // Unpaid loss: socialize via ADL waterfall
         if deferred.unpaid_loss > 0 {
-            self.apply_adl(deferred.unpaid_loss)?;
+            self.pending_unpaid_loss = self.pending_unpaid_loss
+                .saturating_add(deferred.unpaid_loss);
         }
 
-        // Compute and apply liquidation fee on total closed amount (this IS fee revenue)
+        // FEE ORDERING INVARIANT: Fee is charged AFTER position close and pending accumulation.
+        // - Fee comes from remaining capital, after any loss has been paid from capital
+        // - Fee can drive capital to 0, but position is already closed so margin doesn't matter
+        // - This ordering means "fee has lower priority than loss payment"
+        // - If fee should have priority, move this before pending accumulation
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
 
-        // Pay fee from account capital (capped by available capital)
+        // Pay fee from account capital (capped by available capital - never underflows)
         let account_capital = self.accounts[idx as usize].capital;
         let pay = core::cmp::min(fee, account_capital);
 
