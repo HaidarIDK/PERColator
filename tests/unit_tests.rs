@@ -4815,6 +4815,9 @@ fn test_withdraw_im_check_blocks_when_equity_below_im() {
 fn test_keeper_crank_liquidates_undercollateralized_user() {
     let mut engine = RiskEngine::new(default_params());
 
+    // Fund insurance to avoid force-realize mode (threshold=0 means balance=0 triggers it)
+    engine.insurance_fund.balance = 1_000_000;
+
     // Create user and LP
     let user = engine.add_user(0).unwrap();
     let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();

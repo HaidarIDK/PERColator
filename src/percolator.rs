@@ -65,6 +65,10 @@ pub const TOPK_RUN_BUDGET: u16 = 64;
 /// Budget for sweep liquidations (remaining after top-K)
 pub const SWEEP_RUN_BUDGET: u16 = LIQ_BUDGET_PER_CRANK - TOPK_RUN_BUDGET;
 
+/// Max number of force-realize closes per crank call.
+/// Hard CU bound in force-realize mode. Liquidations are skipped when active.
+pub const FORCE_REALIZE_BUDGET_PER_CRANK: u16 = 32;
+
 // ============================================================================
 // Core Data Structures
 // ============================================================================
@@ -452,6 +456,9 @@ pub struct RiskEngine {
     /// Only increases; reset via bounded sweep at sweep completion
     pub lp_max_abs: u128,
 
+    /// In-progress max abs for current sweep (reset at sweep start, committed at completion)
+    pub lp_max_abs_sweep: u128,
+
     // ========================================
     // Slab Management
     // ========================================
@@ -752,6 +759,7 @@ impl RiskEngine {
             net_lp_pos: 0,
             lp_sum_abs: 0,
             lp_max_abs: 0,
+            lp_max_abs_sweep: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1077,6 +1085,60 @@ impl RiskEngine {
         Ok(due) // Return fee due for keeper rebate calculation
     }
 
+    /// Best-effort maintenance settle for crank paths.
+    /// - Always advances last_fee_slot
+    /// - Charges fees into insurance if possible
+    /// - NEVER fails due to margin checks
+    /// - Still returns Unauthorized if idx invalid
+    fn settle_maintenance_fee_best_effort_for_crank(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+    ) -> Result<u128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+
+        let account = &mut self.accounts[idx as usize];
+
+        let dt = now_slot.saturating_sub(account.last_fee_slot);
+        if dt == 0 {
+            return Ok(0);
+        }
+
+        let due = self.params.maintenance_fee_per_slot.saturating_mul(dt as u128);
+
+        // Advance slot marker regardless
+        account.last_fee_slot = now_slot;
+
+        // Deduct from fee_credits first
+        account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+        // If negative, pay what we can from capital (no margin check)
+        if account.fee_credits < 0 {
+            let owed = neg_i128_to_u128(account.fee_credits);
+            let pay = core::cmp::min(owed, account.capital);
+
+            account.capital = account.capital.saturating_sub(pay);
+            self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(pay);
+            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(pay);
+
+            account.fee_credits = account.fee_credits.saturating_add(pay as i128);
+        }
+
+        Ok(due)
+    }
+
+    /// Touch account for force-realize paths: settles funding and fees but
+    /// uses best-effort fee settle that can't stall on margin checks.
+    fn touch_account_for_force_realize(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+        // Funding settle is required for correct pnl
+        self.touch_account(idx)?;
+        // Best-effort fees; never fails due to maintenance margin
+        let _ = self.settle_maintenance_fee_best_effort_for_crank(idx, now_slot)?;
+        Ok(())
+    }
+
     /// Set owner pubkey for an account
     pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -1345,6 +1407,8 @@ impl RiskEngine {
             // Increment epochs (wrapping) - avoids O(MAX_ACCOUNTS) clears
             self.topk_epoch = self.topk_epoch.wrapping_add(1);
             self.pending_epoch = self.pending_epoch.wrapping_add(1);
+            // Reset in-progress lp_max_abs for fresh sweep
+            self.lp_max_abs_sweep = 0;
         }
 
         // Accrue funding first (always)
@@ -1386,19 +1450,26 @@ impl RiskEngine {
         let window_start = (self.crank_step as usize * WINDOW) & ACCOUNT_IDX_MASK;
         let window_len = WINDOW.min(MAX_ACCOUNTS);
 
-        // Phase A: Incremental top-K build + execution (bounded by TOPK_RUN_BUDGET)
-        self.topk_build_step(oracle_price, window_start, window_len);
-        let (top_liq_count, top_liq_errors) =
-            self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize, TOPK_RUN_BUDGET);
+        // Skip liquidation phases when force-realize is active (insurance at/below threshold).
+        // Force-realize closes ALL positions; liquidation just adds unnecessary CU.
+        let (num_liquidations, num_liq_errors) = if self.force_realize_active() {
+            (0, 0)
+        } else {
+            // Phase A: Incremental top-K build + execution (bounded by TOPK_RUN_BUDGET)
+            self.topk_build_step(oracle_price, window_start, window_len);
+            let (top_liq_count, top_liq_errors) =
+                self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize, TOPK_RUN_BUDGET);
 
-        // Phase B: Deterministic window sweep (bounded by remaining budget)
-        let remaining_budget = LIQ_BUDGET_PER_CRANK.saturating_sub(top_liq_count);
-        let (_sweep_checked, sweep_liqs, sweep_errors) =
-            self.scan_and_liquidate_window(now_slot, oracle_price, window_start, window_len as u16, remaining_budget);
+            // Phase B: Deterministic window sweep (bounded by remaining budget)
+            let remaining_budget = LIQ_BUDGET_PER_CRANK.saturating_sub(top_liq_count);
+            let (_sweep_checked, sweep_liqs, sweep_errors) =
+                self.scan_and_liquidate_window(now_slot, oracle_price, window_start, window_len as u16, remaining_budget);
 
-        // Combine liquidation counts
-        let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
-        let num_liq_errors = top_liq_errors.saturating_add(sweep_errors);
+            // Combine liquidation counts
+            let liq_count = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
+            let liq_errors = top_liq_errors.saturating_add(sweep_errors);
+            (liq_count, liq_errors)
+        };
 
         // Windowed force-realize step: when insurance is at/below threshold,
         // force-close positions in the current window. This is bounded to O(WINDOW).
@@ -1418,11 +1489,28 @@ impl RiskEngine {
         // Garbage collect dust accounts
         let num_gc_closed = self.garbage_collect_dust();
 
+        // Bounded lp_max_abs update: scan LP accounts in window
+        for offset in 0..window_len {
+            let idx = (window_start + offset) & ACCOUNT_IDX_MASK;
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+            if !self.accounts[idx].is_lp() {
+                continue;
+            }
+            let abs_pos = (self.accounts[idx].position_size as i128).unsigned_abs();
+            self.lp_max_abs_sweep = self.lp_max_abs_sweep.max(abs_pos);
+        }
+
         // Advance crank step; when completing final step, record completion and wrap
         self.crank_step += 1;
         if self.crank_step == NUM_STEPS {
             self.crank_step = 0;
             self.last_full_sweep_completed_slot = now_slot;
+            // Commit bounded lp_max_abs from sweep
+            self.lp_max_abs = self.lp_max_abs_sweep;
         }
 
         Ok(CrankOutcome {
@@ -2324,8 +2412,14 @@ impl RiskEngine {
 
         let mut closed: u16 = 0;
         let mut errors: u16 = 0;
+        let mut budget_left = FORCE_REALIZE_BUDGET_PER_CRANK;
 
         for offset in 0..len {
+            // Hard budget: stop scanning when we've done enough work
+            if budget_left == 0 {
+                break;
+            }
+
             let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
             // Check if slot is used
@@ -2340,9 +2434,9 @@ impl RiskEngine {
                 continue;
             }
 
-            // Minimal per-account settle (funding + maintenance, no warmup)
+            // Best-effort touch: can't stall on margin checks
             if self
-                .touch_account_for_crank(idx as u16, now_slot, oracle_price)
+                .touch_account_for_force_realize(idx as u16, now_slot)
                 .is_err()
             {
                 errors += 1;
@@ -2354,6 +2448,7 @@ impl RiskEngine {
             match self.force_close_position_deferred(idx, oracle_price) {
                 Ok((mark_pnl, deferred)) => {
                     closed += 1;
+                    budget_left = budget_left.saturating_sub(1);
                     self.lifetime_force_realize_closes =
                         self.lifetime_force_realize_closes.saturating_add(1);
 
