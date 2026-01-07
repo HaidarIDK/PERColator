@@ -1393,25 +1393,24 @@ impl RiskEngine {
             self.last_crank_slot = now_slot;
         }
 
-        // Always attempt caller's maintenance settle with 50% discount (best-effort)
-        // This lets users "self-crank" even if someone already cranked this slot
+        // Always attempt caller's maintenance settle (best-effort, no timestamp games)
+        // Use best-effort settle so undercollateralized callers can't get rebates
         let (slots_forgiven, caller_settle_ok) = if (caller_idx as usize) < MAX_ACCOUNTS
             && self.is_used(caller_idx as usize)
         {
-            // Pre-advance last_fee_slot by dt/2 to forgive half the elapsed time
-            // This makes settle_maintenance_fee charge only half the slots
+            // Compute forgiveness for reporting only (don't mutate before settle)
             let last_fee = self.accounts[caller_idx as usize].last_fee_slot;
             let dt = now_slot.saturating_sub(last_fee);
             let forgive = dt / 2;
 
-            if forgive > 0 {
+            // Use best-effort settle - always succeeds, no margin check
+            // Forgiveness is applied by only charging for half the elapsed time
+            if forgive > 0 && dt > 0 {
+                // Apply forgiveness: advance last_fee_slot by half, then settle for rest
                 self.accounts[caller_idx as usize].last_fee_slot =
                     last_fee.saturating_add(forgive);
             }
-
-            // Now settle - will only charge for remaining half of dt
-            // Best-effort: don't fail keeper_crank if caller is undercollateralized
-            let settle_result = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+            let settle_result = self.settle_maintenance_fee_best_effort_for_crank(caller_idx, now_slot);
 
             (forgive, settle_result.is_ok())
         } else {
@@ -2114,16 +2113,16 @@ impl RiskEngine {
             return Ok(false);
         }
 
-        // Close position via appropriate helper
-        // If partial close overflows, fall back to full close (overflow → full close safety)
-        let mut outcome = if is_full_close {
-            self.oracle_close_position_core(idx, oracle_price)?
+        // Close position via deferred helpers (unified semantics: no warmup settle)
+        // This matches crank liquidation behavior - profits stay unwrapped, losses paid from capital
+        let (mut outcome, mut deferred) = if is_full_close {
+            self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
         } else {
-            match self.oracle_close_position_slice_core(idx, oracle_price, close_abs) {
-                Ok(o) => o,
+            match self.oracle_close_position_slice_core_deferred_adl(idx, oracle_price, close_abs) {
+                Ok(r) => r,
                 Err(RiskError::Overflow) => {
                     // Overflow in partial close arithmetic → force full close
-                    self.oracle_close_position_core(idx, oracle_price)?
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
                 }
                 Err(e) => return Err(e),
             }
@@ -2142,14 +2141,28 @@ impl RiskEngine {
                 .saturating_add(self.params.liquidation_buffer_bps);
             if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
-                let fallback_outcome = self.oracle_close_position_core(idx, oracle_price)?;
+                let (fallback_outcome, fallback_deferred) =
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
                 if fallback_outcome.position_was_closed {
-                    // Accumulate closed amount for fee calculation.
-                    // Note: mark_pnl is not accumulated because only abs_pos is used
-                    // downstream (fee calc). PnL routing already happened in each core call.
                     outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
+                    // Accumulate deferred ADL amounts
+                    deferred.profit_to_fund = deferred.profit_to_fund
+                        .saturating_add(fallback_deferred.profit_to_fund);
+                    deferred.unpaid_loss = deferred.unpaid_loss
+                        .saturating_add(fallback_deferred.unpaid_loss);
+                    deferred.excluded = deferred.excluded || fallback_deferred.excluded;
                 }
             }
+        }
+
+        // Apply ADL immediately for permissionless liquidation (not batched like crank)
+        // Profit funding: haircut others' unwrapped PnL (exclude liquidated account)
+        if deferred.profit_to_fund > 0 {
+            self.apply_adl_excluding(deferred.profit_to_fund, idx as usize)?;
+        }
+        // Unpaid loss: socialize via ADL waterfall
+        if deferred.unpaid_loss > 0 {
+            self.apply_adl(deferred.unpaid_loss)?;
         }
 
         // Compute and apply liquidation fee on total closed amount (this IS fee revenue)
@@ -2551,9 +2564,11 @@ impl RiskEngine {
                 self.pending_profit_to_fund = self
                     .pending_profit_to_fund
                     .saturating_sub(spend_profit);
+                // Recompute reserved immediately so spendable_after is accurate
+                self.recompute_warmup_insurance_reserved();
             }
 
-            // Recompute spendable after profit funding
+            // Recompute spendable after profit funding (reserved was just updated)
             let spendable_after = self.insurance_spendable_unreserved();
 
             // Second: cover unpaid losses
