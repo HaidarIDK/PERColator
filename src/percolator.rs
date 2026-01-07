@@ -1418,10 +1418,11 @@ impl RiskEngine {
             (0, true) // No caller to settle, considered ok
         };
 
-        // Two-phase liquidation with hard budget:
+        // Window sweep with hard budget:
         // Window is defined by crank_step (deterministic), not liq_cursor
-        let window_start = (self.crank_step as usize * WINDOW) & ACCOUNT_IDX_MASK;
+        // Use window_len as stride so sweep is meaningful even when MAX_ACCOUNTS < WINDOW
         let window_len = WINDOW.min(MAX_ACCOUNTS);
+        let window_start = (self.crank_step as usize * window_len) & ACCOUNT_IDX_MASK;
 
         // Skip liquidation when force-realize is active (insurance at/below threshold).
         // Force-realize closes ALL positions; liquidation just adds unnecessary CU.
@@ -2098,8 +2099,8 @@ impl RiskEngine {
             return Ok(false);
         }
 
-        // Settle and check maintenance margin
-        self.touch_account_full(idx, now_slot, oracle_price)?;
+        // Settle funding + best-effort fees (can't block on margin - we're liquidating)
+        self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
         if self.is_above_maintenance_margin(account, oracle_price) {
@@ -2571,22 +2572,20 @@ impl RiskEngine {
             self.recompute_warmup_insurance_reserved();
         }
 
-        // If still non-zero after insurance spend, move to loss_accum and clear
-        // This prevents permanent wedge state
-        if self.pending_profit_to_fund > 0 || self.pending_unpaid_loss > 0 {
-            // Remaining pending represents uncovered losses
-            let remaining = self
-                .pending_profit_to_fund
-                .saturating_add(self.pending_unpaid_loss);
-
-            // Move to loss_accum
-            self.loss_accum = self.loss_accum.saturating_add(remaining);
-
-            // Clear pending buckets
-            self.pending_profit_to_fund = 0;
+        // Handle remaining pending_unpaid_loss: can go to loss_accum (that's what it's for)
+        if self.pending_unpaid_loss > 0 {
+            self.loss_accum = self.loss_accum.saturating_add(self.pending_unpaid_loss);
             self.pending_unpaid_loss = 0;
-
             // Enter risk-reduction mode (uncovered losses exist)
+            self.enter_risk_reduction_only_mode();
+        }
+
+        // Handle remaining pending_profit_to_fund: CANNOT go to loss_accum
+        // Unfunded profits must remain pending to block value extraction.
+        // If we can't fund it, the system is insolvent relative to that credited profit.
+        if self.pending_profit_to_fund > 0 {
+            // Leave pending_profit_to_fund non-zero - this will block withdrawals
+            // via require_no_pending_socialization() until properly funded or admin resolves
             self.enter_risk_reduction_only_mode();
         }
     }
