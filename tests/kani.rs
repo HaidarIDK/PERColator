@@ -369,7 +369,7 @@ struct GlobalSnapshot {
     pending_profit_to_fund: u128,
     pending_unpaid_loss: u128,
     // Crank state
-    crank_step: u16,
+    crank_step: u8,
     last_crank_slot: u64,
 }
 
@@ -6072,8 +6072,8 @@ fn pending_gate_warmup_conversion_blocked() {
     // Set pending to non-zero
     engine.pending_unpaid_loss = 1;
 
-    // Call settle_warmup_to_capital
-    let _ = engine.settle_warmup_to_capital(user_idx, 100, 1_000_000);
+    // Call settle_warmup_to_capital (now only takes idx)
+    let _ = engine.settle_warmup_to_capital(user_idx);
 
     // Capital and pnl should be unchanged (positive conversion blocked)
     // Note: negative settlement may still occur, but positive is blocked

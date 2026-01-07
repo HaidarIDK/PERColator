@@ -2430,7 +2430,7 @@ impl RiskEngine {
     /// This is NOT liquidation - it's a forced unwind of all positions in the window.
     /// Unpaid losses are accumulated into pending_unpaid_loss for socialization_step
     /// to handle across subsequent cranks.
-    fn force_realize_step_window(
+    pub fn force_realize_step_window(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -2529,7 +2529,7 @@ impl RiskEngine {
     /// guarantees all accounts are eventually visited.
     ///
     /// Cost: O(len), bounded by WINDOW.
-    fn socialization_step(&mut self, start: usize, len: usize) {
+    pub fn socialization_step(&mut self, start: usize, len: usize) {
         let epoch = self.pending_epoch;
         let effective_slot = self.effective_warmup_slot();
 
@@ -2947,6 +2947,11 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
 
@@ -3204,13 +3209,6 @@ impl RiskEngine {
             self.enforce_op(OpClass::RiskReduce)?;
         }
 
-        // Validate position size bounds (prevents overflow in mark_pnl calculations)
-        if saturating_abs_i128(new_user_pos) as u128 > MAX_POSITION_ABS
-            || saturating_abs_i128(new_lp_pos) as u128 > MAX_POSITION_ABS
-        {
-            return Err(RiskError::Overflow);
-        }
-
         // Call matching engine
         let lp = &self.accounts[lp_idx as usize];
         let execution = matcher.execute_match(
@@ -3230,6 +3228,15 @@ impl RiskEngine {
 
         let exec_price = execution.price;
         let exec_size = execution.size;
+
+        // Validate execution bounds (prevents overflow in mark_pnl calculations)
+        // These are the ACTUAL values that will be used, not the requested values
+        if exec_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if saturating_abs_i128(exec_size) as u128 > MAX_POSITION_ABS {
+            return Err(RiskError::Overflow);
+        }
 
         // Calculate fee
         let notional =
@@ -3276,6 +3283,13 @@ impl RiskEngine {
         // Calculate new positions
         let new_user_position = user.position_size.saturating_add(exec_size);
         let new_lp_position = lp.position_size.saturating_sub(exec_size);
+
+        // Validate final position bounds (prevents overflow in mark_pnl calculations)
+        if saturating_abs_i128(new_user_position) as u128 > MAX_POSITION_ABS
+            || saturating_abs_i128(new_lp_position) as u128 > MAX_POSITION_ABS
+        {
+            return Err(RiskError::Overflow);
+        }
 
         // Calculate new entry prices
         let mut new_user_entry = user.entry_price;
@@ -4097,6 +4111,11 @@ impl RiskEngine {
     /// Unlike single-account liquidation, global settlement requires multi-phase
     /// processing so ADL can see the full picture of positive PnL before haircutting.
     pub fn panic_settle_all(&mut self, oracle_price: u64) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Panic settle is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
 
@@ -4236,6 +4255,11 @@ impl RiskEngine {
     /// - Mark PnLs are zero-sum (profits are funded by losses in the same batch)
     /// - Only unpaid losses (capital exhausted) need ADL socialization
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Force realize is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
 
