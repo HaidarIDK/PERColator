@@ -52,9 +52,22 @@ pub const NUM_STEPS: u8 = 16;
 /// Accounts scanned per crank step in the deterministic sweep
 pub const WINDOW: usize = 256;
 
-/// Number of priority liquidations per crank (global top-K worst)
-/// Selection is O(N log K) using min-heap
-pub const TOP_LIQ_K: usize = 128;
+/// Hard liquidation budget per crank call (caps total work)
+/// Set to 120 to keep worst-case crank CU under ~50% of Solana limit
+pub const LIQ_BUDGET_PER_CRANK: u16 = 120;
+
+/// Max number of force-realize closes per crank call.
+/// Hard CU bound in force-realize mode. Liquidations are skipped when active.
+pub const FORCE_REALIZE_BUDGET_PER_CRANK: u16 = 32;
+
+/// Maximum oracle price (prevents overflow in mark_pnl calculations)
+/// 10^15 allows prices up to $1B with 6 decimal places
+pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000_000;
+
+/// Maximum absolute position size (prevents overflow in mark_pnl calculations)
+/// 10^20 allows positions up to 100 billion units
+/// Combined with MAX_ORACLE_PRICE, guarantees mark_pnl multiply won't overflow i128
+pub const MAX_POSITION_ABS: u128 = 100_000_000_000_000_000_000;
 
 // ============================================================================
 // Core Data Structures
@@ -367,25 +380,6 @@ pub struct RiskEngine {
     pub adl_exclude_scratch: [u8; MAX_ACCOUNTS],
 
     // ========================================
-    // Top-K Liquidation Scratch (does NOT alias ADL scratch)
-    // ========================================
-    /// Heap of account indices for top-K liquidation selection
-    pub topk_idx: [u16; TOP_LIQ_K],
-
-    /// Scores for heap entries (parallel to topk_idx)
-    pub topk_score: [u128; TOP_LIQ_K],
-
-    /// Current heap size
-    pub topk_len: u16,
-
-    /// Epoch counter for top-K deduplication (increments each sweep start)
-    pub topk_epoch: u8,
-
-    /// Per-account epoch marker to avoid duplicate inserts within a sweep
-    /// If topk_seen_epoch[idx] == topk_epoch, already considered this sweep
-    pub topk_seen_epoch: [u8; MAX_ACCOUNTS],
-
-    // ========================================
     // Deferred Socialization Buckets (replaces global ADL)
     // ========================================
     /// Accumulated profit-funding needs from liquidations (mark_pnl > 0)
@@ -418,6 +412,33 @@ pub struct RiskEngine {
 
     /// Crank step within current sweep (0..7)
     pub crank_step: u8,
+
+    // ========================================
+    // Lifetime Counters (telemetry)
+    // ========================================
+    /// Total number of liquidations performed (lifetime)
+    pub lifetime_liquidations: u64,
+
+    /// Total number of force-realize closes performed (lifetime)
+    pub lifetime_force_realize_closes: u64,
+
+    // ========================================
+    // LP Aggregates (O(1) maintained for funding/threshold)
+    // ========================================
+    /// Net LP position: sum of position_size across all LP accounts
+    /// Updated incrementally in execute_trade and close paths
+    pub net_lp_pos: i128,
+
+    /// Sum of abs(position_size) across all LP accounts
+    /// Updated incrementally in execute_trade and close paths
+    pub lp_sum_abs: u128,
+
+    /// Max abs(position_size) across all LP accounts (monotone upper bound)
+    /// Only increases; reset via bounded sweep at sweep completion
+    pub lp_max_abs: u128,
+
+    /// In-progress max abs for current sweep (reset at sweep start, committed at completion)
+    pub lp_max_abs_sweep: u128,
 
     // ========================================
     // Slab Management
@@ -500,16 +521,20 @@ pub struct CrankOutcome {
     pub slots_forgiven: u64,
     /// Whether caller's maintenance fee settle succeeded (false if undercollateralized)
     pub caller_settle_ok: bool,
-    /// Whether force_realize_losses was triggered
-    pub did_force_realize: bool,
-    /// Whether panic_settle_all was triggered
-    pub did_panic_settle: bool,
+    /// Whether force-realize mode is active (insurance at/below threshold)
+    pub force_realize_needed: bool,
+    /// Whether panic_settle_all should be called (system in stress)
+    pub panic_needed: bool,
     /// Number of accounts liquidated during this crank
     pub num_liquidations: u32,
     /// Number of liquidation errors (triggers risk_reduction_only)
     pub num_liq_errors: u16,
     /// Number of dust accounts garbage collected during this crank
     pub num_gc_closed: u32,
+    /// Number of positions force-closed during this crank (when force_realize_needed)
+    pub force_realize_closed: u16,
+    /// Number of force-realize errors during this crank
+    pub force_realize_errors: u16,
 }
 
 // ============================================================================
@@ -696,11 +721,6 @@ impl RiskEngine {
             adl_remainder_scratch: [0; MAX_ACCOUNTS],
             adl_idx_scratch: [0; MAX_ACCOUNTS],
             adl_exclude_scratch: [0; MAX_ACCOUNTS],
-            topk_idx: [0; TOP_LIQ_K],
-            topk_score: [0; TOP_LIQ_K],
-            topk_len: 0,
-            topk_epoch: 0,
-            topk_seen_epoch: [0; MAX_ACCOUNTS],
             pending_profit_to_fund: 0,
             pending_unpaid_loss: 0,
             pending_epoch: 0,
@@ -710,6 +730,12 @@ impl RiskEngine {
             last_full_sweep_start_slot: 0,
             last_full_sweep_completed_slot: 0,
             crank_step: 0,
+            lifetime_liquidations: 0,
+            lifetime_force_realize_closes: 0,
+            net_lp_pos: 0,
+            lp_sum_abs: 0,
+            lp_max_abs: 0,
+            lp_max_abs_sweep: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -1023,16 +1049,80 @@ impl RiskEngine {
             account.fee_credits = account.fee_credits.saturating_add(pay as i128);
         }
 
-        // Check maintenance margin if account has a position
+        // Check maintenance margin if account has a position (MTM check)
         if account.position_size != 0 {
             // Re-borrow immutably for margin check
             let account_ref = &self.accounts[idx as usize];
-            if !self.is_above_maintenance_margin(account_ref, oracle_price) {
+            if !self.is_above_maintenance_margin_mtm(account_ref, oracle_price) {
                 return Err(RiskError::Undercollateralized);
             }
         }
 
         Ok(due) // Return fee due for keeper rebate calculation
+    }
+
+    /// Best-effort maintenance settle for crank paths.
+    /// - Always advances last_fee_slot
+    /// - Charges fees into insurance if possible
+    /// - NEVER fails due to margin checks
+    /// - Still returns Unauthorized if idx invalid
+    fn settle_maintenance_fee_best_effort_for_crank(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+    ) -> Result<u128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+
+        let account = &mut self.accounts[idx as usize];
+
+        let dt = now_slot.saturating_sub(account.last_fee_slot);
+        if dt == 0 {
+            return Ok(0);
+        }
+
+        let due = self.params.maintenance_fee_per_slot.saturating_mul(dt as u128);
+
+        // Advance slot marker regardless
+        account.last_fee_slot = now_slot;
+
+        // Deduct from fee_credits first
+        account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+        // If negative, pay what we can from capital (no margin check)
+        if account.fee_credits < 0 {
+            let owed = neg_i128_to_u128(account.fee_credits);
+            let pay = core::cmp::min(owed, account.capital);
+
+            account.capital = account.capital.saturating_sub(pay);
+            self.insurance_fund.balance = self.insurance_fund.balance.saturating_add(pay);
+            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue.saturating_add(pay);
+
+            account.fee_credits = account.fee_credits.saturating_add(pay as i128);
+        }
+
+        Ok(due)
+    }
+
+    /// Touch account for force-realize paths: settles funding and fees but
+    /// uses best-effort fee settle that can't stall on margin checks.
+    fn touch_account_for_force_realize(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+        // Funding settle is required for correct pnl
+        self.touch_account(idx)?;
+        // Best-effort fees; never fails due to maintenance margin
+        let _ = self.settle_maintenance_fee_best_effort_for_crank(idx, now_slot)?;
+        Ok(())
+    }
+
+    /// Touch account for liquidation paths: settles funding and fees but
+    /// uses best-effort fee settle since we're about to liquidate anyway.
+    fn touch_account_for_liquidation(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+        // Funding settle is required for correct pnl
+        self.touch_account(idx)?;
+        // Best-effort fees; margin check would just block the liquidation we need to do
+        let _ = self.settle_maintenance_fee_best_effort_for_crank(idx, now_slot)?;
+        Ok(())
     }
 
     /// Set owner pubkey for an account
@@ -1087,6 +1177,10 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+
+        // Block closing accounts while socialization debt is pending
+        // This prevents extracting capital "through the side" while debt exists
+        self.require_no_pending_socialization()?;
 
         // Full settlement: funding + maintenance fees + warmup
         // This converts warmed pnl to capital and realizes negative pnl
@@ -1258,6 +1352,13 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Check if force-realize mode is active (insurance at or below threshold).
+    /// When active, keeper_crank will run windowed force-realize steps.
+    #[inline]
+    fn force_realize_active(&self) -> bool {
+        self.insurance_fund.balance <= self.params.risk_reduction_threshold
+    }
+
     /// Keeper crank entrypoint - advances global state and performs maintenance.
     ///
     /// Returns CrankOutcome with flags indicating what happened.
@@ -1281,21 +1382,25 @@ impl RiskEngine {
         funding_rate_bps_per_slot: i64,
         allow_panic: bool,
     ) -> Result<CrankOutcome> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
 
         // If starting a new sweep (step 0), record the start slot and reset state
         if self.crank_step == 0 {
             self.last_full_sweep_start_slot = now_slot;
-            // Reset top-K heap for new sweep
-            self.topk_len = 0;
             // Increment epochs (wrapping) - avoids O(MAX_ACCOUNTS) clears
-            self.topk_epoch = self.topk_epoch.wrapping_add(1);
             self.pending_epoch = self.pending_epoch.wrapping_add(1);
+            // Reset in-progress lp_max_abs for fresh sweep
+            self.lp_max_abs_sweep = 0;
         }
 
-        // Accrue funding first (always)
-        let _ = self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot);
+        // Accrue funding first (always) - propagate errors, don't continue with corrupt state
+        self.accrue_funding(now_slot, oracle_price, funding_rate_bps_per_slot)?;
 
         // Check if we're advancing the global crank slot
         let advanced = now_slot > self.last_crank_slot;
@@ -1303,93 +1408,107 @@ impl RiskEngine {
             self.last_crank_slot = now_slot;
         }
 
-        // Always attempt caller's maintenance settle with 50% discount (best-effort)
-        // This lets users "self-crank" even if someone already cranked this slot
+        // Always attempt caller's maintenance settle (best-effort, no timestamp games)
+        // Use best-effort settle so undercollateralized callers can't get rebates
         let (slots_forgiven, caller_settle_ok) = if (caller_idx as usize) < MAX_ACCOUNTS
             && self.is_used(caller_idx as usize)
         {
-            // Pre-advance last_fee_slot by dt/2 to forgive half the elapsed time
-            // This makes settle_maintenance_fee charge only half the slots
+            // Compute forgiveness for reporting only (don't mutate before settle)
             let last_fee = self.accounts[caller_idx as usize].last_fee_slot;
             let dt = now_slot.saturating_sub(last_fee);
             let forgive = dt / 2;
 
-            if forgive > 0 {
+            // Use best-effort settle - always succeeds, no margin check
+            // Forgiveness is applied by only charging for half the elapsed time
+            if forgive > 0 && dt > 0 {
+                // Apply forgiveness: advance last_fee_slot by half, then settle for rest
                 self.accounts[caller_idx as usize].last_fee_slot =
                     last_fee.saturating_add(forgive);
             }
-
-            // Now settle - will only charge for remaining half of dt
-            // Best-effort: don't fail keeper_crank if caller is undercollateralized
-            let settle_result = self.settle_maintenance_fee(caller_idx, now_slot, oracle_price);
+            let settle_result = self.settle_maintenance_fee_best_effort_for_crank(caller_idx, now_slot);
 
             (forgive, settle_result.is_ok())
         } else {
             (0, true) // No caller to settle, considered ok
         };
 
-        // Two-phase liquidation:
-        // Compute window parameters (shared by top-K build and deterministic sweep)
-        let window_start = self.liq_cursor as usize;
+        // Window sweep with hard budget:
+        // Window is defined by crank_step (deterministic), not liq_cursor
+        // Use window_len as stride so sweep is meaningful even when MAX_ACCOUNTS < WINDOW
         let window_len = WINDOW.min(MAX_ACCOUNTS);
+        let window_start = (self.crank_step as usize * window_len) & ACCOUNT_IDX_MASK;
 
-        // Phase A: Incremental top-K build + execution (O(WINDOW log K), then real liquidations)
-        self.topk_build_step(oracle_price, window_start, window_len);
-        let (top_liq_count, top_liq_errors) =
-            self.run_top_liquidations(now_slot, oracle_price, self.topk_len as usize);
+        // Skip liquidation when force-realize is active (insurance at/below threshold).
+        // Force-realize closes ALL positions; liquidation just adds unnecessary CU.
+        let (num_liquidations, num_liq_errors) = if self.force_realize_active() {
+            (0, 0)
+        } else {
+            // Single-pass window sweep with hard budget
+            let (_sweep_checked, sweep_liqs, sweep_errors) =
+                self.scan_and_liquidate_window(now_slot, oracle_price, window_start, window_len as u16, LIQ_BUDGET_PER_CRANK);
+            (sweep_liqs as u32, sweep_errors)
+        };
 
-        // Phase B: Deterministic window sweep (starvation-proof)
-        let (_sweep_checked, sweep_liqs, sweep_errors) =
-            self.scan_and_liquidate_window(now_slot, oracle_price, window_len as u16, window_len as u16);
+        // Windowed force-realize step: when insurance is at/below threshold,
+        // force-close positions in the current window. This is bounded to O(WINDOW).
+        let (force_realize_closed, force_realize_errors) =
+            self.force_realize_step_window(now_slot, oracle_price, window_start, window_len);
 
-        // Combine liquidation counts
-        let num_liquidations = (top_liq_count as u32).saturating_add(sweep_liqs as u32);
-        let num_liq_errors = top_liq_errors.saturating_add(sweep_errors);
+        // Detect conditions for informational flags
+        let force_realize_needed = self.force_realize_active();
+        let panic_needed = !force_realize_needed
+            && (self.loss_accum > 0 || self.risk_reduction_only)
+            && allow_panic
+            && self.total_open_interest > 0;
 
-        // Heavy actions run independent of caller settle success
-        let mut did_force_realize = false;
-        let mut did_panic_settle = false;
-
-        // Only run heavy actions when we actually advanced the crank
-        if advanced {
-            if self.insurance_fund.balance <= self.params.risk_reduction_threshold {
-                // Insurance at or below floor - force realize losses
-                if self.force_realize_losses(oracle_price).is_ok() {
-                    did_force_realize = true;
-                }
-            } else if (self.loss_accum > 0 || self.risk_reduction_only)
-                && allow_panic
-                && self.total_open_interest > 0
-            {
-                // System in stress with open positions - panic settle
-                if self.panic_settle_all(oracle_price).is_ok() {
-                    did_panic_settle = true;
-                }
-            }
-        }
+        // Garbage collect dust accounts BEFORE socialization
+        // This ensures pending_unpaid_loss from GC'd accounts is available for haircuts
+        // in the current window (if victim is in the same window as the GC'd account).
+        let num_gc_closed = self.garbage_collect_dust();
 
         // Bounded socialization: apply pending profit/loss haircuts to WINDOW accounts
         self.socialization_step(window_start, window_len);
 
-        // Garbage collect dust accounts
-        let num_gc_closed = self.garbage_collect_dust();
+        // Bounded lp_max_abs update: scan LP accounts in window
+        for offset in 0..window_len {
+            let idx = (window_start + offset) & ACCOUNT_IDX_MASK;
+            let block = idx >> 6;
+            let bit = idx & 63;
+            if (self.used[block] & (1u64 << bit)) == 0 {
+                continue;
+            }
+            if !self.accounts[idx].is_lp() {
+                continue;
+            }
+            let abs_pos = (self.accounts[idx].position_size as i128).unsigned_abs();
+            self.lp_max_abs_sweep = self.lp_max_abs_sweep.max(abs_pos);
+        }
 
         // Advance crank step; when completing final step, record completion and wrap
         self.crank_step += 1;
         if self.crank_step == NUM_STEPS {
+            // Full sweep complete - finalize pending now that all accounts have been scanned
+            // This ensures socialization has had a chance to haircut all positive PnL before
+            // spending insurance. Guarantees pending buckets can't remain non-zero forever (liveness).
+            self.finalize_pending_after_window();
+
             self.crank_step = 0;
             self.last_full_sweep_completed_slot = now_slot;
+            // Commit bounded lp_max_abs from sweep
+            self.lp_max_abs = self.lp_max_abs_sweep;
         }
 
         Ok(CrankOutcome {
             advanced,
             slots_forgiven,
             caller_settle_ok,
-            did_force_realize,
-            did_panic_settle,
+            force_realize_needed,
+            panic_needed,
             num_liquidations,
             num_liq_errors,
             num_gc_closed,
+            force_realize_closed,
+            force_realize_errors,
         })
     }
 
@@ -1431,10 +1550,11 @@ impl RiskEngine {
     ///
     /// ## Algorithm:
     /// 1. Compute target_bps = maintenance_margin_bps + liquidation_buffer_bps
-    /// 2. Compute max safe remaining position: abs_pos_safe_max = floor(E * 10_000 * 1_000_000 / (P * target_bps))
+    /// 2. Compute max safe remaining position: abs_pos_safe_max = floor(E_mtm * 10_000 * 1_000_000 / (P * target_bps))
     /// 3. close_abs = abs_pos - abs_pos_safe_max
     /// 4. If remaining position < min_liquidation_abs, do full close (dust kill-switch)
     ///
+    /// Uses MTM equity (capital + realized_pnl + mark_pnl) for correct risk calculation.
     /// This is deterministic, requires no iteration, and guarantees single-pass liquidation.
     pub fn compute_liquidation_close_amount(
         &self,
@@ -1446,8 +1566,8 @@ impl RiskEngine {
             return (0, false);
         }
 
-        // Account equity (may be 0 if underwater)
-        let equity = self.account_equity(account);
+        // MTM equity at oracle price (fail-safe: overflow returns 0 = full liquidation)
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
 
         // Target margin = maintenance + buffer (in basis points)
         let target_bps = self.params.maintenance_margin_bps
@@ -1542,11 +1662,14 @@ impl RiskEngine {
             (entry as i128).saturating_sub(oracle_price as i128)
         };
 
-        let mark_pnl = diff
+        // Fail-safe: on overflow, treat as worst-case loss to avoid wedging liquidation
+        let mark_pnl = match diff
             .checked_mul(close_abs as i128)
-            .ok_or(RiskError::Overflow)?
-            .checked_div(1_000_000)
-            .ok_or(RiskError::Overflow)?;
+            .and_then(|v| v.checked_div(1_000_000))
+        {
+            Some(pnl) => pnl,
+            None => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1631,7 +1754,12 @@ impl RiskEngine {
         let cap_before = self.accounts[idx as usize].capital;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // Liquidation must never wedge on Overflow
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1703,7 +1831,12 @@ impl RiskEngine {
         let cap_before = self.accounts[idx as usize].capital;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // Liquidation must never wedge on Overflow
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
@@ -1714,6 +1847,13 @@ impl RiskEngine {
 
         // Update OI (remove this account's contribution)
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
+
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx as usize].kind == AccountKind::LP {
+            self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
+            // lp_max_abs: can't decrease without full scan, leave as conservative upper bound
+        }
 
         // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
         let mut deferred = DeferredAdl::ZERO;
@@ -1745,7 +1885,15 @@ impl RiskEngine {
                 self.accounts[idx as usize].pnl = 0;
             }
         }
-        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+        // Update warmup markers after pnl change (matching force-close semantics)
+        // This ensures profits from liquidation obey the same warmup clock rules
+        self.update_warmup_slope(idx)?;
+        let effective_slot = if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        };
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -1803,25 +1951,39 @@ impl RiskEngine {
             (entry as i128).saturating_sub(oracle_price as i128)
         };
 
-        let mark_pnl = diff
+        // Fail-safe: on overflow, treat as worst-case loss to avoid wedging liquidation
+        let mark_pnl = match diff
             .checked_mul(close_abs as i128)
-            .ok_or(RiskError::Overflow)?
-            .checked_div(1_000_000)
-            .ok_or(RiskError::Overflow)?;
+            .and_then(|v| v.checked_div(1_000_000))
+        {
+            Some(pnl) => pnl,
+            None => -u128_to_i128_clamped(cap_before),
+        };
 
         // Apply mark PnL to account
         self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(mark_pnl);
 
         // Update position: reduce by close_abs (maintain sign)
         let new_abs_pos = current_abs_pos.saturating_sub(close_abs);
-        self.accounts[idx as usize].position_size = if pos > 0 {
+        let new_pos = if pos > 0 {
             new_abs_pos as i128
         } else {
             -(new_abs_pos as i128)
         };
+        self.accounts[idx as usize].position_size = new_pos;
 
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
+
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx as usize].kind == AccountKind::LP {
+            // Partial close: delta = new_pos - old_pos
+            self.net_lp_pos = self.net_lp_pos
+                .saturating_sub(pos)
+                .saturating_add(new_pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(close_abs);
+            // lp_max_abs: can't decrease without full scan, leave as conservative upper bound
+        }
 
         // DEFERRED: Instead of calling apply_adl_excluding, record profit_to_fund
         let mut deferred = DeferredAdl::ZERO;
@@ -1852,7 +2014,16 @@ impl RiskEngine {
                 self.accounts[idx as usize].pnl = 0;
             }
         }
-        // NOTE: Positive PnL warmup is NOT settled here - leave for user ops or bounded crank step
+
+        // Update warmup markers after pnl change (matching force-close semantics)
+        // This ensures profits from liquidation obey the same warmup clock rules
+        self.update_warmup_slope(idx)?;
+        let effective_slot = if self.warmup_paused {
+            core::cmp::min(self.current_slot, self.warmup_pause_slot)
+        } else {
+            self.current_slot
+        };
+        self.accounts[idx as usize].warmup_started_at_slot = effective_slot;
 
         let cap_after = self.accounts[idx as usize].capital;
 
@@ -1895,7 +2066,12 @@ impl RiskEngine {
         let entry = account.entry_price;
 
         // Compute mark PnL at oracle price
-        let mark_pnl = Self::mark_pnl_for_position(pos, entry, oracle_price)?;
+        // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+        // This ensures we can always close positions without wedging
+        let mark_pnl = match Self::mark_pnl_for_position(pos, entry, oracle_price) {
+            Ok(pnl) => pnl,
+            Err(_) => -u128_to_i128_clamped(self.accounts[idx].capital), // Worst-case: lose all capital
+        };
 
         // Apply mark PnL to account
         self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_add(mark_pnl);
@@ -1906,6 +2082,13 @@ impl RiskEngine {
 
         // Update OI
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
+
+        // Update LP aggregates if this is an LP account (O(1))
+        if self.accounts[idx].kind == AccountKind::LP {
+            self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
+            // lp_max_abs: handled by bounded sweep reset, no action needed here
+        }
 
         // Build deferred ADL result
         let mut deferred = DeferredAdl::ZERO;
@@ -1967,36 +2150,42 @@ impl RiskEngine {
             return Ok(false);
         }
 
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Early gate: no position = nothing to liquidate (avoids expensive touch)
         if self.accounts[idx as usize].position_size == 0 {
             return Ok(false);
         }
 
-        // Settle and check maintenance margin
-        self.touch_account_full(idx, now_slot, oracle_price)?;
+        // Settle funding + best-effort fees (can't block on margin - we're liquidating)
+        self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
-        if self.is_above_maintenance_margin(account, oracle_price) {
+        // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
+        if self.is_above_maintenance_margin_mtm(account, oracle_price) {
             return Ok(false);
         }
 
-        // Compute how much to close (closed-form, single-pass)
+        // Compute how much to close (closed-form, single-pass, using MTM equity)
         let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
             return Ok(false);
         }
 
-        // Close position via appropriate helper
-        // If partial close overflows, fall back to full close (overflow → full close safety)
-        let mut outcome = if is_full_close {
-            self.oracle_close_position_core(idx, oracle_price)?
+        // Close position via deferred helpers (unified semantics: no warmup settle)
+        // This matches crank liquidation behavior - profits stay unwrapped, losses paid from capital
+        let (mut outcome, mut deferred) = if is_full_close {
+            self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
         } else {
-            match self.oracle_close_position_slice_core(idx, oracle_price, close_abs) {
-                Ok(o) => o,
+            match self.oracle_close_position_slice_core_deferred_adl(idx, oracle_price, close_abs) {
+                Ok(r) => r,
                 Err(RiskError::Overflow) => {
                     // Overflow in partial close arithmetic → force full close
-                    self.oracle_close_position_core(idx, oracle_price)?
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?
                 }
                 Err(e) => return Err(e),
             }
@@ -2013,24 +2202,42 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
-                let fallback_outcome = self.oracle_close_position_core(idx, oracle_price)?;
+                let (fallback_outcome, fallback_deferred) =
+                    self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
                 if fallback_outcome.position_was_closed {
-                    // Accumulate closed amount for fee calculation.
-                    // Note: mark_pnl is not accumulated because only abs_pos is used
-                    // downstream (fee calc). PnL routing already happened in each core call.
                     outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
+                    // Accumulate deferred ADL amounts
+                    deferred.profit_to_fund = deferred.profit_to_fund
+                        .saturating_add(fallback_deferred.profit_to_fund);
+                    deferred.unpaid_loss = deferred.unpaid_loss
+                        .saturating_add(fallback_deferred.unpaid_loss);
+                    deferred.excluded = deferred.excluded || fallback_deferred.excluded;
                 }
             }
         }
 
-        // Compute and apply liquidation fee on total closed amount (this IS fee revenue)
+        // Permissionless liquidation: settle ADL immediately (no pending buckets).
+        // Writing to pending buckets would require a crank sweep to clear, which could
+        // wedge withdrawals/warmup/close_account if keeper isn't running.
+        if deferred.profit_to_fund > 0 {
+            self.apply_adl_excluding(deferred.profit_to_fund, idx as usize)?;
+        }
+        if deferred.unpaid_loss > 0 {
+            self.apply_adl(deferred.unpaid_loss)?;
+        }
+
+        // FEE ORDERING INVARIANT: Fee is charged AFTER position close and ADL.
+        // - Fee comes from remaining capital, after any loss has been paid from capital
+        // - Fee can drive capital to 0, but position is already closed so margin doesn't matter
+        // - This ordering means "fee has lower priority than loss payment"
+        // - If fee should have priority, move this before pending accumulation
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
         let fee = core::cmp::min(fee_raw, self.params.liquidation_fee_cap);
 
-        // Pay fee from account capital (capped by available capital)
+        // Pay fee from account capital (capped by available capital - never underflows)
         let account_capital = self.accounts[idx as usize].capital;
         let pay = core::cmp::min(fee, account_capital);
 
@@ -2063,15 +2270,16 @@ impl RiskEngine {
             return Ok((false, DeferredAdl::ZERO));
         }
 
-        // Settle and check maintenance margin
-        self.touch_account_full(idx, now_slot, oracle_price)?;
+        // Settle funding + best-effort fees (can't block on margin - we're liquidating)
+        self.touch_account_for_liquidation(idx, now_slot)?;
 
         let account = &self.accounts[idx as usize];
-        if self.is_above_maintenance_margin(account, oracle_price) {
+        // MTM eligibility: account is liquidatable if MTM equity < maintenance margin
+        if self.is_above_maintenance_margin_mtm(account, oracle_price) {
             return Ok((false, DeferredAdl::ZERO));
         }
 
-        // Compute how much to close
+        // Compute how much to close (using MTM equity)
         let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
@@ -2102,7 +2310,7 @@ impl RiskEngine {
         if remaining_pos != 0 {
             let target_bps = self.params.maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
@@ -2167,20 +2375,20 @@ impl RiskEngine {
     /// Windowed liquidation scan with deferred socialization.
     /// Scans `max_checks` accounts starting from `liq_cursor`, liquidates up to `max_liqs`.
     /// Accumulates profit/loss into pending buckets for bounded socialization.
-    /// Updates cursor to resume from where we left off.
+    /// Window start is defined by caller (crank_step), not by internal cursor.
     /// Returns (num_checked, num_liquidated, num_errors).
     /// If any liquidation returns Err, sets risk_reduction_only = true.
     fn scan_and_liquidate_window(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
+        start: usize,
         max_checks: u16,
         max_liqs: u16,
     ) -> (u16, u16, u16) {
         let mut checked: u16 = 0;
         let mut liquidated: u16 = 0;
         let mut errors: u16 = 0;
-        let start = self.liq_cursor as usize;
         // Cap to MAX_ACCOUNTS to avoid wrap-around
         let actual_checks = (max_checks as usize).min(MAX_ACCOUNTS);
         let epoch = self.pending_epoch;
@@ -2210,6 +2418,7 @@ impl RiskEngine {
             match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
                 Ok((true, deferred)) => {
                     liquidated += 1;
+                    self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
                     // Accumulate into pending buckets (no ADL call)
                     self.pending_profit_to_fund = self
                         .pending_profit_to_fund
@@ -2231,185 +2440,92 @@ impl RiskEngine {
             }
         }
 
-        // Update cursor for next call (always advance by actual_checks)
-        self.liq_cursor = ((start + actual_checks) & ACCOUNT_IDX_MASK) as u16;
-
         (checked, liquidated, errors)
     }
 
-    // ========================================
-    // Top-K Priority Liquidation (global selection + execution)
-    // ========================================
-
-    /// Min-heap comparison: returns true if heap position a < heap position b.
-    /// Uses topk_score for comparison with topk_idx as tie-breaker for determinism.
-    #[inline]
-    fn topk_heap_less(&self, a: usize, b: usize) -> bool {
-        let score_a = self.topk_score[a];
-        let score_b = self.topk_score[b];
-        if score_a != score_b {
-            score_a < score_b
-        } else {
-            // Tie-breaker: lower index wins (determinism)
-            self.topk_idx[a] < self.topk_idx[b]
-        }
-    }
-
-    /// Swap heap entries at positions i and j.
-    #[inline]
-    fn topk_swap(&mut self, i: usize, j: usize) {
-        self.topk_idx.swap(i, j);
-        self.topk_score.swap(i, j);
-    }
-
-    /// Sift up in min-heap (for insertion).
-    #[inline]
-    fn topk_sift_up(&mut self, mut i: usize) {
-        while i > 0 {
-            let parent = (i - 1) / 2;
-            if self.topk_heap_less(i, parent) {
-                self.topk_swap(i, parent);
-                i = parent;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Sift down in min-heap (for replacement).
-    #[inline]
-    fn topk_sift_down(&mut self, mut i: usize, heap_len: usize) {
-        loop {
-            let left = 2 * i + 1;
-            let right = 2 * i + 2;
-            let mut smallest = i;
-
-            if left < heap_len && self.topk_heap_less(left, smallest) {
-                smallest = left;
-            }
-            if right < heap_len && self.topk_heap_less(right, smallest) {
-                smallest = right;
-            }
-
-            if smallest != i {
-                self.topk_swap(i, smallest);
-                i = smallest;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Incremental top-K candidate discovery for a window of accounts.
+    /// Windowed force-realize step: closes positions in the current window when
+    /// insurance is at/below threshold. Bounded to O(WINDOW) work per crank.
     ///
-    /// Scans [start..start+len) (wrapping), inserting candidates into topk_* heap.
-    /// Uses topk_epoch/topk_seen_epoch to avoid duplicate inserts within a sweep.
+    /// Returns (closed_positions, errors).
     ///
-    /// Cost: O(len log K), bounded by WINDOW.
-    ///
-    /// This function does NOT reset the heap - caller must reset at sweep boundary.
-    /// A "wrong" top-K pick is harmless: real liquidation still checks margin.
-    fn topk_build_step(&mut self, oracle_price: u64, start: usize, len: usize) {
-        let epoch = self.topk_epoch;
+    /// This is NOT liquidation - it's a forced unwind of all positions in the window.
+    /// Unpaid losses are accumulated into pending_unpaid_loss for socialization_step
+    /// to handle across subsequent cranks.
+    pub fn force_realize_step_window(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        start: usize,
+        len: usize,
+    ) -> (u16, u16) {
+        // Gate: only active when insurance at/below threshold
+        if !self.force_realize_active() {
+            return (0, 0);
+        }
+
+        // Enter risk reduction mode (idempotent)
+        self.enter_risk_reduction_only_mode();
+
+        let mut closed: u16 = 0;
+        let mut errors: u16 = 0;
+        let mut budget_left = FORCE_REALIZE_BUDGET_PER_CRANK;
 
         for offset in 0..len {
+            // Hard budget: stop scanning when we've done enough work
+            if budget_left == 0 {
+                break;
+            }
+
             let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
-            // Check if slot is used via bitmap
+            // Check if slot is used
             let block = idx >> 6;
             let bit = idx & 63;
             if (self.used[block] & (1u64 << bit)) == 0 {
                 continue;
             }
 
-            // Super cheap early gate
+            // Skip accounts with no position
             if self.accounts[idx].position_size == 0 {
                 continue;
             }
 
-            // Skip if already considered this sweep (epoch deduplication)
-            if self.topk_seen_epoch[idx] == epoch {
+            // Best-effort touch: can't stall on margin checks
+            if self
+                .touch_account_for_force_realize(idx as u16, now_slot)
+                .is_err()
+            {
+                errors += 1;
+                self.risk_reduction_only = true;
                 continue;
             }
 
-            // Compute cheap priority score
-            let score = self.liq_priority_score(&self.accounts[idx], oracle_price);
-            if score == 0 {
-                continue;
-            }
+            // Force-close the position (not liquidation)
+            match self.force_close_position_deferred(idx, oracle_price) {
+                Ok((mark_pnl, deferred)) => {
+                    closed += 1;
+                    budget_left = budget_left.saturating_sub(1);
+                    self.lifetime_force_realize_closes =
+                        self.lifetime_force_realize_closes.saturating_add(1);
 
-            // Mark as seen this epoch
-            self.topk_seen_epoch[idx] = epoch;
-
-            // Insert into heap
-            let heap_len = self.topk_len as usize;
-
-            if heap_len < TOP_LIQ_K {
-                // Heap not full: add directly
-                self.topk_idx[heap_len] = idx as u16;
-                self.topk_score[heap_len] = score;
-                self.topk_len += 1;
-                self.topk_sift_up(heap_len);
-            } else {
-                // Heap full: check if new score beats minimum (root)
-                let root_score = self.topk_score[0];
-
-                if score > root_score {
-                    // Replace root with new candidate
-                    self.topk_idx[0] = idx as u16;
-                    self.topk_score[0] = score;
-                    self.topk_sift_down(0, heap_len);
-                }
-            }
-        }
-    }
-
-    /// Execute liquidations for selected top-K candidates.
-    /// Returns (num_liquidated, num_errors).
-    ///
-    /// Accumulates profit/loss into pending buckets for deferred socialization.
-    /// No global ADL scans - bounded by heap_len.
-    fn run_top_liquidations(
-        &mut self,
-        now_slot: u64,
-        oracle_price: u64,
-        heap_len: usize,
-    ) -> (u16, u16) {
-        if heap_len == 0 {
-            return (0, 0);
-        }
-
-        let mut liquidated: u16 = 0;
-        let mut errors: u16 = 0;
-        let epoch = self.pending_epoch;
-
-        // Process each candidate (order doesn't matter)
-        for i in 0..heap_len {
-            let idx = self.topk_idx[i] as usize;
-
-            // Skip stale entries: account no longer used or position already closed
-            // (heap entries can become stale across multiple cranks within a sweep)
-            if !self.is_used(idx) || self.accounts[idx].position_size == 0 {
-                continue;
-            }
-
-            // Attempt deferred liquidation (does full settlement + margin check)
-            match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
-                Ok((true, deferred)) => {
-                    liquidated += 1;
-                    // Accumulate into pending buckets (no ADL call)
-                    self.pending_profit_to_fund = self
-                        .pending_profit_to_fund
-                        .saturating_add(deferred.profit_to_fund);
+                    // Accumulate unpaid loss into pending bucket
                     self.pending_unpaid_loss = self
                         .pending_unpaid_loss
                         .saturating_add(deferred.unpaid_loss);
-                    // Mark for exclusion from profit-funding
-                    if deferred.excluded {
-                        self.pending_exclude_epoch[idx] = epoch;
+
+                    // Rounding compensation: positive mark_pnl represents "profit"
+                    // that must be funded by others. In force-realize, we treat this
+                    // as additional loss to socialize (matches full force_realize_losses behavior).
+                    if mark_pnl > 0 {
+                        self.pending_unpaid_loss = self
+                            .pending_unpaid_loss
+                            .saturating_add(mark_pnl as u128);
                     }
+
+                    // Note: We ignore deferred.profit_to_fund. Force-realize is batch-close;
+                    // winners are naturally funded by losers, and any mismatch is handled
+                    // via pending_unpaid_loss + socialization_step.
                 }
-                Ok((false, _)) => {} // Not liquidatable (score was heuristic)
                 Err(_) => {
                     errors += 1;
                     self.risk_reduction_only = true;
@@ -2417,7 +2533,10 @@ impl RiskEngine {
             }
         }
 
-        (liquidated, errors)
+        // Recompute warmup insurance reserved (safe, bounded)
+        self.recompute_warmup_insurance_reserved();
+
+        (closed, errors)
     }
 
     // ========================================
@@ -2431,7 +2550,7 @@ impl RiskEngine {
     /// guarantees all accounts are eventually visited.
     ///
     /// Cost: O(len), bounded by WINDOW.
-    fn socialization_step(&mut self, start: usize, len: usize) {
+    pub fn socialization_step(&mut self, start: usize, len: usize) {
         let epoch = self.pending_epoch;
         let effective_slot = self.effective_warmup_slot();
 
@@ -2480,6 +2599,77 @@ impl RiskEngine {
                         self.pending_unpaid_loss.saturating_sub(take);
                 }
             }
+        }
+    }
+
+    /// Finalize pending buckets after window socialization.
+    ///
+    /// This ensures pending_profit_to_fund and pending_unpaid_loss cannot
+    /// remain non-zero forever (which would block withdrawals permanently).
+    ///
+    /// After haircuts from socialization_step:
+    /// 1. Spend insurance (above floor, respecting reserved) to cover remaining
+    /// 2. Move any uncovered remainder to loss_accum and clear pending buckets
+    ///
+    /// This guarantees liveness: pending progress every sweep.
+    fn finalize_pending_after_window(&mut self) {
+        // If nothing pending, early exit
+        if self.pending_profit_to_fund == 0 && self.pending_unpaid_loss == 0 {
+            return;
+        }
+
+        // Spend insurance to cover pending (spendable = above floor, minus reserved)
+        let spendable = self.insurance_spendable_unreserved();
+
+        if spendable > 0 {
+            // First: cover profit funding (profit needs to come from somewhere)
+            if self.pending_profit_to_fund > 0 {
+                let spend_profit = core::cmp::min(spendable, self.pending_profit_to_fund);
+                self.insurance_fund.balance = self
+                    .insurance_fund
+                    .balance
+                    .saturating_sub(spend_profit);
+                self.pending_profit_to_fund = self
+                    .pending_profit_to_fund
+                    .saturating_sub(spend_profit);
+                // Recompute reserved immediately so spendable_after is accurate
+                self.recompute_warmup_insurance_reserved();
+            }
+
+            // Recompute spendable after profit funding (reserved was just updated)
+            let spendable_after = self.insurance_spendable_unreserved();
+
+            // Second: cover unpaid losses
+            if self.pending_unpaid_loss > 0 && spendable_after > 0 {
+                let spend_loss = core::cmp::min(spendable_after, self.pending_unpaid_loss);
+                self.insurance_fund.balance = self
+                    .insurance_fund
+                    .balance
+                    .saturating_sub(spend_loss);
+                self.pending_unpaid_loss = self
+                    .pending_unpaid_loss
+                    .saturating_sub(spend_loss);
+            }
+
+            // Recompute warmup reserved after insurance changes
+            self.recompute_warmup_insurance_reserved();
+        }
+
+        // Handle remaining pending_unpaid_loss: can go to loss_accum (that's what it's for)
+        if self.pending_unpaid_loss > 0 {
+            self.loss_accum = self.loss_accum.saturating_add(self.pending_unpaid_loss);
+            self.pending_unpaid_loss = 0;
+            // Enter risk-reduction mode (uncovered losses exist)
+            self.enter_risk_reduction_only_mode();
+        }
+
+        // Handle remaining pending_profit_to_fund: CANNOT go to loss_accum
+        // Unfunded profits must remain pending to block value extraction.
+        // If we can't fund it, the system is insolvent relative to that credited profit.
+        if self.pending_profit_to_fund > 0 {
+            // Leave pending_profit_to_fund non-zero - this will block withdrawals
+            // via require_no_pending_socialization() until properly funded or admin resolves
+            self.enter_risk_reduction_only_mode();
         }
     }
 
@@ -2577,7 +2767,7 @@ impl RiskEngine {
         }
 
         // Input validation to prevent overflow
-        if oracle_price == 0 || oracle_price > 1_000_000_000_000 {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
@@ -2685,6 +2875,25 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Minimal touch for crank liquidations: funding + maintenance only.
+    /// Skips warmup settlement for performance - losses are handled inline
+    /// by the deferred close helpers, positive warmup left for user ops.
+    fn touch_account_for_crank(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<()> {
+        // 1. Settle funding
+        self.touch_account(idx)?;
+
+        // 2. Settle maintenance fees (may trigger undercollateralized error)
+        self.settle_maintenance_fee(idx, now_slot, oracle_price)?;
+
+        // NOTE: No warmup settlement - handled inline for losses in close helpers
+        Ok(())
+    }
+
     /// Settle funding for all accounts (ensures funding is zero-sum for conservation checks)
     #[cfg(any(test, feature = "fuzz"))]
     pub fn settle_all_funding(&mut self) -> Result<()> {
@@ -2759,6 +2968,11 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
 
@@ -2781,9 +2995,9 @@ impl RiskEngine {
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         // Read account state (scope the borrow)
-        let (old_capital, pnl, position_size) = {
+        let (old_capital, pnl, position_size, entry_price) = {
             let account = &self.accounts[idx as usize];
-            (account.capital, account.pnl, account.position_size)
+            (account.capital, account.pnl, account.position_size, account.entry_price)
         };
 
         // Check we have enough capital
@@ -2791,14 +3005,20 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Calculate new state after withdrawal
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Calculate MTM equity after withdrawal
+        // equity_mtm = max(0, new_capital + pnl + mark_pnl)
+        // Fail-safe: if mark_pnl overflows (corrupted entry_price/position_size), treat as 0 equity
         let new_capital = sub_u128(old_capital, amount);
-        let cap_i = u128_to_i128_clamped(new_capital);
-        let new_eq_i = cap_i.saturating_add(pnl);
-        let new_equity = if new_eq_i > 0 { new_eq_i as u128 } else { 0 };
+        let new_equity_mtm = match Self::mark_pnl_for_position(position_size, entry_price, oracle_price) {
+            Ok(mark_pnl) => {
+                let cap_i = u128_to_i128_clamped(new_capital);
+                let new_eq_i = cap_i.saturating_add(pnl).saturating_add(mark_pnl);
+                if new_eq_i > 0 { new_eq_i as u128 } else { 0 }
+            }
+            Err(_) => 0, // Overflow => worst-case equity => will fail margin check below
+        };
 
-        // If account has position, must maintain initial margin at ORACLE price (not entry price)
+        // If account has position, must maintain initial margin at ORACLE price (MTM check)
         // This prevents withdrawing to a state that's immediately liquidatable
         if position_size != 0 {
             let position_notional = mul_u128(
@@ -2809,7 +3029,7 @@ impl RiskEngine {
             let initial_margin_required =
                 mul_u128(position_notional, self.params.initial_margin_bps as u128) / 10_000;
 
-            if new_equity < initial_margin_required {
+            if new_equity_mtm < initial_margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -2818,10 +3038,10 @@ impl RiskEngine {
         self.accounts[idx as usize].capital = new_capital;
         self.vault = sub_u128(self.vault, amount);
 
-        // Post-withdrawal maintenance margin check at oracle price
+        // Post-withdrawal MTM maintenance margin check at oracle price
         // This is a safety belt to ensure we never leave an account in liquidatable state
         if self.accounts[idx as usize].position_size != 0 {
-            if !self.is_above_maintenance_margin(&self.accounts[idx as usize], oracle_price) {
+            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price) {
                 // Revert the withdrawal
                 self.accounts[idx as usize].capital = old_capital;
                 self.vault = add_u128(self.vault, amount);
@@ -2849,8 +3069,11 @@ impl RiskEngine {
         add_u128(account.capital, clamp_pos_i128(account.pnl))
     }
 
-    /// Calculate account's equity for margin checks: max(0, capital + pnl)
-    /// FIX B: This includes negative PnL in margin calculations.
+    /// Realized-only equity: max(0, capital + realized_pnl).
+    ///
+    /// DEPRECATED for margin checks: Use account_equity_mtm_at_oracle instead.
+    /// This helper is retained for reporting, PnL display, and test assertions that
+    /// specifically need realized-only equity.
     #[inline]
     pub fn account_equity(&self, account: &Account) -> u128 {
         let cap_i = u128_to_i128_clamped(account.capital);
@@ -2858,8 +3081,57 @@ impl RiskEngine {
         if eq_i > 0 { eq_i as u128 } else { 0 }
     }
 
-    /// Check if account is above maintenance margin
-    /// FIX B: Uses equity (includes negative PnL) instead of collateral
+    /// Mark-to-market equity at oracle price (the ONLY correct equity for margin checks).
+    /// equity_mtm = max(0, capital + realized_pnl + mark_pnl(position, entry, oracle))
+    ///
+    /// FAIL-SAFE: On overflow, returns 0 (worst-case equity) to ensure liquidation
+    /// can still trigger. This prevents overflow from blocking liquidation.
+    pub fn account_equity_mtm_at_oracle(&self, account: &Account, oracle_price: u64) -> u128 {
+        let mark = match Self::mark_pnl_for_position(
+            account.position_size,
+            account.entry_price,
+            oracle_price,
+        ) {
+            Ok(m) => m,
+            Err(_) => return 0, // Overflow => worst-case equity
+        };
+        let cap_i = u128_to_i128_clamped(account.capital);
+        let eq_i = cap_i.saturating_add(account.pnl).saturating_add(mark);
+        if eq_i > 0 { eq_i as u128 } else { 0 }
+    }
+
+    /// MTM margin check: is equity_mtm > required margin?
+    /// This is the ONLY correct margin predicate for all risk checks.
+    ///
+    /// FAIL-SAFE: Returns false on any error (treat as below margin / liquidatable).
+    pub fn is_above_margin_bps_mtm(
+        &self,
+        account: &Account,
+        oracle_price: u64,
+        bps: u64,
+    ) -> bool {
+        let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
+
+        // Position value at oracle price
+        let position_value = mul_u128(
+            saturating_abs_i128(account.position_size) as u128,
+            oracle_price as u128,
+        ) / 1_000_000;
+
+        // Margin requirement at given bps
+        let margin_required = mul_u128(position_value, bps as u128) / 10_000;
+
+        equity > margin_required
+    }
+
+    /// MTM maintenance margin check (fail-safe: returns false on overflow)
+    #[inline]
+    pub fn is_above_maintenance_margin_mtm(&self, account: &Account, oracle_price: u64) -> bool {
+        self.is_above_margin_bps_mtm(account, oracle_price, self.params.maintenance_margin_bps)
+    }
+
+    /// Check if account is above maintenance margin (DEPRECATED: uses realized-only equity)
+    /// Use is_above_maintenance_margin_mtm for all margin checks.
     pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
         self.is_above_margin_bps(account, oracle_price, self.params.maintenance_margin_bps)
     }
@@ -2877,7 +3149,8 @@ impl RiskEngine {
             return 0;
         }
 
-        let equity = self.account_equity(a);
+        // MTM equity (fail-safe: overflow returns 0, making account appear liquidatable)
+        let equity = self.account_equity_mtm_at_oracle(a, oracle_price);
 
         let pos_value = mul_u128(
             saturating_abs_i128(a.position_size) as u128,
@@ -2893,8 +3166,10 @@ impl RiskEngine {
         }
     }
 
-    /// Check if account is above a given margin threshold (in basis points).
-    /// Used for both maintenance margin check and post-liquidation target margin check.
+    /// Check if account is above a given margin threshold (DEPRECATED: uses realized-only equity).
+    ///
+    /// Use is_above_margin_bps_mtm for all margin checks. This helper is retained for
+    /// tests that specifically need realized-only margin comparison.
     pub fn is_above_margin_bps(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
         let equity = self.account_equity(account);
 
@@ -2928,6 +3203,11 @@ impl RiskEngine {
         // Validate indices
         if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
             return Err(RiskError::AccountNotFound);
+        }
+
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
         }
 
         // Validate account kinds
@@ -2975,6 +3255,15 @@ impl RiskEngine {
         let exec_price = execution.price;
         let exec_size = execution.size;
 
+        // Validate execution bounds (prevents overflow in mark_pnl calculations)
+        // These are the ACTUAL values that will be used, not the requested values
+        if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if saturating_abs_i128(exec_size) as u128 > MAX_POSITION_ABS {
+            return Err(RiskError::Overflow);
+        }
+
         // Calculate fee
         let notional =
             mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
@@ -3020,6 +3309,13 @@ impl RiskEngine {
         // Calculate new positions
         let new_user_position = user.position_size.saturating_add(exec_size);
         let new_lp_position = lp.position_size.saturating_sub(exec_size);
+
+        // Validate final position bounds (prevents overflow in mark_pnl calculations)
+        if saturating_abs_i128(new_user_position) as u128 > MAX_POSITION_ABS
+            || saturating_abs_i128(new_lp_position) as u128 > MAX_POSITION_ABS
+        {
+            return Err(RiskError::Overflow);
+        }
 
         // Calculate new entry prices
         let mut new_user_entry = user.entry_price;
@@ -3073,36 +3369,48 @@ impl RiskEngine {
             .saturating_sub(fee as i128);
         let new_lp_pnl = lp.pnl.saturating_add(lp_pnl_delta);
 
-        // Check user maintenance margin
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Check user maintenance margin (MTM: includes unrealized mark PnL)
+        // FAIL-SAFE: overflow in mark_pnl => equity=0 => Undercollateralized (not generic Overflow)
         if new_user_position != 0 {
-            let user_cap_i = u128_to_i128_clamped(user.capital);
-            let user_eq_i = user_cap_i.saturating_add(new_user_pnl);
-            let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
+            // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
+            let user_equity_mtm = match Self::mark_pnl_for_position(new_user_position, new_user_entry, oracle_price) {
+                Ok(user_mark) => {
+                    let user_cap_i = u128_to_i128_clamped(user.capital);
+                    let user_eq_i = user_cap_i.saturating_add(new_user_pnl).saturating_add(user_mark);
+                    if user_eq_i > 0 { user_eq_i as u128 } else { 0 }
+                }
+                Err(_) => 0, // Overflow => worst-case equity => will fail margin check
+            };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if user_equity <= margin_required {
+            if user_equity_mtm <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // Check LP maintenance margin
-        // FIX B: Use equity (includes negative PnL) for margin checks
+        // Check LP maintenance margin (MTM: includes unrealized mark PnL)
+        // FAIL-SAFE: overflow in mark_pnl => equity=0 => Undercollateralized (not generic Overflow)
         if new_lp_position != 0 {
-            let lp_cap_i = u128_to_i128_clamped(lp.capital);
-            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl);
-            let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
+            // MTM equity = capital + new_realized_pnl + mark_pnl(new_pos, new_entry, oracle)
+            let lp_equity_mtm = match Self::mark_pnl_for_position(new_lp_position, new_lp_entry, oracle_price) {
+                Ok(lp_mark) => {
+                    let lp_cap_i = u128_to_i128_clamped(lp.capital);
+                    let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl).saturating_add(lp_mark);
+                    if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 }
+                }
+                Err(_) => 0, // Overflow => worst-case equity => will fail margin check
+            };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
             let margin_required =
                 mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
-            if lp_equity <= margin_required {
+            if lp_equity_mtm <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -3133,6 +3441,22 @@ impl RiskEngine {
         } else {
             self.total_open_interest = self.total_open_interest.saturating_sub(old_oi - new_oi);
         }
+
+        // Update LP aggregates for funding/threshold (O(1))
+        let old_lp_abs = saturating_abs_i128(old_lp_pos) as u128;
+        let new_lp_abs = saturating_abs_i128(new_lp_position) as u128;
+        // net_lp_pos: delta = new - old
+        self.net_lp_pos = self.net_lp_pos
+            .saturating_sub(old_lp_pos)
+            .saturating_add(new_lp_position);
+        // lp_sum_abs: delta of abs values
+        if new_lp_abs > old_lp_abs {
+            self.lp_sum_abs = self.lp_sum_abs.saturating_add(new_lp_abs - old_lp_abs);
+        } else {
+            self.lp_sum_abs = self.lp_sum_abs.saturating_sub(old_lp_abs - new_lp_abs);
+        }
+        // lp_max_abs: monotone increase only (conservative upper bound)
+        self.lp_max_abs = self.lp_max_abs.max(new_lp_abs);
 
         // Update warmup slopes after PNL changes
         self.update_warmup_slope(user_idx)?;
@@ -3270,6 +3594,38 @@ impl RiskEngine {
         }
     }
 
+    // ========================================
+    // LP Aggregates (O(1) access for funding/threshold)
+    // ========================================
+
+    /// Net LP position: sum of position_size across all LP accounts.
+    /// Used for inventory-based funding rate calculation.
+    #[inline]
+    pub fn get_net_lp_pos(&self) -> i128 {
+        self.net_lp_pos
+    }
+
+    /// Sum of abs(position_size) across all LP accounts.
+    /// Used for risk threshold calculation.
+    #[inline]
+    pub fn get_lp_sum_abs(&self) -> u128 {
+        self.lp_sum_abs
+    }
+
+    /// Max abs(position_size) across all LP accounts (monotone upper bound).
+    /// May be conservative; only increases, reset via bounded sweep.
+    #[inline]
+    pub fn get_lp_max_abs(&self) -> u128 {
+        self.lp_max_abs
+    }
+
+    /// Compute LP risk units for threshold: max_abs + sum_abs/8.
+    /// This is O(1) using maintained aggregates.
+    #[inline]
+    pub fn compute_lp_risk_units(&self) -> u128 {
+        self.lp_max_abs.saturating_add(self.lp_sum_abs / 8)
+    }
+
     /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
     #[inline]
     pub fn insurance_spendable_unreserved(&self) -> u128 {
@@ -3350,10 +3706,11 @@ impl RiskEngine {
         let _losses_budget = self.warmed_neg_total.saturating_sub(self.warmed_pos_total);
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
-        // NOTE: Caller (e.g., withdraw) checks require_no_pending_socialization()
-        // We don't block here to allow panic_settle_all and deposits to proceed
+        // SAFETY: Block positive conversion while socialization debt is pending
+        // This prevents converting unfunded profit to withdrawable capital
         let pnl = self.accounts[idx as usize].pnl;
         if pnl > 0 && cap > 0 {
+            self.require_no_pending_socialization()?;
             let positive_pnl = pnl as u128;
             let reserved = self.accounts[idx as usize].reserved_pnl;
             let avail = positive_pnl.saturating_sub(reserved);
@@ -3780,11 +4137,25 @@ impl RiskEngine {
     /// Unlike single-account liquidation, global settlement requires multi-phase
     /// processing so ADL can see the full picture of positive PnL before haircutting.
     pub fn panic_settle_all(&mut self, oracle_price: u64) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Panic settle is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
 
         // Always enter risk-reduction-only mode (freezes warmups)
         self.enter_risk_reduction_only_mode();
+
+        // Clear pending socialization buckets - panic does full ADL, superseding incremental
+        self.pending_profit_to_fund = 0;
+        self.pending_unpaid_loss = 0;
+
+        // Reset LP aggregates - all positions will be closed
+        self.net_lp_pos = 0;
+        self.lp_sum_abs = 0;
+        self.lp_max_abs = 0;
 
         // Accumulate total system loss from negative PNL after settlement
         let mut total_loss = 0u128;
@@ -3815,9 +4186,14 @@ impl RiskEngine {
                 }
 
                 // Compute mark PNL at oracle price
+                // Fail-safe: if overflow (corrupted entry/position), treat as worst-case loss = -capital
+                // This ensures panic settle can always complete without wedging
                 let pos = account.position_size;
                 let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl = Self::mark_pnl_for_position(pos, account.entry_price, oracle_price)?;
+                let mark_pnl = match Self::mark_pnl_for_position(pos, account.entry_price, oracle_price) {
+                    Ok(pnl) => pnl,
+                    Err(_) => -u128_to_i128_clamped(account.capital), // Worst-case: lose all capital
+                };
 
                 // Track total mark PNL for rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
@@ -3910,6 +4286,11 @@ impl RiskEngine {
     /// - Mark PnLs are zero-sum (profits are funded by losses in the same batch)
     /// - Only unpaid losses (capital exhausted) need ADL socialization
     pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
+        // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
         // Force realize is a risk-reducing operation
         self.enforce_op(OpClass::RiskReduce)?;
 
@@ -3920,6 +4301,11 @@ impl RiskEngine {
 
         // Enter risk-reduction-only mode (freezes warmups)
         self.enter_risk_reduction_only_mode();
+
+        // Reset LP aggregates - all positions will be closed
+        self.net_lp_pos = 0;
+        self.lp_sum_abs = 0;
+        self.lp_max_abs = 0;
 
         // Track unpaid losses (capital exhausted) and rounding
         let mut unpaid_total: u128 = 0;
