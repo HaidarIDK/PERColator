@@ -158,13 +158,22 @@ pub struct Account {
 
 impl Account {
     /// Check if this account is an LP
+    ///
+    /// WORKAROUND: Due to a known SBF struct layout bug where the `kind` field
+    /// is not correctly written on-chain, we detect LPs by checking if
+    /// matcher_program is non-zero. This is valid because:
+    /// - LPs always have a non-zero matcher_program (set during init_lp)
+    /// - Users always have a zero matcher_program (never set)
     pub fn is_lp(&self) -> bool {
-        self.kind == AccountKind::LP
+        self.matcher_program != [0u8; 32]
     }
 
     /// Check if this account is a regular user
+    ///
+    /// WORKAROUND: Due to a known SBF struct layout bug, we detect users
+    /// by checking if matcher_program is zero (the inverse of is_lp).
     pub fn is_user(&self) -> bool {
-        self.kind == AccountKind::User
+        self.matcher_program == [0u8; 32]
     }
 }
 
@@ -1849,7 +1858,7 @@ impl RiskEngine {
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
         // Update LP aggregates if this is an LP account (O(1))
-        if self.accounts[idx as usize].kind == AccountKind::LP {
+        if self.accounts[idx as usize].is_lp() {
             self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
             self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
             // lp_max_abs: can't decrease without full scan, leave as conservative upper bound
@@ -1976,7 +1985,7 @@ impl RiskEngine {
         self.total_open_interest = self.total_open_interest.saturating_sub(close_abs);
 
         // Update LP aggregates if this is an LP account (O(1))
-        if self.accounts[idx as usize].kind == AccountKind::LP {
+        if self.accounts[idx as usize].is_lp() {
             // Partial close: delta = new_pos - old_pos
             self.net_lp_pos = self.net_lp_pos
                 .saturating_sub(pos)
@@ -2084,7 +2093,7 @@ impl RiskEngine {
         self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
 
         // Update LP aggregates if this is an LP account (O(1))
-        if self.accounts[idx].kind == AccountKind::LP {
+        if self.accounts[idx].is_lp() {
             self.net_lp_pos = self.net_lp_pos.saturating_sub(pos);
             self.lp_sum_abs = self.lp_sum_abs.saturating_sub(abs_pos);
             // lp_max_abs: handled by bounded sweep reset, no action needed here
@@ -3210,11 +3219,11 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Validate account kinds
-        if self.accounts[lp_idx as usize].kind != AccountKind::LP {
+        // Validate account kinds (using is_lp/is_user methods for SBF workaround)
+        if !self.accounts[lp_idx as usize].is_lp() {
             return Err(RiskError::AccountKindMismatch);
         }
-        if self.accounts[user_idx as usize].kind != AccountKind::User {
+        if !self.accounts[user_idx as usize].is_user() {
             return Err(RiskError::AccountKindMismatch);
         }
 
