@@ -398,11 +398,13 @@ pub struct RiskEngine {
     pub pending_unpaid_loss: u128,
 
     /// Epoch for exclusion deduplication (increments each sweep start)
-    pub pending_epoch: u8,
+    /// Bug #7 fix: Changed from u8 to u16 to extend wraparound period to 65536 sweeps
+    pub pending_epoch: u16,
 
     /// Per-account exclusion epoch marker for profit-funding
     /// If pending_exclude_epoch[idx] == pending_epoch, exclude from paying own profit
-    pub pending_exclude_epoch: [u8; MAX_ACCOUNTS],
+    /// Bug #7 fix: Changed from [u8; MAX_ACCOUNTS] to [u16; MAX_ACCOUNTS]
+    pub pending_exclude_epoch: [u16; MAX_ACCOUNTS],
 
     // ========================================
     // Crank Cursors (bounded scan support)
@@ -921,8 +923,12 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // Bug #4 fix: Compute excess payment to credit to user capital
+        let excess = fee_payment.saturating_sub(required_fee);
+
         // Pay fee to insurance (fee tokens are deposited into vault)
-        self.vault = add_u128(self.vault, required_fee);
+        // Account for FULL fee_payment in vault, not just required_fee
+        self.vault = add_u128(self.vault, fee_payment);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
@@ -931,11 +937,11 @@ impl RiskEngine {
         let account_id = self.next_account_id;
         self.next_account_id = self.next_account_id.saturating_add(1);
 
-        // Initialize account
+        // Initialize account with excess credited to capital
         self.accounts[idx as usize] = Account {
             kind: AccountKind::User,
             account_id,
-            capital: 0,
+            capital: excess, // Bug #4 fix: excess goes to user capital
             pnl: 0,
             reserved_pnl: 0,
             warmup_started_at_slot: self.current_slot,
@@ -972,8 +978,12 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // Bug #4 fix: Compute excess payment to credit to LP capital
+        let excess = fee_payment.saturating_sub(required_fee);
+
         // Pay fee to insurance (fee tokens are deposited into vault)
-        self.vault = add_u128(self.vault, required_fee);
+        // Account for FULL fee_payment in vault, not just required_fee
+        self.vault = add_u128(self.vault, fee_payment);
         self.insurance_fund.balance = add_u128(self.insurance_fund.balance, required_fee);
         self.insurance_fund.fee_revenue = add_u128(self.insurance_fund.fee_revenue, required_fee);
 
@@ -982,11 +992,11 @@ impl RiskEngine {
         let account_id = self.next_account_id;
         self.next_account_id = self.next_account_id.saturating_add(1);
 
-        // Initialize account
+        // Initialize account with excess credited to capital
         self.accounts[idx as usize] = Account {
             kind: AccountKind::LP,
             account_id,
-            capital: 0,
+            capital: excess, // Bug #4 fix: excess goes to LP capital
             pnl: 0,
             reserved_pnl: 0,
             warmup_started_at_slot: self.current_slot,
@@ -3348,11 +3358,19 @@ impl RiskEngine {
         }
 
         // Update LP entry price
+        // Bug #8 fix: Always update entry on sign flip, regardless of abs comparison
+        let lp_sign_flip = (lp.position_size > 0 && new_lp_position < 0)
+            || (lp.position_size < 0 && new_lp_position > 0);
+
         if lp.position_size == 0 {
+            new_lp_entry = exec_price;
+        } else if lp_sign_flip && new_lp_position != 0 {
+            // Bug #8 fix: On any sign flip with nonzero new position, use exec_price
             new_lp_entry = exec_price;
         } else if (lp.position_size > 0 && new_lp_position > lp.position_size)
             || (lp.position_size < 0 && new_lp_position < lp.position_size)
         {
+            // Position expanding in same direction: weighted average entry
             let old_notional = mul_u128(
                 saturating_abs_i128(lp.position_size) as u128,
                 lp.entry_price as u128,
@@ -3364,11 +3382,6 @@ impl RiskEngine {
             if total_size != 0 {
                 new_lp_entry = div_u128(total_notional, total_size as u128)? as u64;
             }
-        } else if saturating_abs_i128(lp.position_size) < saturating_abs_i128(new_lp_position)
-            && ((lp.position_size > 0 && new_lp_position < 0)
-                || (lp.position_size < 0 && new_lp_position > 0))
-        {
-            new_lp_entry = exec_price;
         }
 
         // Compute final PNL values
