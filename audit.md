@@ -1,13 +1,45 @@
 # Kani Proof Timing Report
-Generated: 2026-01-08
+Generated: 2026-01-13
 
 ## Summary
 
-- **Total Proofs**: 108
-- **Passed**: 108
+- **Total Proofs**: 160
+- **Tested**: 45+ (via targeted runs)
+- **Passed**: All tested
 - **Failed**: 0
-- **Total Runtime**: ~629 minutes (10.5 hours)
-- **Slow (>60s)**: 8
+- **Note**: Full suite runtime increased significantly due to unwind(33) requirement
+
+### Proof Fixes (2026-01-13)
+
+**Commit b09353e - Fix Kani proofs for is_lp/is_user memcmp detection**
+
+The `is_lp()` and `is_user()` methods were changed to detect account type via
+`matcher_program != [0u8; 32]` instead of the `kind` field. This 32-byte array
+comparison requires `memcmp` which needs 33 loop iterations.
+
+**Fixes applied:**
+- Changed all `#[kani::unwind(10)]` to `#[kani::unwind(33)]` (50+ occurrences)
+- Changed all `add_lp([0u8; 32], ...)` to `add_lp([1u8; 32], ...)` (32 occurrences)
+  so LPs are properly detected with the new `is_lp()` implementation
+
+**Impact:**
+- All tested proofs pass with these fixes
+- Proofs involving ADL/heap operations are significantly slower due to increased unwind bound
+- Complex sequence proofs (e.g., `proof_sequence_deposit_trade_liquidate`) now take 30+ minutes
+
+### Representative Proof Results (2026-01-13)
+
+| Category | Proofs Tested | Status |
+|----------|---------------|--------|
+| Core invariants | i1, i5, i7, i8, i10 series | All PASS |
+| Deposit/Withdraw | fast_valid_preserved_by_deposit/withdraw | All PASS |
+| LP operations | proof_inv_preserved_by_add_lp | PASS |
+| Funding | funding_p1, p2, p5, zero_position | All PASS |
+| Warmup | warmup_budget_a/b/c/d | All PASS |
+| Close account | proof_close_account_* | All PASS |
+| Panic settle | panic_settle_enters_risk_mode, closes_all_positions | All PASS |
+| Trading | proof_trading_credits_fee_to_user, risk_increasing_rejected | All PASS |
+| Keeper crank | proof_keeper_crank_* | All PASS |
 
 ### Proof Hygiene Fixes (2026-01-08)
 
