@@ -1,0 +1,19 @@
+[package]
+name = "percolator-match"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-program = "2.0"
+
+[dev-dependencies]
+# For tests that need std
